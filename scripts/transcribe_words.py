@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Word-by-word transcript at the millisecond level (local, free).
 
-Stage 1 of every edit in the source workflow: "Start by creating a word-by-word
-transcript at the millisecond level". Also used in style training, where every
-reference video gets one so animations can be tied to the exact words they sit on.
+Stage 1 of every edit: a word-by-word transcript with millisecond timings. Also used
+in style training, where every reference video gets one so animations can be tied to
+the exact words they sit on, and for re-listening around a cut (see --start/--end).
 
 Usage:
   python transcribe_words.py <video_or_audio> --out words.json [--language auto|he|en|...]
                              [--model small|medium|large-v3|<path>] [--device cpu|cuda]
+                             [--start S --end S] [--no-vad] [--no-context]
+
+Re-listen mode (finding hidden repeats and clipped word endings around a cut):
+  python transcribe_words.py clip.mp4 --out win.json --start 12.0 --end 16.5 --no-vad --no-context
+  Whisper merges a repeated take into one long word when VAD and context are on; a word
+  that lasts over ~1 s usually hides a first take. Times in the output stay in the
+  clip's own timeline (the window offset is added back).
 
 Output (words.json):
   {"source": ..., "language": "en", "model": ..., "duration_ms": 57400,
@@ -33,9 +40,14 @@ import tempfile
 import time
 
 
-def to_wav(src: str, tmpdir: str) -> str:
+def to_wav(src: str, tmpdir: str, start=None, end=None) -> str:
     dst = os.path.join(tmpdir, "audio16k.wav")
-    cmd = ["ffmpeg", "-v", "error", "-y", "-i", src, "-vn", "-ac", "1", "-ar", "16000", dst]
+    cmd = ["ffmpeg", "-v", "error", "-y"]
+    if start is not None:
+        cmd += ["-ss", f"{start:.3f}"]
+    if end is not None:
+        cmd += ["-to", f"{end:.3f}"]
+    cmd += ["-i", src, "-vn", "-ac", "1", "-ar", "16000", dst]
     subprocess.run(cmd, check=True)
     return dst
 
@@ -55,7 +67,11 @@ def main() -> int:
     ap.add_argument("--model", default="small", help="faster-whisper size or local CT2 folder")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--compute-type", default="int8")
-    ap.add_argument("--no-vad", action="store_true", help="keep sung or very quiet speech")
+    ap.add_argument("--no-vad", action="store_true", help="keep sung or very quiet speech; use when re-listening to cuts")
+    ap.add_argument("--no-context", action="store_true",
+                    help="condition_on_previous_text=False: stops whisper from merging repeated takes")
+    ap.add_argument("--start", type=float, default=None, help="window start in seconds (re-listen mode)")
+    ap.add_argument("--end", type=float, default=None, help="window end in seconds (re-listen mode)")
     args = ap.parse_args()
 
     if shutil.which("ffmpeg") is None:
@@ -69,7 +85,8 @@ def main() -> int:
 
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="stylelab_") as tmp:
-        wav = to_wav(args.source, tmp)
+        wav = to_wav(args.source, tmp, args.start, args.end)
+        off = int(round((args.start or 0) * 1000))
         try:
             model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type,
                                  local_files_only=True)
@@ -80,23 +97,25 @@ def main() -> int:
             return 2
         lang = None if args.language == "auto" else args.language
         segs, info = model.transcribe(wav, language=lang, word_timestamps=True,
-                                      vad_filter=not args.no_vad, beam_size=5)
+                                      vad_filter=not args.no_vad, beam_size=5,
+                                      condition_on_previous_text=not args.no_context)
         words, segments = [], []
         for s in segs:
-            segments.append({"start_ms": int(s.start * 1000), "end_ms": int(s.end * 1000),
+            segments.append({"start_ms": int(s.start * 1000) + off, "end_ms": int(s.end * 1000) + off,
                              "text": s.text.strip()})
             for w in (s.words or []):
                 words.append({"i": len(words), "w": w.word.strip(),
-                              "start_ms": int(round(w.start * 1000)),
-                              "end_ms": int(round(w.end * 1000)),
+                              "start_ms": int(round(w.start * 1000)) + off,
+                              "end_ms": int(round(w.end * 1000)) + off,
                               "p": round(float(w.probability), 3)})
-            print(f"[{s.start:7.2f}] {s.text.strip()}", flush=True)
+            print(f"[{s.start + off / 1000:7.2f}] {s.text.strip()}", flush=True)
         dur = probe_duration_ms(wav)
 
     out = {"source": os.path.abspath(args.source), "language": info.language,
            "language_forced": lang is not None, "model": args.model,
            "duration_ms": dur, "word_count": len(words),
            "low_confidence": [w["i"] for w in words if w["p"] < 0.5],
+           "window_s": [args.start, args.end] if (args.start is not None or args.end is not None) else None,
            "words": words, "segments": segments,
            "elapsed_s": round(time.time() - t0, 1)}
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or ".", exist_ok=True)

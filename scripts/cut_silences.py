@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Cut every silence, leaving N ms of padding (default 30 ms), from a word transcript.
 
-Stage 2 of every edit in the source workflow: "cut out all silences leaving
-30 milliseconds of padding". Produces the edit-ready clip AND a remapped word
-transcript whose timings match the new clip, so the plan document, captions and
-animations all line up with the cut (never with the raw file).
+Stage 2 of every edit: remove the silences between words, keeping a small pad
+(30 ms = very tight and punchy; 100-150 ms = natural talking pace). Produces the
+edit-ready clip AND a remapped word transcript whose timings match the new clip, so
+the plan document, captions and animations all line up with the cut (never with the
+raw file). Every join gets a 15 ms audio fade so cuts never click.
 
 Usage:
   python cut_silences.py <raw_video> --words words.json --out edit_ready.mp4
@@ -17,7 +18,7 @@ Writes next to --out:
 Rules:
 - A word is kept from (start - pad) to (end + pad); overlapping ranges merge, so a
   gap is removed only when it is longer than 2 x pad (+ --min-gap-ms).
-- --drop removes listed filler words entirely (off by default: the source only cuts silence).
+- --drop removes listed filler words entirely (off by default: only silence is cut).
 - Video and audio are cut with the same ranges in one ffmpeg graph and re-encoded
   (frame-accurate; stream copy would snap to keyframes).
 """
@@ -204,7 +205,7 @@ def main() -> int:
         return 0
 
     parts, labels = [], []
-    fd = 0.015  # 15 ms fade at every join so no cut clicks (owner 2026-11-04: "everything smooth")
+    fd = 0.015  # 15 ms fade at every join so no cut clicks
     for k, (a, b) in enumerate(ranges):
         s, e = a / 1000, b / 1000
         fades = (f",afade=t=in:d={fd}" if k else "") + \

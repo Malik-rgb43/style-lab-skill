@@ -49,9 +49,19 @@ To edit a clip in this style, follow style-lab phase B (B1–B6) with this skill
 - <e.g. Announce a new idea on the face; describe it with a visual.>
 - <Opening: …> <Ending: …> <Rhythm: a cut-away every ~N s; never two of the same category back to back …>
 
+## Way of thinking (how a beat is designed in this style)
+<3-6 short principles, e.g. "the visual is a metaphor for the point, not the noun";
+"show the real tool working"; "one idea per beat, never repeated". See style-lab
+references/craft-rules.md for the general ones; write only what is specific here.>
+
 ## Sound profile
 - Music: <feel, level under voice in LUFS or dB>
 - Effects: <text appear → click; line/graph draw → marker; transition → whoosh; …>, density ≈ <n per minute>
+
+## Review-round rules (added after each round)
+<Numbered, dated. A note the owner gave twice becomes a rule here and applies to every
+video in this style. Example: "R3.1 Every B-roll element enters from outside the frame and
+leaves past the edge (2026-11-06)".>
 
 ## Known gaps
 <what the references did not show enough of; what to ask the user>

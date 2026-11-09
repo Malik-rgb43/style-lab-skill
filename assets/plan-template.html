@@ -1,114 +1,244 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Edit Plan</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:ital,wght@1,500;1,600&family=Heebo:wght@400;500;700;800&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Karantina:wght@400;700&family=Heebo:wght@300;400;500;600;700;800&display=swap">
 <style>
-/* Layout: a working document. Header card, beat timeline, then one card per beat:
-   plan + three design options on the left, script / clip / "seen in the reels" on the right. */
+/* Course brand tokens ("וידאו עם AI"): Karantina 700 headlines, Heebo body (-0.04em), Consolas code;
+   white / black / violet. Light by default, dark by system setting or the theme button. */
 :root{
-  --ground:#e9ebef; --paper:#fbfbfc; --panel:#f3f4f7; --ink:#111216; --muted:#6a6f7a; --line:#dfe2e8;
-  --accent:#2f9bf0; --accent-soft:#e3f1fd; --accent-ink:#0f6fbf;
-  --a-roll:#d9dbe1; --overlay:#a9d6fb; --cutaway:#2f9bf0;
-  --sans:"Inter","Heebo",system-ui,-apple-system,"Segoe UI",sans-serif;
-  --serif:"Playfair Display",Georgia,"Times New Roman",serif;
-  --r:16px;
+  --bg:#ffffff; --bg2:#f5f5f5; --surface:#ffffff; --surface2:#f7f7f8; --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.14);
+  --fg:#000000; --muted:#555555; --dim:#959595;
+  --accent:#7c5cff; --accent-hi:#9a82ff; --accent-text:#5b3fe0; --accent-ink:#ffffff; --accent-soft:#ece8ff;
+  --ok:#0b8a56; --danger:#d93a55; --note:#b07800; --callout:#d93a55;
+  --shadow:0 10px 30px rgba(0,0,0,.08); --glow:none;
+  --display:"Karantina","Heebo",system-ui,sans-serif; --body:"Heebo",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,Consolas,"Courier New",monospace;
+  color-scheme:light;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
-  --ground:#0f1013; --paper:#17191e; --panel:#1e2128; --ink:#eef0f4; --muted:#9aa1ad; --line:#2a2e37;
-  --accent:#4aa9f5; --accent-soft:#16304a; --accent-ink:#8ccaff; --a-roll:#3a3f4a; --overlay:#2c5f8c; --cutaway:#4aa9f5; color-scheme:dark}}
+  --bg:#0b0910; --bg2:#110e18; --surface:#17131f; --surface2:#1e1929; --line:rgba(237,233,255,.09); --line2:rgba(237,233,255,.16);
+  --fg:#f4f1fb; --muted:#aba4bf; --dim:#7e7791;
+  --accent-text:#b8a8ff; --accent-soft:rgba(124,92,255,.16); --ok:#5cffb0; --danger:#ff7a90; --note:#ffc94d; --callout:#ff7a90;
+  --shadow:0 18px 40px -24px rgba(0,0,0,.8); --glow:radial-gradient(80% 60% at 50% 0%,rgba(124,92,255,.22),transparent 70%);
+  color-scheme:dark}}
 :root[data-theme="dark"]{
-  --ground:#0f1013; --paper:#17191e; --panel:#1e2128; --ink:#eef0f4; --muted:#9aa1ad; --line:#2a2e37;
-  --accent:#4aa9f5; --accent-soft:#16304a; --accent-ink:#8ccaff; --a-roll:#3a3f4a; --overlay:#2c5f8c; --cutaway:#4aa9f5; color-scheme:dark}
+  --bg:#0b0910; --bg2:#110e18; --surface:#17131f; --surface2:#1e1929; --line:rgba(237,233,255,.09); --line2:rgba(237,233,255,.16);
+  --fg:#f4f1fb; --muted:#aba4bf; --dim:#7e7791;
+  --accent-text:#b8a8ff; --accent-soft:rgba(124,92,255,.16); --ok:#5cffb0; --danger:#ff7a90; --note:#ffc94d; --callout:#ff7a90;
+  --shadow:0 18px 40px -24px rgba(0,0,0,.8); --glow:radial-gradient(80% 60% at 50% 0%,rgba(124,92,255,.22),transparent 70%);
+  color-scheme:dark}
 *{box-sizing:border-box}
-body{background:var(--ground);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;
-  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:28px 64px}
-.wrap{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
-.card{background:var(--paper);border-radius:22px;padding:clamp(18px,3vw,36px);box-shadow:0 1px 0 var(--line),0 18px 40px -28px rgba(10,20,40,.35)}
-h1{font-size:clamp(30px,5vw,58px);font-weight:700;letter-spacing:-.035em;line-height:1.02;margin:0;text-wrap:balance}
-h1 em{font-family:var(--serif);font-style:italic;font-weight:500;color:var(--accent);letter-spacing:-.01em}
-.meta{display:flex;flex-wrap:wrap;gap:6px 26px;margin-top:16px;color:var(--muted)}
-.meta b{color:var(--ink);font-weight:600;margin-right:6px}
-.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:20px;align-items:center}
-.pill{background:var(--accent-soft);color:var(--accent-ink);border-radius:999px;padding:9px 18px;font-weight:500}
-.btn{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:12px;padding:9px 18px;cursor:pointer}
+[hidden]{display:none!important}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);background-image:var(--glow),linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:100% 600px,32px 32px,32px 32px;background-repeat:no-repeat,repeat,repeat;
+  color:var(--fg);font-family:var(--body);letter-spacing:-.04em;font-size:15px;line-height:1.55}
+h1,h2,h3,.display{font-family:var(--display);font-weight:700;letter-spacing:0;line-height:1}
+code,kbd,.mono{font-family:var(--mono);letter-spacing:0}
+.on-accent{background:var(--accent);color:var(--accent-ink);font-family:var(--display);font-weight:700;letter-spacing:0;border-radius:10px;padding:0 .22em .06em}
+button,input,textarea,select{font:inherit;letter-spacing:inherit;color:inherit}
+.btn{font-weight:600;border:1px solid var(--line2);background:var(--surface);color:var(--fg);border-radius:12px;padding:8px 16px;cursor:pointer}
 .btn:hover{border-color:var(--accent)}
-.btn:focus-visible,.opt:focus-visible,textarea:focus-visible,.seg:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-.eyebrow{font-size:12px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:26px 0 10px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-family:var(--display);font-weight:700;letter-spacing:0;font-size:20px;line-height:1.1;padding:6px 18px 8px}
+.btn.ok{color:var(--ok);border-color:var(--ok)}
+:focus-visible{outline:2px solid var(--accent-hi);outline-offset:2px}
+textarea,input[type=text]{width:100%;background:var(--surface);border:1px solid var(--line2);border-radius:12px;padding:10px 12px}
+.theme-btn{position:fixed;inset-block-start:12px;inset-inline-end:12px;z-index:20;border-radius:999px;padding:6px 12px;font-size:13px}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+/* Layout: a working document. Header card, beat timeline, then one card per beat:
+   plan + three design options on one side, script / clip / "seen in the references" on the other. */
+:root{--a-roll:#d9d9de;--overlay:#c9bcff;--cutaway:#7c5cff;--r:16px}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--a-roll:#3a3346;--overlay:#4a3a99;--cutaway:#7c5cff}}
+:root[data-theme="dark"]{--a-roll:#3a3346;--overlay:#4a3a99;--cutaway:#7c5cff}
+body{padding-inline:max(16px,env(safe-area-inset-left,0px));padding-block:28px 64px}
+.wrap{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+.card{background:var(--surface);border:1px solid var(--line2);border-radius:22px;padding:clamp(18px,3vw,36px);box-shadow:var(--shadow)}
+h1{font-size:clamp(48px,7vw,86px);margin:0;text-wrap:balance}
+.meta{display:flex;flex-wrap:wrap;gap:6px 26px;margin-top:16px;color:var(--muted)}
+.meta b{color:var(--fg);font-weight:600;margin-inline-end:6px}
+.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:20px;align-items:center}
+.pill{background:var(--accent-soft);color:var(--accent-text);border-radius:999px;padding:8px 16px;font-weight:500}
+.eyebrow{font-family:var(--display);font-size:26px;color:var(--accent-text);margin:26px 0 10px}
 .timeline{display:flex;gap:3px;height:52px}
-.seg{border:0;border-radius:6px;color:#fff;font:inherit;font-weight:600;cursor:pointer;min-width:18px;display:grid;place-items:center;overflow:hidden}
-.seg.a-roll{background:var(--a-roll);color:var(--ink)} .seg.overlay{background:var(--overlay);color:var(--ink)} .seg.cutaway{background:var(--cutaway)}
+.seg{border:0;border-radius:8px;color:#fff;font-family:var(--display);font-size:22px;cursor:pointer;min-width:18px;display:grid;place-items:center;overflow:hidden}
+.seg.a-roll{background:var(--a-roll);color:var(--fg)} .seg.overlay{background:var(--overlay);color:var(--fg)} .seg.cutaway{background:var(--cutaway)}
 .ticks{display:flex;justify-content:space-between;color:var(--muted);font-size:13px;margin-top:8px;font-variant-numeric:tabular-nums}
 .legend{display:flex;flex-wrap:wrap;gap:18px;margin-top:14px;color:var(--muted);font-size:14px}
-.legend span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:8px;vertical-align:-1px;background:var(--c)}
+.legend span::before{content:"";display:inline-block;width:12px;height:12px;border-radius:4px;margin-inline-end:8px;vertical-align:-1px;background:var(--c)}
 .beat{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:0;padding:0;overflow:hidden}
-.beat .l{padding:clamp(18px,2.6vw,32px)} .beat .r{background:var(--panel);padding:clamp(18px,2.6vw,32px);display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-content:start}
+.beat .l{padding:clamp(18px,2.6vw,32px)} .beat .r{background:var(--surface2);padding:clamp(18px,2.6vw,32px);display:grid;grid-template-columns:minmax(0,1fr);gap:18px;align-content:start;border-inline-start:1px solid var(--line)}
 .bh{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px 20px;align-items:baseline}
-.bh h2{margin:0;font-size:28px;letter-spacing:-.02em}
-.bh h2 small{font-size:17px;font-weight:400;color:var(--muted);margin-left:10px;font-variant-numeric:tabular-nums}
-.chosen{color:var(--accent);font-weight:600}
-textarea{width:100%;margin-top:16px;min-height:74px;resize:vertical;font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.bh h2{margin:0;font-size:44px}
+.bh h2 small{font-family:var(--body);font-size:16px;font-weight:400;color:var(--muted);margin-inline-start:10px;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.chosen{color:var(--accent-text);font-weight:600}
+.beat textarea{margin-top:16px;min-height:74px;resize:vertical;border-radius:14px;padding:14px 16px}
 .opts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-.opt{border:1.5px solid var(--line);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:10px;background:var(--paper)}
-.opt.on{border-color:var(--accent);background:linear-gradient(var(--accent-soft),var(--paper) 70%);box-shadow:0 10px 28px -18px var(--accent)}
-.thumb{aspect-ratio:9/16;max-width:100%;border-radius:10px;background:var(--panel) center/cover no-repeat;max-height:240px}
-.opt h3{margin:0;font-size:15.5px;line-height:1.25}
-.cat{color:var(--accent);font-size:13px}
-.desc{font-size:13.5px;color:var(--ink);opacity:.86}
-.ref{font-size:12.5px;color:var(--muted)}
+.opt{border:1.5px solid var(--line2);border-radius:var(--r);padding:12px;display:flex;flex-direction:column;gap:10px;background:var(--surface)}
+.opt.on{border-color:var(--accent);background:linear-gradient(var(--accent-soft),var(--surface) 70%);box-shadow:0 10px 28px -18px var(--accent)}
+.thumb{aspect-ratio:9/16;max-width:100%;border-radius:10px;background:var(--surface2) center/cover no-repeat;max-height:240px;border:1px solid var(--line)}
+.opt h3{margin:0;font-size:26px}
+.cat{color:var(--accent-text);font-size:13px}
+.desc{font-size:13.5px}
+.ref{font-size:12.5px;color:var(--muted);font-family:var(--mono)}
 .ob{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}
-.mypick{border:1.5px solid var(--accent);color:var(--accent);border-radius:999px;padding:4px 12px;font-size:13px;font-weight:600}
-.use{font:inherit;font-size:13px;font-weight:600;border-radius:999px;padding:5px 14px;border:1.5px solid var(--line);background:var(--paper);color:var(--ink);cursor:pointer}
-.opt.on .use{background:var(--accent);border-color:var(--accent);color:#fff}
-.lab{font-size:12px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
-.script{font-size:21px;line-height:1.35;letter-spacing:-.01em;margin-top:6px}
+.mypick{background:var(--accent);color:var(--accent-ink);font-family:var(--display);font-size:18px;letter-spacing:0;border-radius:999px;padding:2px 12px 4px}
+.use{font-size:13px;font-weight:600;border-radius:999px;padding:5px 14px;border:1.5px solid var(--line2);background:var(--surface);color:var(--fg);cursor:pointer}
+.opt.on .use{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.lab{font-family:var(--display);font-size:22px;color:var(--muted)}
+.script{font-size:21px;line-height:1.35;margin-top:4px}
 video{width:100%;max-width:280px;aspect-ratio:9/16;border-radius:16px;background:#000;display:block}
 .seen{font-size:14.5px}
-.cam{color:var(--accent);font-size:14px;margin-top:8px}
+.cam{color:var(--accent-text);font-size:14px;margin-top:8px}
 .example{font-size:13px;color:var(--muted)}
-@media (max-width:900px){.beat{grid-template-columns:minmax(0,1fr)}.opts{grid-template-columns:minmax(0,1fr)}.thumb{max-height:320px;width:180px}}
-@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+@media (max-width:900px){.beat{grid-template-columns:minmax(0,1fr)}.beat .r{border-inline-start:0;border-top:1px solid var(--line)}.opts{grid-template-columns:minmax(0,1fr)}.thumb{max-height:320px;width:180px}}
 html{scroll-behavior:smooth}
 </style>
-
+</head>
+<body>
 <div class="wrap" id="app"></div>
 
 <!-- Claude fills this block. Times are in seconds on the EDIT-READY clip (after silence cuts).
      scene_type: "a-roll" (A-roll + captions) | "overlay" (overlay on A-roll) | "cutaway" (cut-away scene).
-     thumb: path to the reference still published next to this page (library/<folder>/still.png → thumbs/<id>.jpg). -->
+     thumb: path to the reference still published next to this page (library/<folder>/still.png -> thumbs/<id>.jpg). -->
 <script type="application/json" id="plan-data">
 {
-  "example": true,
-  "title": "Four habits",
-  "clip": {"file": "clip.mp4", "name": "example-edit-ready-9x16.mp4", "length_s": 21.0},
-  "source": "Example talking-head clip",
-  "style": "Minimal premium",
-  "beats": [
-    {"n":1,"start":0.0,"end":2.4,"script":"There are four habits that decide how your week goes.",
-     "seen":"A framework named in the first line gets its number big and centred, the way the references open a list.","camera":"Camera: medium shot 0–6.1 s.",
-     "pick":"A","options":[
-      {"key":"A","title":"Justified number on A-roll","category":"On-Screen Text (Captions)","scene_type":"a-roll","desc":"\"four\" big and bold, \"habits\" as a light line under it, the rest small.","ref":"V03-A01","thumb":""},
-      {"key":"B","title":"Four faint shapes preview","category":"Graphs + Visual Representations","scene_type":"cutaway","desc":"Paper background, four thin outlines side by side; each one returns later for its habit.","ref":"V07-A02","thumb":""},
-      {"key":"C","title":"Chapter card \"4\"","category":"Side Illustration + Text","scene_type":"cutaway","desc":"Big \"4\" with a small tag under it, soft blue glow on the left edge.","ref":"V11-A04","thumb":""}]},
-    {"n":2,"start":2.4,"end":7.9,"script":"The first one is the easiest: you plan tomorrow before you sleep.","seen":"A concrete action gets one literal b-roll shot with a caption over it.","camera":"Camera: medium shot.",
-     "pick":"B","options":[
-      {"key":"A","title":"Line through the day","category":"Line + Text Animations","scene_type":"cutaway","desc":"Thick azure line draws left to right under \"plan tomorrow\".","ref":"V05-A03","thumb":""},
-      {"key":"B","title":"Notebook b-roll + caption","category":"B-roll + Text + Overlay","scene_type":"cutaway","desc":"Hand writing in a notebook at night; caption in the light/bold pair over the darkened lower third.","ref":"V12-A06","thumb":""},
-      {"key":"C","title":"Stay on A-roll","category":"On-Screen Text (Captions)","scene_type":"a-roll","desc":"Captions only; \"easiest\" in italic serif.","ref":"V02-A05","thumb":""}]},
-    {"n":3,"start":7.9,"end":12.6,"script":"Most people skip it, and that is why Monday feels heavy.","seen":"A soft emotional line sits on A-roll with a gentle push-in.","camera":"Camera: slow push-in.",
-     "pick":"A","options":[
-      {"key":"A","title":"Overlay word on A-roll","category":"On-Screen Text (Captions)","scene_type":"overlay","desc":"\"heavy\" drops in as the bold word with a slight weight bounce.","ref":"V09-A02","thumb":""},
-      {"key":"B","title":"Painting pair","category":"Imagery / Characters + Text","scene_type":"cutaway","desc":"Public-domain painting of a tired figure, paper texture, caption over it.","ref":"V15-A01","thumb":""},
-      {"key":"C","title":"Pondering character","category":"Center Illustration + Text","scene_type":"cutaway","desc":"Blue silhouette on paper, text above.","ref":"V06-A04","thumb":""}]}
-  ]
+ "example": true,
+ "title": "שלושה הרגלים",
+ "clip": {
+  "file": "clip.mp4",
+  "name": "example-edit-ready-9x16.mp4",
+  "length_s": 21.0
+ },
+ "source": "קליפ דובר לדוגמה",
+ "style": "סגנון לדוגמה",
+ "beats": [
+  {
+   "n": 1,
+   "start": 0.0,
+   "end": 2.4,
+   "script": "יש שלושה הרגלים שקובעים איך יעבור עליכם השבוע.",
+   "seen": "רשימה שמוכרזת במשפט הראשון נפתחת על הפנים, ואז ויזואל אחד חזק (חוק 4: להוק מגיע ביט אחד, לא ערימה).",
+   "camera": "מצלמה: שוט בינוני 0-6.1 שנ'.",
+   "pick": "A",
+   "options": [
+    {
+     "key": "A",
+     "title": "מספר גדול על הפנים",
+     "category": "כתוביות על המסך",
+     "scene_type": "a-roll",
+     "desc": "\"3\" גדול בפונט הכותרות, \"הרגלים\" כשורה דקה מתחתיו.",
+     "ref": "V03-A01",
+     "thumb": ""
+    },
+    {
+     "key": "B",
+     "title": "שלושה פתקי נייר נופלים",
+     "category": "אנימציית נייר",
+     "scene_type": "overlay",
+     "desc": "שלושה פתקים נופלים מעל הפריים ונוחתים בקפיצה קטנה; כל אחד חוזר אחר כך להרגל שלו.",
+     "ref": "V07-A02",
+     "thumb": ""
+    },
+    {
+     "key": "C",
+     "title": "כרטיס פרק",
+     "category": "כותרות",
+     "scene_type": "cutaway",
+     "desc": "רקע גריד בהיר, כרטיס עם \"3\" מחליק פנימה מימין.",
+     "ref": "V11-A04",
+     "thumb": ""
+    }
+   ]
+  },
+  {
+   "n": 2,
+   "start": 2.4,
+   "end": 7.9,
+   "script": "הראשון הכי קל: מתכננים את מחר לפני שהולכים לישון.",
+   "seen": "פעולה מוחשית מקבלת את הדבר האמיתי עובד: אפליקציית יומן אמיתית שהסמן מוסיף בה פריט.",
+   "camera": "מצלמה: פוש־אין איטי על הממשק.",
+   "pick": "B",
+   "options": [
+    {
+     "key": "A",
+     "title": "להישאר על הפנים",
+     "category": "כתוביות על המסך",
+     "scene_type": "a-roll",
+     "desc": "רק כתוביות; \"הכי קל\" בפונט הכותרות.",
+     "ref": "V02-A05",
+     "thumb": ""
+    },
+    {
+     "key": "B",
+     "title": "ממשק יומן שעובד",
+     "category": "ממשק אמיתי שעובד",
+     "scene_type": "overlay",
+     "desc": "חלון יומן נכנס מימין, הסמן לוחץ על מחר, הפריט מוקלד אות אחר אות.",
+     "ref": "V12-A06",
+     "thumb": ""
+    },
+    {
+     "key": "C",
+     "title": "מטאפורה: ירח מעל רשימה",
+     "category": "אובייקט מטאפורה",
+     "scene_type": "cutaway",
+     "desc": "ירח מנייר עולה מאחורי כרטיס רשימה; רק אם הסגנון מרשה אובייקטים.",
+     "ref": "V05-A03",
+     "thumb": ""
+    }
+   ]
+  },
+  {
+   "n": 3,
+   "start": 7.9,
+   "end": 12.6,
+   "script": "רוב האנשים מדלגים על זה, ובגלל זה יום ראשון מרגיש כבד.",
+   "seen": "משפט רגשי נשאר על הפנים (מכריזים על הפנים, מראים כשמתארים).",
+   "camera": "מצלמה: פנים מלאות, פוש־אין איטי.",
+   "pick": "A",
+   "options": [
+    {
+     "key": "A",
+     "title": "מילת מפתח על הפנים",
+     "category": "כתוביות על המסך",
+     "scene_type": "a-roll",
+     "desc": "\"כבד\" נופלת כמילת המפתח עם קפיצת משקל קטנה.",
+     "ref": "V09-A02",
+     "thumb": ""
+    },
+    {
+     "key": "B",
+     "title": "משקולת נוחתת על כרטיס",
+     "category": "אובייקט מטאפורה",
+     "scene_type": "overlay",
+     "desc": "משקולת נייר נוחתת על כרטיס \"יום ראשון\", שמתכופף מתחתיה.",
+     "ref": "V15-A01",
+     "thumb": ""
+    },
+    {
+     "key": "C",
+     "title": "עיגול אדום סביב הראש",
+     "category": "הדגשה",
+     "scene_type": "overlay",
+     "desc": "עיגול מכחול אדום, מותאם לתיבת הפנים, מצטייר במשך 0.8 שנ'.",
+     "ref": "V06-A04",
+     "thumb": ""
+    }
+   ]
+  }
+ ]
 }
 </script>
-
 <script>
 (function(){
   const data = JSON.parse(document.getElementById('plan-data').textContent);
   const KEY = 'plan:' + data.title + ':' + (data.clip && data.clip.name);
-  const SCENE = {"a-roll":"A-roll + captions","overlay":"Overlay on A-roll","cutaway":"Cut-away scene"};
+  const SCENE = {"a-roll":"פנים + כתוביות","overlay":"שכבה מעל הפנים","cutaway":"סצנה מלאה (קאט־אווי)"};
   let state = {};
   try { state = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch(e) { state = {}; }
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch(e) {} };
@@ -122,20 +252,20 @@ html{scroll-behavior:smooth}
   const head = document.createElement('section');
   head.className = 'card';
   head.innerHTML = `
-    <h1 dir="auto">${esc(data.title)} <em>edit plan</em></h1>
+    <h1 dir="auto"><span class="on-accent">תוכנית עריכה</span> ${esc(data.title)}</h1>
     <div class="meta">
-      <span><b>Clip</b>${esc(data.clip.name)}</span>
-      <span><b>Length</b>${total.toFixed(1)} s · ${data.beats.length} beats</span>
-      <span><b>Source</b>${esc(data.source)}</span>
-      <span><b>Style</b>${esc(data.style)}</span>
+      <span><b>קליפ</b><span dir="ltr">${esc(data.clip.name)}</span></span>
+      <span><b>אורך</b>${total.toFixed(1)} שנ' · ${data.beats.length} ביטים</span>
+      <span><b>מקור</b>${esc(data.source)}</span>
+      <span><b>סגנון</b>${esc(data.style)}</span>
     </div>
-    ${data.example ? '<p class="example">Example plan: replace this data block with the real beats.</p>' : ''}
-    <div class="actions"><span class="pill">Plan saves automatically</span>
-      <button class="btn" id="copy" type="button">⧉ Copy Plan</button></div>
-    <div class="eyebrow">Beat timeline — my suggested picks</div>
-    <div class="timeline" id="tl"></div>
-    <div class="ticks"><span>0 s</span><span>${Math.round(total/2)} s</span><span>${Math.round(total)} s</span></div>
-    <div class="legend"><span style="--c:var(--a-roll)">A-roll + captions</span><span style="--c:var(--overlay)">Overlay on A-roll</span><span style="--c:var(--cutaway)">Cut-away scene</span></div>`;
+    ${data.example ? '<p class="example">תוכנית לדוגמה: Claude מחליף את בלוק הנתונים בביטים האמיתיים.</p>' : ''}
+    <div class="actions"><span class="pill">התוכנית נשמרת אוטומטית בדפדפן</span>
+      <button class="btn primary" id="copy" type="button">העתקת התוכנית</button></div>
+    <div class="eyebrow">ציר הביטים: ההמלצות שלי</div>
+    <div class="timeline" id="tl" dir="ltr"></div>
+    <div class="ticks" dir="ltr"><span>0 s</span><span>${Math.round(total/2)} s</span><span>${Math.round(total)} s</span></div>
+    <div class="legend"><span style="--c:var(--a-roll)">${SCENE['a-roll']}</span><span style="--c:var(--overlay)">${SCENE.overlay}</span><span style="--c:var(--cutaway)">${SCENE.cutaway}</span></div>`;
   app.appendChild(head);
 
   function drawTimeline(){
@@ -144,7 +274,7 @@ html{scroll-behavior:smooth}
       const o = optOf(b, chosenOf(b));
       const s = document.createElement('button');
       s.type = 'button'; s.className = 'seg ' + o.scene_type; s.style.flex = String(Math.max(.4, b.end - b.start));
-      s.textContent = b.n; s.title = `Beat ${b.n} · ${o.title}`;
+      s.textContent = b.n; s.title = `ביט ${b.n} · ${o.title}`;
       s.onclick = () => document.getElementById('beat-' + b.n).scrollIntoView({block:'start'});
       tl.appendChild(s);
     });
@@ -155,23 +285,23 @@ html{scroll-behavior:smooth}
     sec.className = 'card beat'; sec.id = 'beat-' + b.n;
     sec.innerHTML = `
       <div class="l">
-        <div class="bh"><h2>Beat ${b.n}<small>${fmt(b.start)} – ${fmt(b.end)}</small></h2><span class="chosen" data-chosen></span></div>
-        <textarea id="note-${b.n}" dir="auto" placeholder="Write your plan for this beat — or pick a design below and edit it."></textarea>
-        <div class="eyebrow">Design options</div>
+        <div class="bh"><h2>ביט ${b.n}<small dir="ltr">${fmt(b.start)} – ${fmt(b.end)}</small></h2><span class="chosen" data-chosen dir="auto"></span></div>
+        <textarea id="note-${b.n}" dir="auto" placeholder="כתבו כאן את התוכנית שלכם לביט, או בחרו עיצוב למטה ותערכו אותו."></textarea>
+        <div class="eyebrow">אפשרויות עיצוב</div>
         <div class="opts">${b.options.map(o => `
           <div class="opt" data-k="${esc(o.key)}">
             <div class="thumb" style="${o.thumb ? `background-image:url('${esc(o.thumb)}')` : ''}" role="img" aria-label="${esc(o.title)}"></div>
             <h3 dir="auto">${esc(o.key)} · ${esc(o.title)}</h3>
-            <div class="cat">${esc(o.category)} · ${esc(SCENE[o.scene_type] || o.scene_type)}</div>
+            <div class="cat" dir="auto">${esc(o.category)} · ${esc(SCENE[o.scene_type] || o.scene_type)}</div>
             <div class="desc" dir="auto">${esc(o.desc)}</div>
-            <div class="ref">Ref ${esc(o.ref)}</div>
-            <div class="ob">${o.key === b.pick ? '<span class="mypick">My pick</span>' : ''}<button class="use" type="button">Use this</button></div>
+            <div class="ref" dir="ltr">Ref ${esc(o.ref)}</div>
+            <div class="ob">${o.key === b.pick ? '<span class="mypick">ההמלצה שלי</span>' : ''}<button class="use" type="button">לבחור בזה</button></div>
           </div>`).join('')}</div>
       </div>
       <div class="r">
-        <div><div class="lab">Script</div><div class="script" dir="auto">${esc(b.script)}</div></div>
+        <div><div class="lab">טקסט</div><div class="script" dir="auto">${esc(b.script)}</div></div>
         ${data.clip.file ? `<video id="v-${b.n}" src="${esc(data.clip.file)}#t=${b.start},${b.end}" controls playsinline preload="metadata"></video>` : ''}
-        <div><div class="lab">Seen in the reels</div><div class="seen" dir="auto">${esc(b.seen)}</div>${b.camera ? `<div class="cam">${esc(b.camera)}</div>` : ''}</div>
+        <div><div class="lab">איפה זה מופיע ברפרנסים</div><div class="seen" dir="auto">${esc(b.seen)}</div>${b.camera ? `<div class="cam" dir="auto">${esc(b.camera)}</div>` : ''}</div>
       </div>`;
     app.appendChild(sec);
 
@@ -186,9 +316,9 @@ html{scroll-behavior:smooth}
       sec.querySelectorAll('.opt').forEach(el => {
         const on = el.dataset.k === k;
         el.classList.toggle('on', on);
-        el.querySelector('.use').textContent = on ? '✓ Chosen' : 'Use this';
+        el.querySelector('.use').textContent = on ? '✓ נבחר' : 'לבחור בזה';
       });
-      sec.querySelector('[data-chosen]').textContent = 'Chosen: ' + k + ' · ' + optOf(b, k).title;
+      sec.querySelector('[data-chosen]').textContent = 'נבחר: ' + k + ' · ' + optOf(b, k).title;
     };
     sec.querySelectorAll('.opt .use').forEach(btn => btn.addEventListener('click', e => {
       const k = e.target.closest('.opt').dataset.k;
@@ -199,14 +329,14 @@ html{scroll-behavior:smooth}
   drawTimeline();
 
   function planText(){
-    const L = [`# ${data.title} edit plan`, `Clip: ${data.clip.name} · ${total.toFixed(1)} s · ${data.beats.length} beats · Style: ${data.style}`, ''];
+    const L = [`# תוכנית עריכה: ${data.title}`, `קליפ: ${data.clip.name} · ${total.toFixed(1)} שנ' · ${data.beats.length} ביטים · סגנון: ${data.style}`, ''];
     data.beats.forEach(b => {
       const o = optOf(b, chosenOf(b));
       const note = (state[b.n] && state[b.n].note || '').trim();
-      L.push(`## Beat ${b.n} (${fmt(b.start)}–${fmt(b.end)})`, `Script: ${b.script}`,
-             `Chosen: ${o.key} · ${o.title} — ${o.category} · ${SCENE[o.scene_type] || o.scene_type} · Ref ${o.ref}`,
-             `Design: ${o.desc}`);
-      if (note) L.push(`My notes: ${note}`);
+      L.push(`## ביט ${b.n} (${fmt(b.start)}-${fmt(b.end)})`, `טקסט: ${b.script}`,
+             `נבחר: ${o.key} · ${o.title} · ${o.category} · ${SCENE[o.scene_type] || o.scene_type} · Ref ${o.ref}`,
+             `עיצוב: ${o.desc}`);
+      if (note) L.push(`ההערות שלי: ${note}`);
       L.push('');
     });
     return L.join('\n');
@@ -214,13 +344,26 @@ html{scroll-behavior:smooth}
   const copyBtn = document.getElementById('copy');
   copyBtn.addEventListener('click', () => {
     const txt = planText();
-    const done = () => { copyBtn.textContent = '✓ Copied — paste it to Claude'; setTimeout(() => copyBtn.textContent = '⧉ Copy Plan', 2600); };
+    const done = () => { copyBtn.textContent = '✓ הועתק, הדביקו ל־Claude'; setTimeout(() => copyBtn.textContent = 'העתקת התוכנית', 2600); };
     const fallback = () => {
       let pre = document.getElementById('plan-out');
       if (!pre) { pre = document.createElement('textarea'); pre.id = 'plan-out'; pre.rows = 10; head.appendChild(pre); }
-      pre.value = txt; pre.focus(); pre.select(); copyBtn.textContent = 'Select all and copy the text below';
+      pre.value = txt; pre.focus(); pre.select(); copyBtn.textContent = 'סמנו והעתיקו את הטקסט למטה';
     };
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fallback); else fallback();
   });
 })();
 </script>
+<script>
+(function(){
+  var KEY='style-lab:theme', root=document.documentElement;
+  try{var t=localStorage.getItem(KEY); if(t) root.dataset.theme=t;}catch(e){}
+  var b=document.createElement('button'); b.type='button'; b.className='btn theme-btn';
+  var label=function(){var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches; b.textContent=dark?'☀ בהיר':'☾ כהה';};
+  b.onclick=function(){var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme=dark?'light':'dark'; try{localStorage.setItem(KEY,root.dataset.theme);}catch(e){} label();};
+  label(); document.body.appendChild(b);
+})();
+</script>
+</body>
+</html>

@@ -1,12 +1,15 @@
-# Brand defaults (Gabriel Gelman · Vibe Editing Academy)
+# Brand defaults (the course brand)
 
-Source: the course landing page https://www.gabriel-gelman.com/vibe-editing (CSS variables and
-computed styles read 2026-11-03). The site is dark only; the light theme below is derived from
-it with the same accent and roles.
+These are the fonts and colours of the "וידאו עם AI" course by Gabriel Gelman, read from the
+course landing page (https://www.gabriel-gelman.com/vibe-editing, CSS variables, 2026-11-03).
+The site is dark only; the light theme below is derived from it with the same accent and roles.
 
-Every style trained with style-lab for Gabriel Gelman's videos keeps the reference style's
-layout, motion, placement and structure, and swaps in these fonts and colours. Use the
-reference's own fonts or colours only when the user says so for that style.
+By default every style trained with style-lab keeps the reference style's layout, motion,
+placement and structure, and swaps in these fonts and colours. Two ways out:
+- **Your own brand:** write your fonts and colour tokens (same tables as below) to
+  `~/.claude/style-lab/brand.md`. When that file exists it replaces this one for every style.
+- **The reference's look:** for one style, record `fonts=reference` / `colors=reference` in the
+  registry and keep the reference's own fonts and palette.
 
 ## Fonts (same three in Hebrew and English)
 | Role | Font | Use |
@@ -20,7 +23,8 @@ Hebrew subset), so the English variant uses the same fonts.
 
 Mapping a reference's type pair: its main sans → Heebo (keep the light/bold contrast); its
 "special" font (serif italic, script, display) → Karantina 700. Keep the reference's size
-ratios (e.g. bold word 2.5× the light line).
+ratios (e.g. bold word 2.5× the light line). Heebo reads best slightly tight
+(`letter-spacing: -0.04em`); Karantina stays at 0. Text on an accent fill is all Karantina 700.
 
 Load in HyperFrames / HTML:
 `https://fonts.googleapis.com/css2?family=Karantina:wght@400;700&family=Heebo:wght@300;400;500;600;700;800&display=swap`
