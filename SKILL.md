@@ -1,266 +1,237 @@
 ---
 name: style-lab
-description: Train Claude on any number of named video editing styles from reference videos, then edit new clips in the style the user picks. Two phases taken step by step from a proven workflow. TRAIN: about 20 reference videos plus a visual style board (a Claude artifact in place of Figma), a word-by-word and frame-by-frame breakdown, a library of every animation (still, frame strip, clip, notes), packaged as a new style skill. EDIT: millisecond transcript, silences cut to 30 ms, an interactive edit-plan document with three recommended designs per beat, a human plan, then a HyperFrames build, numbered revisions and sound design. Use this whenever the user wants to create, define, copy, learn or train an editing style or look, build a style board or style guide for videos, turn reference reels into a style skill, or edit a talking-head or short-form clip "in the style of" a trained style. Hebrew triggers - סגנון עריכה, ליצור סגנון, ללמד את Claude סגנון, סקיל סגנון, בורד סגנון, לוח השראה, ריפרנסים, תערוך בסגנון, מסמך תכנון עריכה, סטייל לסרטונים.
+description: Learns a video editing style from reference videos or a description, then edits your footage in it with an edit plan and review rounds. Triggers: editing style, style-lab, סגנון.
 ---
 
 # style-lab
 
-A complete, repeatable way to (A) teach Claude an editing style and (B) edit clips in it.
-It reproduces, step by step, the workflow in Joseph's video "How to Edit VIRAL Talking Head
-Videos Using ONLY Claude! (New Minimal Style)" (YouTube, 2026-10-31). Two deliberate
-changes, both the user's choice: the style board lives in a Claude artifact instead of Figma,
-and the edit is built in **HyperFrames** instead of Remotion (the video's engine). Every
-prompt the video types is in `references/source-workflow.md`, verbatim, with its timestamp;
-where a prompt says "Remotion", run it with HyperFrames. A third default: every style keeps
-the reference's layout and motion but uses the brand fonts and colours
-(`references/brand-defaults.md`) unless the user says otherwise.
+## When to use (full trigger list)
+Use when the user wants to create, define, copy, learn or train an editing style or look from
+reference videos (links or files) or from a written description; build a style board or style
+guide; turn reference reels into a reusable style; or edit a talking-head or short-form clip
+"in the style of" a trained style, then fix it in review rounds. Also for: "make my videos look
+like this creator's", "save this look so every video matches", "the edit looks generic / AI".
+Hebrew: סגנון עריכה, ליצור סגנון, ללמד את Claude סגנון, בורד סגנון, לוח השראה, ריפרנסים,
+תערוך בסגנון, תוכנית עריכה, סבב הערות, סטייל לסרטונים.
 
-The core idea, in the video's words: **the reference videos are how Claude learns the logic
-behind the animations, and the board is how Claude learns the design.** Without both, you
-get generic "AI slop" edits. And: if you don't understand what makes a style good, AI will
-only help you make bad videos faster. So the human's taste sits at two checkpoints, the
-board (phase A) and the edit plan (phase B), and Claude does the heavy lifting around them.
+**סקיל = הוראות קבועות ל־Claude.** This skill is part of the "וידאו עם AI" course skills by
+Gabriel Gelman (Apache-2.0). It is an advanced bonus skill: it assumes Claude Code with
+ffmpeg and Python, and works best with HyperFrames installed.
 
-## How to talk to the user
-Explain each step in plain language before doing it (what we are doing, why, what the user
-must do now), one step at a time, and wait at the two human checkpoints. The user may be
-learning this workflow to teach it, so name the step ("Step A2 — the style board") every time.
-Write to the user in their language (Hebrew if they write Hebrew).
+Language: always talk to the user in Hebrew unless they write in another language. Explain each
+step in plain words before doing it (what we do, why, what the user does now), one step at a
+time, and name the step ("שלב A2: בורד הסגנון"). All pages the user sees (board, plan, review
+room) are in the course design: RTL Hebrew, Karantina / Heebo, white-black-violet.
+
+Inspiration: the two-phase workflow (train a style from ~20 reference videos and a board, then
+edit with a human-made plan) was inspired by Joseph's YouTube video on editing talking-head
+videos with Claude (https://youtu.be/g9xoKm5DEeU). Nothing from the video is copied here; the
+board, plan and review pages, the scripts, the rules and the review loop are our own, rebuilt
+and tested on a batch of 13 Reels.
+
+## The idea in one paragraph
+Reference videos teach Claude the *logic* behind the animations (when, how long, how they
+move); the board teaches it the *design* (fonts, colours, sizes, why). Without both, edits look
+generic. The human's taste sits at three checkpoints: **the board** (phase A), **the edit plan**
+(phase B) and **the review rounds**. Claude does the heavy lifting in between. If you do not
+know what makes a style good, AI only helps you make bad videos faster, so every rule is
+measured and every design choice gets a "why".
+
+## Defaults (say them in one line at the start, change on request)
+- **Brand:** the course brand (`references/brand-defaults.md`: Karantina 700 headlines, Heebo
+  body at -0.04em, Consolas for code, white / black / violet). The reference's layout, motion
+  and structure are kept; its fonts and colours are swapped for the brand. The user can keep the
+  reference's own look for a style, or put their own brand in `~/.claude/style-lab/brand.md`.
+- **Build engine:** HyperFrames (HTML to video). Without it: `references/tools-and-fallbacks.md`.
+- **Transcription:** local faster-whisper; Hebrew with a local ivrit-ai model. Cloud (RunPod)
+  only with the user's OK, because it costs money.
+- **Images / 3D:** optional, only when a beat needs them, and only with the user's OK if paid.
+- **Format:** 9:16, 1080x1920, 30 fps, unless the user says otherwise. Never assume the caption
+  language: ask (or no captions).
+Check what is installed first (ffmpeg, Python, faster-whisper, Node + HyperFrames, Blender,
+an image model) and say what you will use. A missing tool blocks its step: say which and what
+to install; never skip a step silently, never download without a yes.
 
 ## Your styles (several named styles side by side)
-style-lab holds any number of styles. Each has a **name the user chooses** (Hebrew is fine,
-e.g. "מינימל פרימיום"), a slug (latin, e.g. `minimal-premium`), a one-line description, its
-own style pack and its own style skill `style-<slug>`. All are listed in one registry,
-`~/.claude/style-lab/styles.json`, managed with `scripts/styles.py`:
+Each style has a **name the user chooses** (Hebrew is fine), a latin slug, a one-line
+description, its own style pack and its own style skill `style-<slug>`. All are listed in one
+registry, `~/.claude/style-lab/styles.json`, managed with `scripts/styles.py`:
 ```
-python scripts/styles.py list                       # the styles you can pick from
+python scripts/styles.py list                       # styles you can pick from
 python scripts/styles.py add <slug> --name "<name>" --pack <project>/styles/<slug> --description "..."
 python scripts/styles.py show <slug or name>
-python scripts/styles.py set <slug> name="<new name>" status=ready aliases="מינימל,פרימיום"
+python scripts/styles.py set <slug> name="<new name>" status=ready aliases="..." theme=light
 python scripts/styles.py check                      # every pack and skill still exists
 ```
-Status: `training` while phase A runs, `ready` once A5 is done (only ready styles are offered
-for editing), `archived` to hide one without deleting anything. `remove` deletes only the
-registry entry, never the files. Each style also records `fonts` and `colors`: `brand` (the
-default, `references/brand-defaults.md`) or `reference` (keep the reference's own).
-And a `theme`: `dark` (default, the site's palette), `light` (the white option) or `both`; the
-user can also ask for one video in the other theme ("make this one white") in B0.
+Status: `training` during phase A, `ready` after A5 (only ready styles are offered for editing),
+`archived` to hide one. `remove` deletes the registry entry only, never files. Each style also
+records `fonts` / `colors` (`brand` or `reference`) and `theme` (`dark`, `light` or `both`; one
+video can still be "the other theme").
 
-**Which phase?** "new style / ליצור סגנון / ללמד סגנון" → phase A for a new style.
-"edit / make a video / תערוך / תכין סרטון" → phase B with a chosen style. "change / rename /
-improve style X" → `styles.py set` and, for rule changes, edit that style's STYLE.md and skill.
+**Which phase?** "new style / ליצור סגנון / ללמד סגנון" → phase A. "edit / make a video /
+תערוך" → phase B. "change / rename / improve style X" → `styles.py set`, and for rule changes
+edit that style's STYLE.md and skill.
 
 ## Where things live
 ```
-<project>/styles/<style-slug>/          ← one folder per style (the "style pack")
-  refs/            the reference videos (local only, never published or redistributed)
-  analysis/        per-video breakdowns: words.json, sheets, notes
-  board/           board.json + board.html (the published style board artifact) + thumbs/
-  library/         V01-A06 <title>/{still.png, strip.jpg, clip.mp4, notes.md} + index.json
-  animations.json  the list Claude writes during the breakdown (input to the library script)
-  STYLE.md         the trained style: numbered rules, tokens, categories, motion, sound
-<project>/edits/<clip-slug>/            ← one folder per edit
+<project>/styles/<slug>/            the style pack
+  refs/  sources.md                 reference videos (local study copies, never published)
+  analysis/                         per-video transcripts, contact sheets, notes
+  board/  board.json  board.html  thumbs/
+  library/<V01-A06 title>/          still.png  strip.jpg  clip.mp4  notes.md  (+ index.json)
+  animations.json                   the breakdown (input to the library script)
+  STYLE.md                          numbered rules, tokens, categories, motion, sound, review rules
+  kit/                              optional tested components for the build engine
+<project>/edits/<clip>/             one folder per edit
   raw/  words.json  edit_ready.mp4  edit_ready.words.json  plan.json  plan.html
-  hyperframes/  assets/  renders/v1.mp4 …  revisions.md
-~/.claude/skills/style-<slug>/SKILL.md  ← the generated style skill (points to the pack)
-~/.claude/style-lab/styles.json         ← the registry of all styles (name, slug, status, paths)
+  build/  assets/  renders/  revisions.md  SOURCES.md
+~/.claude/skills/style-<slug>/SKILL.md   the generated style skill
+~/.claude/style-lab/styles.json          the registry
 ```
-Scripts (run with `python`, all local and free): `scripts/styles.py`, `scripts/transcribe_words.py`,
-`scripts/cut_silences.py`, `scripts/build_reference_library.py`. Templates:
-`assets/board-template.html`, `assets/plan-template.html`.
+Scripts (local, free): `styles.py`, `transcribe_words.py`, `transcribe_cloud_ivrit.py` (paid,
+optional), `cut_silences.py`, `verify_cut.py`, `word_edges.py`, `build_reference_library.py`.
+Pages: `assets/board-template.html`, `assets/plan-template.html`, `assets/review-template.html`.
 
 ---
 
-## Phase A — Train a style (build the style pack)
+## Phase A: train a style (build the style pack)
 
-### A1. Collect the reference videos
-Goal: about 20 of the creator's best-edited videos in exactly the style wanted (the video
-picks "20 of the most premium edited videos" from one creator's Instagram).
-- First ask what to **call the style** (the name the user will pick it by) and for a one-line
-  description; derive a slug and register it right away:
-  `python scripts/styles.py add <slug> --name "<name>" --pack <project>/styles/<slug> --description "..."`
-  (status `training`). Ask too whether to keep the brand fonts and colours (default) or the
-  reference's own; record it with `--fonts` / `--colors`.
-- Ask the user for the creator and where the videos are. The user downloads
-  them (or gives links they are allowed to fetch); keep them in `refs/` as local study copies.
-  They are never published, uploaded or put in an artifact.
-- Name them `V01.mp4 … V20.mp4` and keep a `refs/sources.md` (V01 → original link/title).
-- Fewer than ~12 videos gives a thin library; say so, and continue if the user wants.
+### A1. Collect the references
+- Ask what to **call the style** and for a one-line description; register it right away
+  (`styles.py add ...`, status `training`). Ask brand look (default) or the reference's own.
+- Ask where the references are. **Videos:** the user gives files or links they are allowed to
+  download; aim for ~20 of the best-edited videos in exactly this style; fewer than ~12 gives a
+  thin library (say so, continue if the user wants). Name them `V01.mp4 …`, list each in
+  `refs/sources.md`. They stay local: never published, uploaded or put in an artifact.
+- **Description only** (no videos): interview the user (feel, grounds, type, motion, captions,
+  sound, what is banned), turn every adjective into a number, and collect a few stills or
+  screenshots they like. Skip A3-A4's frame work; the board shows tokens, rules and sketches
+  instead of reference frames, and the library starts empty and grows from approved edits.
 
 ### A2. The style board (the most important part of training)
-The video's human does this alone in Figma: watch every video, screenshot every scene they
-like (~130 pieces), sort them into the style's categories, then zoom into one example per
-category and break it down: **what makes it up? the fonts, the colours, the sizes, the
-patterns** — and for every scene ask **why this design, why these colours, why these effects,
-why these animations**. Here Claude does the legwork and the user supplies the taste:
-1. Run the frame analysis on every reference (`video-analysis` skill / `tools/analyze.py`
-   if the editing toolkit is installed, otherwise extract one frame every 0.5 s with ffmpeg)
-   and read the contact sheets.
-2. Propose the categories. Start from the ten in `references/example-style-minimal-premium.md`
-   only as a checklist; the style's own categories win (merge, rename, add).
-3. Pick candidate inspiration frames (aim 100–150), export them as 9:16 JPG thumbs
-   (~360 px wide) into `board/thumbs/`, and choose one hero frame per category to annotate.
-4. Fill `board.json` (schema in `references/board-and-plan-spec.md`): tokens (fonts,
-   colours with hex picked from frames, textures, shapes, sizing, layout), and per category
-   the tile list, one annotated frame with 3–5 callouts (each a *measurable* rule like "the
-   light sans line spacing is 75 % of the bold word"), and draft answers to the four "why"
-   questions.
-5. Build `board.html` from `assets/board-template.html` (replace the JSON block) and publish
-   it as an artifact with the thumbs as supporting files (`files`), so the user can scan it,
-   rewrite the "why" answers, and press **Copy board notes** to paste them back.
-6. **Checkpoint 1 — stop and wait.** The user reviews the board: wrong categories, missing
-   scenes, rules that are not true. Apply their notes to `board.json` and republish. Do not
-   start A3 until the user says the board is right; the board is the design half of the
-   training and a wrong board trains a wrong style.
+1. Analyse every reference: frames every 0.5 s with ffmpeg (or a video-analysis tool if
+   installed), contact sheets, audio loudness. Read the sheets.
+2. Propose the categories (caption system, layout, B-roll types, graphics, transitions, CTA …);
+   the style's own categories win. `references/example-style-3d-paper.md` shows a finished one.
+3. Pick 100-150 inspiration frames as 9:16 thumbs (~360 px wide) into `board/thumbs/`, and one
+   hero frame per category to annotate.
+4. Fill `board.json` (schema: `references/board-and-plan-spec.md`): tokens (fonts, colours with
+   hex picked from frames, textures, shapes, sizing, layout) and per category the tiles, one
+   annotated frame with 3-5 **measurable** callouts, and draft answers to the four "why"
+   questions (design, colours, effects, animations).
+5. Build `board.html` from `assets/board-template.html` (replace the JSON block) and publish it
+   as an artifact with the thumbs as supporting files. The user rewrites the "why" answers and
+   presses **העתקת ההערות לבורד** to paste them back.
+6. **Checkpoint 1: stop and wait.** Apply the user's notes, republish. Do not start A3 until the
+   user says the board is right; a wrong board trains a wrong style.
 
-### A3. The training breakdown (the prompt the video uses)
-Run exactly what the video's training prompt asks (verbatim in `references/source-workflow.md`):
-for **every** reference video,
-1. a word-by-word transcript (`scripts/transcribe_words.py`, language from the user or `auto`);
-2. a frame-by-frame breakdown that finds every frame with an animation, and for each
-   animation studies three things:
-   - **placement** — where it sits in the script: which words trigger it, how long after the
-     word, what kind of line gets which kind of scene (announce vs. describe, number,
-     person, story, punchline);
-   - **design** — how the frame is composed and what elements make it up (ground, texture,
-     type pair and sizes, colour, line work, illustration style, position);
-   - **logic** — how long it lasts and what it feels like: frame counts, distances, easing
-     ("slow-fast-slow", "snaps", "wipes letter by letter in 15 f"), camera moves.
-   Read the frames to measure; never guess durations. One worked example of the precision
-   wanted is V01-A06 in `references/example-style-minimal-premium.md`.
-3. Then read the board and reconcile: the board says *what* the design is and *why*; the
-   videos say *when* and *how it moves*. Where they disagree, ask the user.
-Write each animation into `animations.json` (id `V<video>-A<n>`, start/end seconds,
-keyframe, title, category, scene type, words, notes). Do one video at a time and save as you
-go; with many videos, split the work across subagents (one video each, same schema).
+### A3. The breakdown
+For **every** reference: a word-level transcript (`transcribe_words.py`, language from the user
+or `auto`) and a frame-by-frame pass that finds every animation and records three things:
+- **placement**: which words trigger it, how long after the word, which kind of line gets
+  which kind of scene (announce vs describe, number, person, story, punchline);
+- **design**: ground, texture, type pair and sizes, colour, line work, illustration, position;
+- **logic**: duration in frames, distances, easing, camera moves. Measure on frames; never guess.
+Then reconcile with the board (board = what and why; videos = when and how it moves); ask the
+user where they disagree. Write each animation to `animations.json` (`V<nn>-A<n>`, start/end,
+keyframe, title, category, scene type, words, notes). One video at a time, saving as you go;
+with many videos, split the work across subagents (one video each, same schema).
 
-### A4. Build the reference library
-```
-python scripts/build_reference_library.py styles/<slug>/animations.json --out styles/<slug>/library
-```
-Every animation becomes a folder with `still.png`, `strip.jpg` (every frame labelled with
-frame number and ms), `clip.mp4` and `notes.md`, plus `library/index.json`. The video's run
-produced 225 animations from 20 videos. Open a few strips and check the boundaries are right
-(the animation starts and ends inside the clip); fix `animations.json` and rerun with
-`--force` for any that are off. Add the library tiles' stills/clips/strips to the board.
+### A4. The reference library
+`python scripts/build_reference_library.py styles/<slug>/animations.json --out styles/<slug>/library`
+Every animation becomes a folder (still, labelled frame strip, clip, notes) plus `index.json`.
+Open a few strips, fix wrong boundaries in `animations.json`, rerun with `--force`.
 
-### A5. Package the style as a skill
-Write `STYLE.md` and generate the style skill from `references/style-skill-template.md`:
-- **numbered rules** (§1, §2 …) so plans and revisions can cite them ("rule 13");
-- tokens (fonts, colours, textures, shapes, sizing, layout). **Fonts and colours default to the
-  brand** (`references/brand-defaults.md`: Karantina 700 / Heebo / Consolas, violet accent):
-  map the reference's type pair and accent onto them and keep its sizes, ratios and colour
-  discipline; record the reference's originals next to them. Use the reference's own fonts or
-  colours only if the user asks for that style; each category with its design rule, motion recipe, placement rule
-  and 2–3 library refs; the planning patterns found in A3 (e.g. "announce on face, describe
-  with a visual"); the sound profile (music feel, which actions get which sound);
-- the absolute path to the style pack and library.
-Optionally (recommended) build the style's recurring parts as a HyperFrames component kit in
-`<pack>/kit/` (layout, captions, headline, anchor list, accents), verified with `hyperframes check`
-and snapshots, so every edit starts from tested blocks.
-Save it to `~/.claude/skills/style-<slug>/SKILL.md` (its description names the style's display
-name, so "edit in <name>" finds it), then mark it ready:
-`python scripts/styles.py set <slug> status=ready board_url=<board artifact URL>`.
-Tell the user the style's name and that it now appears in the list when they make a video.
-That skill is the style's "brain"; editing (phase B) always loads it.
+### A5. Package the style
+Write `STYLE.md` and the style skill from `references/style-skill-template.md`: **numbered,
+measured rules** (so a plan or a note can say "rule 7"); tokens mapped onto the brand (keep the
+reference's sizes, ratios and colour discipline; record its originals); each category with
+design, motion, placement and 2-3 library refs; the planning patterns; the sound profile; a
+"way of thinking" section; an empty "Review-round rules" section. Start every style from the
+general rules in `references/craft-rules.md` and write only what differs. Recommended: build
+the recurring parts (captions, headline, speaker layout, CTA) as a tested component kit in
+`kit/`. Save the skill to `~/.claude/skills/style-<slug>/SKILL.md`, then
+`styles.py set <slug> status=ready board_url=<board artifact URL>`. Tell the user the style's
+name and that a new session will list it.
 
 ---
 
-## Phase B — Edit a clip in a trained style
-
-Run on the strongest model and effort available (the video uses Opus 5.5, "Extra"). The
-starting prompt the video uses is in `references/source-workflow.md`; if the user just says
-"edit this in <style>", follow the same steps.
+## Phase B: edit a clip in a trained style
+Use the strongest model and effort available.
 
 ### B0. Choose the style
-Run `python scripts/styles.py list`. If the user named a style (by name, slug or alias),
-use it; if they did not, **ask which one** with the ready styles as options (name + one-line
-description; with a single ready style, say which one you will use). No ready style yet →
-say so and offer phase A. Load the chosen style's skill (`style-<slug>`) and work in its
-pack. Write the choice into `edits/<clip>/plan.json` (`style`) so revisions use the same one.
-To compare, the user may ask for the same clip in two styles: run B1 once and B2 onward per
-style, in `edits/<clip>/<style-slug>/`.
+`styles.py list`. If the user named one, use it; otherwise ask, with the ready styles as options
+(one ready style: say which you will use). None ready: offer phase A. Load `style-<slug>` and
+write the choice into `plan.json` so every round uses the same style.
 
-### B1. Transcript and silence cut (≈15 min in the video, all Claude)
-1. Load the style skill. 2. `scripts/transcribe_words.py raw.mp4 --out words.json` (ms-level).
-3. `scripts/cut_silences.py raw.mp4 --words words.json --out edit_ready.mp4 --pad-ms 30`.
-   Everything after this point uses `edit_ready.mp4` and `edit_ready.words.json`.
-4. Show the user the low-confidence words (names, numbers, brands) and fix them before planning.
+### B1. Transcript and cut
+1. `transcribe_words.py raw.mp4 --out words.json` (Hebrew: `--language he --model <ivrit-ai folder>`).
+2. Show the low-confidence words (names, numbers, brands); fix them before planning.
+3. Choose takes with the user if there are several (`--keep keep.json`), then
+   `cut_silences.py raw.mp4 --words words.json --out edit_ready.mp4 --pad-ms 120`
+   (30 ms only for a deliberately punchy style). Joins get a 15 ms audio fade.
+4. Re-listen to every join without VAD (`transcribe_words.py edit_ready.mp4 --start .. --end ..
+   --no-vad --no-context`), check word endings (`word_edges.py --at <t>`), then
+   `verify_cut.py`. Hidden repeats and clipped endings are found here, not by the owner.
+Everything after this uses `edit_ready.mp4` and `edit_ready.words.json`.
 
-### B2. The edit-plan document
-Split the script into **beats** (one idea or one line each; the video's 57 s clip has 15).
-For each beat recommend **three designs pulled from the style's library**, the way the creator
-would place them (the placement logic learned in A3), and mark one as **My pick**. Each option
-carries: title, category · scene type (A-roll + captions / Overlay on A-roll / Cut-away scene),
-a concrete description of what is on screen, and `Ref V##-A##`. Each beat also gets
-"Seen in the reels" (why this fits, citing the reference videos and rule numbers) and a
-camera note. Fill `plan.json`, build `plan.html` from `assets/plan-template.html`, publish
-it with a 540p proxy of `edit_ready.mp4` as `clip.mp4` and the option stills as `thumbs/`.
-Full spec: `references/board-and-plan-spec.md`.
+### B2. The edit plan (show it unasked)
+Split the script into **beats** (one idea or line each). For each beat, three designs from the
+style's library, placed the way the references place them, one marked **ההמלצה שלי**. Each
+option: title, category, scene type (פנים + כתוביות / שכבה מעל הפנים / סצנה מלאה), a concrete
+description, `Ref V##-A##`; each beat: why it fits (cite references and rule numbers) and a
+camera note. Design each beat with the five questions in `references/craft-rules.md` §1
+(metaphor, the real thing working, invisible made visible, a reference for the move, never
+repeated). Build `plan.html` from `assets/plan-template.html`, publish with a 540p proxy as
+`clip.mp4` and the option stills as `thumbs/`.
 
-### B3. **Checkpoint 2 — the human plans the edit (most important step of the edit)**
-"Claude can build the animations easily, but without a high-quality edit plan they won't come
-together." AI left to plan alone is not creative enough, so the user plans: picks a design per
-beat or writes their own note, then presses **Copy Plan** and pastes it back. Offer the
-video's planning patterns as advice (`references/source-workflow.md` → "How the plan was
-made"): open on the speaker so the viewer connects; make the first visual a strong hook;
-when a new idea is announced, stay on the face; when it is described, show it; a person →
-character callout; a story → b-roll; balance the scenes so the video flows. Wait for the plan.
+### B3. Checkpoint 2: the human plans
+The user picks a design per beat or writes their own, presses **העתקת התוכנית** and pastes it
+back. Offer the planning patterns as advice: open on the speaker; the hook is one strong beat;
+announce on the face, describe with a visual; a person → a callout; a story → B-roll; balance
+the scene types. If the user gives full control ("אתה מחליט"), take your picks and say so.
 
-### B4. Build (≈60 min in the video, all Claude)
-1. Read the pasted plan; for every chosen design open its library folder (clip, strip, notes)
-   and write down the exact design to copy.
-2. Make an **asset list** (every painting, photo, b-roll, icon) with a source per item, and
-   show it. Fetch with the browser or local files: public-domain art (Wikimedia/Wikipedia,
-   check the licence on the file page), stock b-roll (Pexels/Pixabay), photos the user owns.
-   If something can't be found, ask the user for it rather than inventing it.
-3. Build in **HyperFrames** (load the `hyperframes` skill first; it routes to
-   `hyperframes-core` for the composition contract and `hyperframes-animation` /
-   `hyperframes-keyframes` for motion). One 1080×1920 composition in `hyperframes/`, with
-   `edit_ready.mp4` as the A-roll track. Fonts and colours: the style's tokens, which are
-   the brand defaults unless the style says otherwise (`references/brand-defaults.md`, with
-   the Google Fonts URL for Karantina and Heebo).
-   If the style pack has a `kit/` (a component generator such as `kit/gokit.py`, see its README),
-   build from its components first and hand-build only what it does not cover.
-   Order, as in the video: A-roll captions for the whole video first with the style's caption
-   rule, timed from `edit_ready.words.json`; then each scene in plan order as its own
-   sub-composition, following its reference's notes (durations in frames, easing, textures,
-   camera moves). Validate the composition before rendering.
-4. Render the full video (1080×1920) to `renders/v1.mp4` with the HyperFrames CLI (if the
-   editing toolkit is installed, its `render-qa-delivery` skill runs the cheap-first render and
-   frame QA) and send it. Say plainly that a first draft is about 60–70 % of the way there and
-   that the user's notes finish it.
+### B4. Build
+1. For every chosen design open its library folder and write down the exact design to copy.
+2. **Asset list** with a source per item (real UIs, official logos, the tool maker's own
+   showcase clips, the user's files, licensed music/SFX, optional generated images or 3D); show
+   it; ask before downloading. Log every source in `SOURCES.md`.
+3. Build in HyperFrames (load its skill first) or the fallback engine: one 1080x1920
+   composition with `edit_ready.mp4` as the speaker track; style tokens; the style's kit first.
+   Order: captions for the whole video from the words file, then each beat in plan order.
+   **Build 2 beats first**, snapshot, compare with the style's reference frames, adjust, then
+   the rest. Follow `references/craft-rules.md` and check `references/pitfalls.md`.
+4. Validate (0 errors), snapshot every 0.5 s (0.2 s over dense beats and the CTA), read every
+   snapshot, fix. Then render a **draft** (low quality, with music) and open the review page.
+   Say plainly that a first draft is 60-70 % of the way.
 
-### B5. Revisions (≈10 min)
-Ask for numbered notes with timestamps (the video's six notes are the model: "Rough cut
-between the graph and the next shot. Hold the graph text until 0:06, then cut."). Apply every
-note, log them in `revisions.md`, render `v2`, then ask: **"Is the video ready for sound
-design, or are there more revisions?"**
+### B5. Review rounds
+Follow `references/review-loop.md`: the review room page (`assets/review-template.html`) opens
+unasked after every draft; read every note including unsent drafts; batch all notes → fix → one
+draft render per round; **the same note in two rounds becomes a global rule** in the style's
+STYLE.md and is fixed in every video. Log rounds in `revisions.md`. Ask after each round: "יש
+עוד הערות, או שאפשר לעבור לסאונד ולרינדור הסופי?"
 
-### B6. Sound design (≈15 min)
-Match the sound to the reference videos (re-listen to their audio analysis): a cinematic music
-bed under the voice; a click for each text appearance; a highlighter/marker sound for graph and
-line draws; whooshes for transitions and camera moves. Place each effect on its exact frame
-(the video placed 74 effects on 57 s). Keep the voice on top. Only use music and effects the
-user is licensed to use (their library, royalty-free sources); never claim a track is cleared
-if you don't know. Render the final and report what was placed.
-
-## Time budget the video reports (for setting expectations)
-Cuts + planning document 15 min · human planning 15 min · building the edit 60 min ·
-revisions 10 min · sound design + music 15 min. "Next time: half the time."
+### B6. Sound and final
+SFX only on visible events, a file at most twice per video and never twice within 4 s, -15 to
+-20 dB under the voice; music instrumental, ducked under the voice, final about -14 LUFS. Only
+sound the user is licensed to use. **Final render only on the owner's explicit OK**, then a last
+2.5 s contact-sheet check for empty frames and leftovers, and delivery with `SOURCES.md`.
 
 ## Guardrails
-- Reference videos are study material: local only, never redistributed, never placed in a
-  published artifact (stills/thumbs on a private board are fine; full clips stay local unless
-  the user asks).
-- Board and plan artifacts are private until the user shares them.
-- Claims of the source video (prices, income) are not part of this skill.
-- If a step's tool is missing (ffmpeg, faster-whisper, HyperFrames, a browser), say which step is
-  blocked and what to install; don't silently skip a step.
+- Reference videos are study material: local only, never redistributed, never in a published
+  artifact (stills on a private board are fine). Copy a style's logic, not anyone's assets.
+- Pages start private; the user decides whether to share them.
+- Never invent numbers, quotes, results or logos; mock screens are marked "להמחשה".
+- No income or growth promises. Mark AI-generated people and voices as AI.
+- Ask before anything paid (cloud transcription, image or 3D generation, stock).
 
 ## References
-- `references/source-workflow.md` — the source video, step by step with timestamps and every prompt verbatim. Read before running either phase the first time.
-- `references/board-and-plan-spec.md` — `board.json` and `plan.json` schemas, publishing the two artifacts, what each control does.
-- `references/style-skill-template.md` — the template for the generated style skill (A5).
-- `references/brand-defaults.md` — the brand fonts (Karantina 700, Heebo, Consolas) and colour tokens (violet accent, light and dark), and how to map a reference's type pair and palette onto them. Read at A2 and A5, and before building in B4.
-- `references/example-style-minimal-premium.md` — the worked example: the ten categories and rules of the minimal premium style taught in the video.
+- `references/craft-rules.md`: the way of thinking and the rules that survived real review rounds (composition, motion, speaker, captions, cuts, sound, sources, build hygiene). Read before B2 and B4.
+- `references/review-loop.md`: drafts, the review room page, reading notes, rounds, global rules, final.
+- `references/pitfalls.md`: real bugs and their fixes (tween resets, in-composition cuts, short full-face moves, SFX fatigue …). Read before B4.
+- `references/tools-and-fallbacks.md`: what each step needs, local vs cloud, building without HyperFrames, optional 3D and image generation.
+- `references/board-and-plan-spec.md`: `board.json` and `plan.json` schemas and how to publish the pages.
+- `references/style-skill-template.md`: the template for the generated style skill (A5).
+- `references/brand-defaults.md`: the course brand tokens (dark and light) and how to map a reference palette onto them.
+- `references/example-style-3d-paper.md`: a real, approved style pack after three review rounds, as a worked example.

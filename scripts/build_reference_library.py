@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build the reference library: one folder per animation found in the reference videos.
 
-This is the "brain" the style skill picks designs from. In the source workflow the
-training pass over 20 reference videos produced 225 animations, each saved as a folder
-named like "V01-A06 Box wipe, line leads to brain" holding four files:
+This is the "brain" the style skill picks designs from. A training pass over ~20
+reference videos typically yields a few hundred animations, each saved as a folder
+named like "V01-A06 Box wipe, line leads to icon" holding four files:
 
   still.png   the keyframe (the frame that best shows the finished design)
   strip.jpg   every frame of the animation tiled in order, each labelled with frame + ms
