@@ -1,6 +1,6 @@
 ---
 name: style-lab
-description: Learns a video editing style from reference videos or a description, then edits your footage in it with an edit plan and review rounds. Triggers: editing style, style-lab, סגנון.
+description: Learns a video editing style from reference videos or a description, then edits your footage in it with an edit plan and review rounds. Use when the user wants to train, save, learn or apply a reusable editing style: style-lab, editing style, סגנון עריכה, תלמד את הסגנון, תאמן סגנון. For a one-off "make mine like this reference" use reference-style-matching instead.
 ---
 
 # style-lab
@@ -235,3 +235,7 @@ sound the user is licensed to use. **Final render only on the owner's explicit O
 - `references/style-skill-template.md`: the template for the generated style skill (A5).
 - `references/brand-defaults.md`: the course brand tokens (dark and light) and how to map a reference palette onto them.
 - `references/example-style-3d-paper.md`: a real, approved style pack after three review rounds, as a worked example.
+
+## Private extras (this machine only)
+- `references/private-notes.md`: where the public repo copy lives, our trained styles and packs, machine-specific tools, the template builder in `private/template-src/`. Read it when working on Gabi's videos or when updating the public skill.
+- `references/source-workflow.md` and `references/example-style-minimal-premium.md`: the source video's workflow and example style (third-party; never publish).
