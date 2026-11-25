@@ -11,6 +11,38 @@ PRIVATE = (
 )
 
 
+MENTIONS = (
+    "private-notes.md",
+    "source-workflow.md",
+    "example-style-minimal-premium.md",
+    "template-src",
+    "Private extras",
+)
+TEXT_EXT = {".md", ".py", ".html", ".json", ".txt"}
+SKIP = {"scripts/publish_guard.py", "tests/test_publish_guard.py"}
+SKIP_DIRS = {".git", ".superpowers", "__pycache__", ".pytest_cache"}
+
+
+def find_mentions(root: Path) -> list[str]:
+    """Text files that mention a private file name. Returns 'path: needle'."""
+    root = Path(root)
+    hits = []
+    for f in sorted(root.rglob("*")):
+        rel = f.relative_to(root)
+        if SKIP_DIRS & set(rel.parts) or not f.is_file():
+            continue
+        if f.suffix.lower() not in TEXT_EXT or rel.as_posix() in SKIP:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for n in MENTIONS:
+            if n in text:
+                hits.append(f"{rel.as_posix()}: {n}")
+    return hits
+
+
 def find_private(root: Path) -> list[str]:
     root = Path(root)
     hits = []
@@ -29,7 +61,10 @@ def main() -> int:
     hits = find_private(root)
     for h in hits:
         print(f"PRIVATE FILE PRESENT: {h}")
-    return 1 if hits else 0
+    mentions = find_mentions(root)
+    for m in mentions:
+        print(f"PRIVATE MENTION: {m}")
+    return 1 if hits or mentions else 0
 
 
 if __name__ == "__main__":

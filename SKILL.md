@@ -235,7 +235,3 @@ sound the user is licensed to use. **Final render only on the owner's explicit O
 - `references/style-skill-template.md`: the template for the generated style skill (A5).
 - `references/brand-defaults.md`: the course brand tokens (dark and light) and how to map a reference palette onto them.
 - `references/example-style-3d-paper.md`: a real, approved style pack after three review rounds, as a worked example.
-
-## Private extras (this machine only)
-- `references/private-notes.md`: where the public repo copy lives, our trained styles and packs, machine-specific tools, the template builder in `private/template-src/`. Read it when working on Gabi's videos or when updating the public skill.
-- `references/source-workflow.md` and `references/example-style-minimal-premium.md`: the source video's workflow and example style (third-party; never publish).
