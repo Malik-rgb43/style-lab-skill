@@ -1,0 +1,255 @@
+"""sound_events.py: SFX onsets + class guesses, music and voice profile, sync offsets.
+
+All audio is synthetic (tests/fixtures/make_sfx.py), so every onset time, level, BPM and duck depth
+is known exactly. Most tests call the pure functions on numpy arrays; the CLI tests decode a small
+file through ffmpeg (and run with --no-librosa so a subprocess does not pay librosa's import).
+"""
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
+import make_media as mm  # noqa: E402
+import make_sfx as ms  # noqa: E402
+
+import sound_events as se  # noqa: E402
+from conftest import run_cli  # noqa: E402
+
+SR = mm.SR
+SYNTH = [(1.0, "whoosh"), (2.5, "hit"), (3.2, "click"), (4.0, "riser")]  # riser runs 4.0-5.5 s
+
+
+def mono(a):
+    return a[:, 1].astype(np.float64)
+
+
+@pytest.fixture
+def no_librosa(monkeypatch):
+    """librosa missing: its import fails, so the numpy onset envelope is used."""
+    monkeypatch.setitem(sys.modules, "librosa", None)
+    assert se._get_librosa() is None
+
+
+def _has_librosa():
+    try:
+        import librosa  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------- SFX
+
+def test_classes_on_synthetic(no_librosa):
+    y = mono(ms.sfx_audio(6.5, SYNTH))
+    found = se.onsets(y, SR)
+    for t, _ in SYNTH:
+        assert any(abs(o - t) <= 0.03 for o in found), (t, found)
+    sfx = se.detect_sfx(y, SR)
+    assert len(sfx) == len(SYNTH), [(e["t"], e["class_guess"]) for e in sfx]
+    for (t, kind), ev in zip(SYNTH, sfx):
+        assert abs(ev["t"] - t) <= 0.03, (kind, ev["t"])
+        assert ev["class_guess"] == kind, (kind, ev["class_guess"], ev["features"])
+        assert 0.5 <= ev["confidence"] <= 0.95
+    riser = sfx[-1]
+    assert 1.3 <= riser["dur_s"] <= 1.6  # the riser body is one event, not re-listed per step
+
+
+def test_classify_api_shape(no_librosa):
+    y = mono(ms.sfx_audio(3.0, [(1.0, "hit")]))
+    c = se.classify(y, SR, 1.0, voice_db=-12.0)
+    assert {"class_guess", "confidence", "dur_s", "level_vs_voice_db"} <= set(c)
+    assert c["class_guess"] == "hit" and c["class_guess"] in se.CLASSES
+    assert c["level_vs_voice_db"] == pytest.approx(-10.0 - -12.0, abs=1.0)  # hit peak -10 dBFS
+    # a stretch of room tone matches no rule: unknown, never a forced label
+    room = se.classify(y, SR, 2.2)
+    assert room["class_guess"] == "unknown" and room["confidence"] == 0.0
+
+
+def test_typing_is_one_event(no_librosa):
+    y = mono(ms.sfx_audio(3.0, [(1.0, "typing")]))
+    sfx = se.detect_sfx(y, SR)
+    assert [e["class_guess"] for e in sfx] == ["typing"], [(e["t"], e["class_guess"]) for e in sfx]
+    assert abs(sfx[0]["t"] - 1.0) <= 0.03
+    assert sfx[0]["count"] == 9 and sfx[0]["rate_hz"] == pytest.approx(9.0, abs=0.3)
+
+
+def test_voice_onsets_not_sfx(no_librosa):
+    spans = [(300, 700), (900, 1400), (1700, 2100), (2600, 3200)]
+    y = mono(ms.sfx_audio(5.0, [(4.0, "hit")], voice_spans=spans))
+    words = mm.words_doc(spans)
+    with_words = se.analyse(y, SR, words)["sfx"]
+    assert [(round(e["t"], 1), e["class_guess"]) for e in with_words] == [(4.0, "hit")]
+    # without the words the tone words do read as onsets: the filter is what removes them
+    without = se.analyse(y, SR, None)
+    assert sum(1 for e in without["sfx"] if any(a / 1000 - 0.03 <= e["t"] <= b / 1000 for a, b in spans)) >= 3
+    assert "voice_filter" in without["not_run"]
+
+
+def test_sfx_over_voice_kept(no_librosa):
+    """A sharp SFX inside a word is still an SFX (and marked over_voice)."""
+    spans = [(500, 2500)]
+    y = mono(ms.sfx_audio(3.5, [(1.5, "hit")], voice_spans=spans))
+    sfx = se.analyse(y, SR, mm.words_doc(spans))["sfx"]
+    assert [(round(e["t"], 1), e["class_guess"], e["over_voice"]) for e in sfx] == [(1.5, "hit", True)]
+    assert sfx[0]["level_vs_voice_db"] == pytest.approx(2.0, abs=1.5)  # hit -10 dBFS vs voice -12
+
+
+# ---------------------------------------------------------------- music
+
+@pytest.mark.parametrize("backend", ["numpy", "librosa"])
+def test_bpm_estimate(backend, monkeypatch):
+    if backend == "numpy":
+        monkeypatch.setitem(sys.modules, "librosa", None)
+    elif not _has_librosa():
+        pytest.skip("librosa not installed")
+    y = mono(ms.sfx_audio(10.0, [], music_bpm=120))
+    mp = se.music_profile(y, SR)
+    assert 118 <= mp["bpm"] <= 122, mp  # 60 or 240 (half / double) would fail here
+    assert mp["bpm_method"].startswith("librosa" if backend == "librosa" else "numpy")
+    oc = mp["bpm_octave_check"]  # the half / double decision is recorded
+    assert oc["half_bpm"]["bpm"] == pytest.approx(mp["bpm"] / 2, abs=0.1)
+    assert oc["double_bpm"]["bpm"] == pytest.approx(mp["bpm"] * 2, abs=0.2)
+    assert "prior" in oc["rule"]
+    assert mp["present"] is True and mp["bpm_conf"] >= 0.5
+
+
+def test_bpm_not_120_biased(no_librosa):
+    y = mono(ms.sfx_audio(10.0, [], music_bpm=90))
+    assert 88 <= se.music_profile(y, SR)["bpm"] <= 92
+
+
+def test_music_beats_not_sfx(no_librosa):
+    """The kicks of a music bed are music, not SFX; a hit well above them is still an SFX."""
+    y = mono(ms.sfx_audio(10.0, [(5.1, "hit", {"db": -6.0})], music_bpm=120))
+    sfx = se.analyse(y, SR)["sfx"]
+    assert [(round(e["t"], 1), e["class_guess"]) for e in sfx] == [(5.1, "hit")]
+
+
+@pytest.mark.parametrize("duck, lo, hi", [(8.0, 6.0, 10.0), (0.0, -1.5, 1.5)])
+def test_ducking(duck, lo, hi, no_librosa):
+    spans = [(1000, 3000), (4500, 6500), (8000, 9500)]
+    y = mono(ms.sfx_audio(11.0, [], voice_spans=spans, music_bpm=120, music_db=-30, duck_db=duck))
+    mp = se.music_profile(y, SR, mm.words_doc(spans))
+    assert lo <= mp["ducking_db"] <= hi, mp["ducking_db"]
+    assert len(mp["energy_per_s"]) == 11
+
+
+def test_beat_cut_share(no_librosa):
+    y = mono(ms.sfx_audio(10.0, [], music_bpm=120))  # beats at 0.25 + k * 0.5
+    mp = se.music_profile(y, SR, cuts=[1.25, 2.27, 3.5, 4.2, 6.1])  # 3 on the beat (+-70 ms), 2 off
+    assert mp["beat_cut_share"] == pytest.approx(0.6)
+    assert se.music_profile(y, SR)["beat_cut_share"] is None
+
+
+# ---------------------------------------------------------------- voice + loudness
+
+@pytest.mark.parametrize("sr", [48000, se.AR])
+def test_lufs_reference_tone(sr):
+    """A 997 Hz sine at -20 dBFS RMS in one channel reads -20 LUFS (BS.1770 calibration), at the
+    reference rate and at the analysis rate; two equal channels read 3 dB more."""
+    t = np.arange(int(3 * sr)) / sr
+    y = np.sin(2 * np.pi * 997 * t) * 10 ** (-20 / 20) * np.sqrt(2)
+    assert se.lufs(y, sr) == pytest.approx(-20.0, abs=0.2)
+    assert se.lufs(np.stack([y, y], axis=1), sr) == pytest.approx(-20.0 + 3.01, abs=0.2)
+    assert se.lufs(y[: int(0.3 * sr)], sr) is None  # shorter than one 400 ms block
+
+
+def test_voice_profile():
+    spans = [(500, 900), (950, 1350), (1850, 2250), (2850, 3250), (3650, 4000)]
+    a = ms.sfx_audio(4.5, [], voice_spans=spans)
+    vp = se.voice_profile(a, SR, mm.words_doc(spans))
+    assert vp["words_per_s"] == pytest.approx(5 / 3.5, abs=0.01)
+    assert vp["pause_median_s"] == pytest.approx(0.5, abs=0.01)  # gaps 0.05 (not a pause), 0.5, 0.6, 0.4
+    assert vp["lufs_scope"] == "words" and vp["lufs"] is not None
+    nv = se.voice_profile(a, SR, None)
+    assert nv["words_per_s"] is None and nv["lufs_scope"] == "mix"
+
+
+# ---------------------------------------------------------------- coupling
+
+def test_sync_offsets_pure():
+    cuts = [1.0, 2.2, 3.6, 4.8]
+    off = se.sync_offsets([c - 2 / 25 for c in cuts], cuts)
+    assert off["n"] == 4 and off["median"] == pytest.approx(-0.08, abs=0.001)
+    assert se.sync_offsets([], cuts) == {"median": None, "p10": None, "p90": None, "n": 0}
+    assert se.sync_offsets([1.0], []) ["n"] == 0
+    assert se.coupled_share(cuts, [0.92, 2.12]) == 0.5 and se.coupled_share([], [1.0]) is None
+
+
+def test_move_onsets_reader():
+    doc = {"moves": [{"t0": 1.0}, {"t0": 1.0005}, {"kind": "x"}],
+           "elements": [{"id": "a", "moves": [{"t0": 2.5, "t1": 3.0}, {"t1": 4.0}]},
+                        {"id": "b", "moves": [{"t0": True}]}]}
+    assert se.move_onsets(doc) == [1.0, 2.5]
+
+
+def test_sync_offsets(tmp_path):
+    """CLI: SFX placed 2 frames (25 fps) before the cuts give a median offset of -0.08 s."""
+    cuts = [1.0, 2.2, 3.6, 4.8]
+    src = ms.make_sfx_track(tmp_path / "ref ממדים.wav", 6.0, [(c - 0.08, "hit") for c in cuts])
+    meas = mm.write_json(tmp_path / "measure.json", {"cuts": [{"t": c, "kind": "hard", "dur_f": 0} for c in cuts]})
+    motion = mm.write_json(tmp_path / "motion.json", {"elements": [{"moves": [{"t0": 2.12}, {"t0": 5.5}]}]})
+    out = tmp_path / "analysis" / "sound.json"
+    r = run_cli("sound_events.py", src, "--out", out, "--measure", meas, "--motion", motion, "--no-librosa")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["schema"] == "sound/1" and doc["labels_are_guesses"] is True
+    assert len(doc["source"]["sha256"]) == 64
+    off = doc["coupling"]["offsets"]["sfx_vs_cuts"]
+    assert off["n"] == 4 and off["median"] == pytest.approx(-0.08, abs=0.02)
+    assert doc["coupling"]["cut_with_sfx_share"] == 1.0
+    assert doc["coupling"]["move_with_sfx_share"] == 0.5
+    assert doc["coupling"]["offsets"]["sfx_vs_moves"]["n"] == 1
+    assert [e["class_guess"] for e in doc["sfx"]] == ["hit"] * 4
+    assert "coupling_cuts" not in doc["not_run"] and "voice_filter" in doc["not_run"]
+    assert "song" not in json.dumps(doc).lower()
+
+
+# ---------------------------------------------------------------- edge cases
+
+def test_no_audio_stream(tmp_path):
+    src = ms.make_silent_video(tmp_path / "silent.mkv", 2.0)
+    out = tmp_path / "sound.json"
+    r = run_cli("sound_events.py", src, "--out", out, "--no-librosa")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(out.read_text(encoding="utf-8"))
+    assert doc["schema"] == "sound/1" and "sound" in doc["not_run"]
+    assert doc["sfx"] == [] and doc["music"]["bpm"] is None and doc["source"]["has_audio"] is False
+    assert doc["coupling"]["offsets"]["sfx_vs_cuts"]["n"] == 0
+    assert doc["source"]["duration_s"] == pytest.approx(2.0, abs=0.1)
+
+
+@pytest.mark.parametrize("kind", ["room", "digital_silence", "tiny"])
+def test_static_or_short_audio(kind, no_librosa):
+    """Room tone only, digital silence or 30 ms: a valid body, empty lists, n=0, no crash."""
+    if kind == "room":
+        a = ms.sfx_audio(6.0, [])
+    elif kind == "digital_silence":
+        a = np.zeros((6 * SR, 2), np.float32)
+    else:
+        a = np.zeros((int(0.03 * SR), 2), np.float32)
+    doc = se.analyse(a, SR, None, cuts=[1.0, 2.0], moves=[])
+    assert doc["sfx"] == [] and doc["music"]["bpm"] is None
+    assert doc["coupling"]["cut_with_sfx_share"] == 0.0
+    assert doc["coupling"]["move_with_sfx_share"] is None
+    assert all(v["n"] == 0 for v in doc["coupling"]["offsets"].values())
+    json.dumps(doc)  # serialisable: plain floats, no numpy types, no NaN
+
+
+def test_bad_input(tmp_path):
+    r = run_cli("sound_events.py", tmp_path / "missing.wav", "--out", tmp_path / "s.json", "--no-librosa")
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+    src = ms.make_sfx_track(tmp_path / "a.wav", 1.0, [])
+    bad = tmp_path / "w.json"
+    bad.write_text("{nope", encoding="utf-8")
+    r = run_cli("sound_events.py", src, "--out", tmp_path / "s.json", "--words", bad, "--no-librosa")
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+    assert not (tmp_path / "s.json").exists()
+    with pytest.raises(se.BadInput):
+        se.word_spans({"words": [{"start": "x", "end": 1.0}]})
+    with pytest.raises(se.BadInput):
+        se.cut_times({"cuts": "nope"})
