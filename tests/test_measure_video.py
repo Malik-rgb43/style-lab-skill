@@ -203,8 +203,8 @@ def test_missing_haar_cascade_faces_not_run(tmp_path, monkeypatch):
     assert "faces" in _doc(out)["not_run"]
 
 
-JUMP = [(0.0, 1.0, "x", 0.2, 0.4, "linear"), (1.0, 1.0, "x", 0.4, 0.8, "linear"),
-        (1.0, 1.0, "scale", 1.0, 1.5, "linear")]
+JUMP = [(0.0, 1.0, "x", 0.2, 0.3, "linear"), (1.0, 1.0, "x", 0.3, 0.85, "linear"),
+        (1.0, 1.0, "y", 0.3, 0.7, "linear"), (1.0, 1.0, "scale", 1.0, 1.5, "linear")]
 
 
 def test_jump_cut_found_inside_one_shot(tmp_path):
@@ -348,3 +348,32 @@ def test_measure_json_has_text_boxes_list(tmp_path):
     assert mv.main([str(p), "--out", str(out), "--faces", "off"]) == 0
     d = _doc(out)
     assert d["text"]["boxes"] == [] and mv.validate(d) == []
+
+
+def test_stepped_on_threes_has_no_jumps(tmp_path):
+    p = _clip(tmp_path, dur_s=4, fps=30, moves=[(0.0, 4.0, "x", 0.1, 0.9, "power2.out")], stepped=3)
+    frames, fps = mv.decode_gray(p, 320)
+    assert mv.detect_cuts(frames, fps) == []
+
+
+def test_12fps_resampled_to_30_has_no_jumps(tmp_path):
+    src = _clip(tmp_path, "src12.mp4", dur_s=4, fps=12, moves=[(0.0, 4.0, "x", 0.1, 0.9, "power2.out")])
+    dst = tmp_path / "v30.mp4"
+    subprocess_run = __import__("subprocess").run
+    subprocess_run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-r", "30", "-c:v", "libx264",
+                    "-qp", "0", "-pix_fmt", "yuv420p", str(dst)], check=True)
+    frames, fps = mv.decode_gray(dst, 320)
+    assert mv.detect_cuts(frames, fps) == []
+
+
+def test_small_repaint_is_ui_change_not_a_cut():
+    n, h, w = 60, 180, 320
+    frames = np.full((n, h, w), 40, np.uint8)
+    for i in range(n):
+        x = 20 + 2 * i
+        frames[i, 10:30, x:x + 20] = 220  # something small moves steadily
+    frames[30:, 100:150, 150:250] = 200  # a rectangle repaints (about 9 % of the frame)
+    cuts, ui = mv.detect_cuts_ex(frames, 25)
+    assert cuts == []
+    assert [u["kind"] for u in ui] == ["ui_change"] and abs(ui[0]["t"] - 30 / 25) < 1e-6
+    assert ui[0]["area"] < 0.15

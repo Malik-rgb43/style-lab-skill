@@ -13,7 +13,12 @@ What is measured (all local, free):
     (the histogram distance is a 1-D earth mover's distance, so a slow dissolve stays small per
     frame). Hard cut: d above median + 6 MAD of the whole clip and above 0.25. Gradual cut: a run
     of at least 6 frames of sustained moderate change whose summed distance is above 0.5 and whose
-    end frames differ by more than 0.35.
+    end frames differ by more than 0.35. Jump cut (kind "jump"): a single-frame spike of the pixel
+    change inside one shot (a talking-head jump), >= 5x the median change of the MOVING frames
+    around it and >= 0.03; stepped or frame-rate-converted hold frames do not count. A spike whose
+    changed pixels fit in < 15 % of the frame is a screen repaint: it goes to "ui_changes", never to
+    "cuts". NOTE: "cuts" entries of kind "jump" are EDIT POINTS, not shot boundaries (they do not
+    start a new shot); only hard and gradual cuts split shots.
   - cadence: how many frames are real new pictures (on-twos animation, 24 fps in a 30 fps file).
     Measured only where something moves, so a static clip does not read as "all repeats".
   - shots: the spans between cuts, each with an OKLab palette (palette.py converters), the share of
@@ -260,12 +265,20 @@ def _med_mad(x):
 
 
 def detect_cuts(frames, fps):
-    """[{"t", "kind": "hard"|"gradual", "dur_f"}] sorted by time (see the module docstring)."""
+    """[{"t", "kind": "hard"|"gradual"|"jump", "dur_f"}] sorted by time (see the module docstring).
+    "jump" entries are edit points inside a shot, not shot boundaries."""
+    return detect_cuts_ex(frames, fps)[0]
+
+
+def detect_cuts_ex(frames, fps):
+    """(cuts, ui_changes): ui_changes are spikes confined to a small part of the frame (a screen
+    recording repaint); they are never cuts."""
     n = len(frames)
     if n < 2:
-        return []
-    hist, pix, _ = frame_distances(frames)
-    return _cuts_from_distance(np.maximum(hist, pix), frames, fps, pix)
+        return [], []
+    hist, pix, changed = frame_distances(frames)
+    ui = []
+    return _cuts_from_distance(np.maximum(hist, pix), frames, fps, pix, changed, ui), ui
 
 
 JUMP_MIN = 0.03   # a jump cut changes at least this much of the picture in one frame
@@ -273,23 +286,49 @@ JUMP_X = 5.0      # ... and at least this many times the local median change (+-
 GRAD_MAX_S = 2.0  # a longer run of change is a slow move or fade, not a transition
 
 
-def _jump_cuts(pix, skip, fps):
-    """Single-frame spikes of the pixel change (a jump cut inside one shot, e.g. a talking head)."""
-    out, n = [], len(pix)
+UI_AREA = 0.15    # a spike whose changed pixels fit in less than this share of the frame is a repaint
+
+
+def _jump_cuts(pix, changed, frames, skip, fps):
+    """(jumps, ui_changes): single-frame spikes of the pixel change. The local median is taken over
+    MOVING frames only (+-15 frames, at least 4 of them), so stepped ("on twos/threes") and
+    frame-rate-converted footage, whose hold frames read as zero change, does not fake spikes. A
+    spike must be >= 5x that median, >= 0.03, the largest moving frame of its window, and alone (not the
+    edge of sustained motion). Changed pixels confined to < 15 % of the frame = ui_change."""
+    jumps, uis, n = [], [], len(pix)
     for i in range(1, n):
         if pix[i] < JUMP_MIN or any(abs(i - k) <= 2 for k in skip):
             continue
-        win = np.concatenate([pix[max(1, i - 15):i], pix[i + 1:i + 16]])
-        if not len(win) or pix[i] < JUMP_X * float(np.median(win)):
+        lo, hi = max(1, i - 15), min(n, i + 16)
+        idx = [k for k in range(lo, hi) if k != i and changed[k] >= REPEAT_FRAC]
+        if len(idx) < 4:
+            continue
+        win = pix[idx]
+        if pix[i] < JUMP_X * float(np.median(win)) or pix[i] < float(win.max()):
             continue
         nb = max(pix[i - 1] if i > 1 else 0.0, pix[i + 1] if i + 1 < n else 0.0)
         if nb > pix[i] / 3:  # a single-frame spike, not the edge of sustained motion
             continue
-        out.append({"t": round(i / fps, 4), "kind": "jump", "dur_f": 1})
-    return out
+        mask = np.abs(frames[i].astype(np.int16) - frames[i - 1].astype(np.int16)) > CHANGE_PX
+        if i >= 2:  # drop what was already changing a frame earlier (steady motion elsewhere)
+            prev = np.abs(frames[i - 1].astype(np.int16) - frames[i - 2].astype(np.int16)) > CHANGE_PX
+            dil = prev.copy()
+            for dy in range(-3, 4):
+                for dx in range(-3, 4):
+                    dil |= np.roll(np.roll(prev, dy, axis=0), dx, axis=1)
+            mask &= ~dil
+        ys, xs = np.where(mask)
+        area = ((ys.max() - ys.min() + 1) * (xs.max() - xs.min() + 1) / mask.size) if len(ys) else 0.0
+        rec = {"t": round(i / fps, 4), "kind": "ui_change" if area < UI_AREA else "jump", "dur_f": 1}
+        if rec["kind"] == "ui_change":
+            rec["area"] = round(float(area), 4)
+            uis.append(rec)
+        else:
+            jumps.append(rec)
+    return jumps, uis
 
 
-def _cuts_from_distance(d, frames, fps, pix=None):
+def _cuts_from_distance(d, frames, fps, pix=None, changed=None, ui_out=None):
     n = len(d)
     med, mad = _med_mad(d[1:])
     hard_thr = max(med + HARD_MAD_K * mad, HARD_MIN)
@@ -329,7 +368,12 @@ def _cuts_from_distance(d, frames, fps, pix=None):
             if c["kind"] == "gradual":
                 f0 = int(round(c["t"] * fps))
                 skip.extend(range(f0, f0 + c["dur_f"] + 1))
-        cuts += _jump_cuts(pix, skip, fps)
+        if changed is None:
+            changed = frame_distances(frames)[2]
+        jumps, uis = _jump_cuts(pix, changed, frames, skip, fps)
+        cuts += jumps
+        if ui_out is not None:
+            ui_out.extend(uis)
     return sorted(cuts, key=lambda c: c["t"])
 
 
@@ -709,8 +753,10 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
     hist, pix, changed = frame_distances(frames)
     imp = import_analysis(from_analysis, fps) if from_analysis else {"imported": {}}
     cuts = imp.get("cuts")
+    ui_changes = []
+    own = _cuts_from_distance(np.maximum(hist, pix), frames, fps, pix, changed, ui_changes) if n >= 2 else []
     if cuts is None:
-        cuts = _cuts_from_distance(np.maximum(hist, pix), frames, fps, pix) if n >= 2 else []
+        cuts = own
     cad = _cadence_from_changed(changed, frames, fps) if n >= 4 else cadence(frames, fps)
 
     cv2 = _cv2()
@@ -790,6 +836,7 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
                   "vfr": info["vfr"]},
         "notes": info["notes"],
         "cuts": cuts,
+        "ui_changes": ui_changes,
         "shots": shots,
         "cadence": cad,
         "faces_summary": faces_summary,
