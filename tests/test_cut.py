@@ -1,0 +1,333 @@
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "fixtures"))
+import make_media as mm  # noqa: E402
+
+import cut  # noqa: E402
+from conftest import run_cli  # noqa: E402
+
+# seven "words" (400 Hz bursts) over a steady room tone; w1 -> w2 is a 0.8 s pause
+SPANS = [(500, 900), (1000, 1400), (2200, 2600), (2700, 3100), (3600, 4000), (4700, 5100), (5200, 5500)]
+DUR = 6500
+KEEP = {"keep": [[0, 3], [5, 6]]}
+
+
+def _db(spans=SPANS, dur=DUR, **audio_kw):
+    a = mm.tone_track(dur, spans, **audio_kw)
+    return cut.slice_db(a.mean(axis=1))
+
+
+def _plan(spans=SPANS, keep=KEEP, preset="lesson", dur=DUR, flags=None, asr=None, audio_kw=None, **over):
+    doc = mm.words_doc(spans, flags, asr)
+    opts = cut.resolve_opts(preset, over)
+    return cut.plan_pieces(doc["words"], keep, _db(spans, dur, **(audio_kw or {})), opts["fps"], opts)
+
+
+def _quiet(db, t_ms):
+    """the frame boundary at t_ms is in silence: loudest slice within +-30 ms below floor + 10 dB."""
+    k = int(t_ms // 10)
+    return db[max(0, k - 3): k + 3].max() < np.percentile(db, 10) + 10
+
+
+def _inside(t, span):
+    return span[0] < t < span[1]
+
+
+# ---------------------------------------------------------------- presets
+
+def test_presets_exact_values():
+    assert cut.PRESETS["reels"] == {"fps": 30, "lead_ms": 60, "tail_ms": 80, "merge_gap_ms": 180,
+                                    "pause_max_ms": 260, "pause_keep_ms": 70, "end_air_ms": 1000}
+    assert cut.PRESETS["lesson"] == {"fps": 25, "lead_ms": 80, "tail_ms": 120, "merge_gap_ms": 250,
+                                     "pause_max_ms": 450, "pause_keep_ms": 150, "end_air_ms": None}
+    lesson = cut.resolve_opts("lesson")
+    assert lesson == cut.resolve_opts(None)
+    assert lesson["inside_ms"] == 60 and lesson["xfade_ms"] == 15.0 and lesson["sliver_frames"] == 6
+
+
+def test_explicit_flag_overrides_preset():
+    o = cut.resolve_opts("reels", {"pause_keep_ms": 100, "fps": 25})
+    assert o["pause_keep_ms"] == 100 and o["fps"] == 25
+    assert o["lead_ms"] == 60 and o["end_air_ms"] == 1000
+
+
+# ---------------------------------------------------------------- planning (pure)
+
+def test_edges_on_frame_boundaries_and_in_silence():
+    plan = _plan()
+    db = _db()
+    fms = 1000 / 25
+    assert len(plan["pieces"]) == 3  # the 0.8 s pause splits the first span
+    for p in plan["pieces"]:
+        assert abs(p["src_in_ms"] - p["f_in"] * fms) < 0.001 and abs(p["src_out_ms"] - p["f_out"] * fms) < 0.001
+        for t in (p["src_in_ms"], p["src_out_ms"]):
+            assert _quiet(db, t), t
+    assert plan["soft_joins"] == []
+
+
+def test_long_pause_is_shortened_to_about_twice_pause_keep():
+    plan = _plan()
+    w = {x["src_i"]: x for x in plan["words"]}
+    kept = w[2]["start_ms"] - w[1]["end_ms"]
+    assert abs(kept - 2 * 150) <= 40, kept
+    plan = _plan(preset="reels")
+    w = {x["src_i"]: x for x in plan["words"]}
+    kept = w[2]["start_ms"] - w[1]["end_ms"]
+    assert abs(kept - 2 * 70) <= 1000 / 30 + 1, kept
+
+
+def test_spans_closer_than_merge_gap_merge():
+    # keep w0 and w2, drop w1; the source gap w0 -> w2 is 500 ms
+    spans = [(500, 800), (1000, 1100), (1300, 1600), (2600, 2900)]
+    plan = _plan(spans, {"keep": [[0, 0], [2, 2]]}, dur=3500)
+    assert [(p["w0"], p["w1"]) for p in plan["pieces"]] == [(0, 0), (2, 2)]
+    plan = _plan(spans, {"keep": [[0, 0], [2, 2]]}, dur=3500, merge_gap_ms=600)
+    assert [(p["w0"], p["w1"]) for p in plan["pieces"]] == [(0, 2)]
+
+
+def test_exclude_ms_splits_a_piece():
+    plan = _plan(keep={"keep": [[2, 3]], "exclude_ms": [[2620, 2680]]})
+    pcs = [(p["w0"], p["w1"], p["src_in_ms"], p["src_out_ms"]) for p in plan["pieces"]]
+    assert len(pcs) == 2
+    assert pcs[0][1] == 2 and pcs[0][3] == 2600
+    assert pcs[1][0] == 3 and pcs[1][2] == 2680
+    for p in plan["pieces"]:
+        assert p["src_out_ms"] <= 2620 or p["src_in_ms"] >= 2680
+
+
+def test_low_score_word_never_cut_inside_asr_or_refined_span():
+    spans = [(500, 900), (1000, 1300), (1900, 2300)]
+    # out-point: ASR thinks the low-score word runs to 1600
+    plan = _plan(spans, {"keep": [[0, 1]]}, dur=3000, flags={1: "low_score"}, asr={1: (1000, 1600)})
+    out = plan["pieces"][-1]["src_out_ms"]
+    assert out >= 1600, out
+    # in-point: ASR puts the start at 700, before the refined 1000
+    spans = [(200, 500), (1000, 1300), (1900, 2300)]
+    plan = _plan(spans, {"keep": [[1, 2]]}, dur=3000, flags={1: "low_score"}, asr={1: (700, 1300)})
+    p0 = plan["pieces"][0]
+    assert p0["src_in_ms"] <= 700, p0
+    for p in plan["pieces"]:
+        for t in (p["src_in_ms"], p["src_out_ms"]):
+            assert not _inside(t, (700, 1300))
+    # the remapped word keeps its refined times
+    w1 = next(w for w in plan["words"] if w["src_i"] == 1)
+    assert w1["end_ms"] - w1["start_ms"] == 300
+
+
+@pytest.mark.parametrize("flag", ["unaligned", "unaligned_script"])
+def test_unaligned_word_never_cut_inside_asr_span(flag):
+    # w0 runs straight into w1 (ASR start 1000); the audio of w1 starts at 1100
+    spans = [(500, 1000), (1000, 1400), (2000, 2300)]
+    doc = mm.words_doc(spans, {1: flag}, {1: (1000, 1400)})
+    db = cut.slice_db(mm.tone_track(3000, [(500, 1000), (1100, 1400), (2000, 2300)]).mean(axis=1))
+    o = cut.resolve_opts("lesson")
+    plan = cut.plan_pieces(doc["words"], {"keep": [[0, 0]]}, db, 25, o)
+    out = plan["pieces"][0]["src_out_ms"]
+    assert not _inside(out, (1000, 1400)), out
+    # the same plan without the flag would cut at 1040, inside the ASR span
+    doc2 = mm.words_doc(spans)
+    plan2 = cut.plan_pieces(doc2["words"], {"keep": [[0, 0]]}, db, 25, o)
+    assert _inside(plan2["pieces"][0]["src_out_ms"], (1000, 1400))
+    # in-point side: keep the unaligned word itself, its ASR start is before the refined start
+    spans = [(200, 500), (1100, 1400), (2000, 2300)]
+    doc = mm.words_doc(spans, {1: flag}, {1: (800, 1500)})
+    db = cut.slice_db(mm.tone_track(3000, spans).mean(axis=1))
+    plan = cut.plan_pieces(doc["words"], {"keep": [[1, 1]]}, db, 25, o)
+    p = plan["pieces"][0]
+    assert not _inside(p["src_in_ms"], (800, 1500)) and not _inside(p["src_out_ms"], (800, 1500)), p
+
+
+def test_edge_without_quiet_frame_lands_on_quietest_and_is_listed():
+    spans = [(500, 1000), (1000, 1500), (1500, 2000)]
+    kw = {"continuous": (500, 2000), "dips": [(1080, 1160, 12)]}
+    plan = _plan(spans, {"keep": [[0, 0]]}, dur=3000, audio_kw=kw)
+    p = plan["pieces"][0]
+    assert p["src_out_ms"] == 1120  # the dip: quietest frame in reach, still voiced
+    soft = [s for s in plan["soft_joins"] if s["edge"] == "out"]
+    assert len(soft) == 1 and soft[0]["src_ms"] == 1120 and soft[0]["piece"] == p["id"]
+    assert soft[0]["db"] >= soft[0]["quiet_thr_db"]
+
+
+def test_retime_and_set_out_ms_move_the_edges():
+    # the aligner says w1 ends at 1400; the audio (and the retime) say 1250
+    db = _db([(500, 900), (1000, 1250)] + SPANS[2:])
+    doc = mm.words_doc(SPANS)
+    o = cut.resolve_opts("lesson")
+    plan = cut.plan_pieces(doc["words"], {"keep": [[0, 1]], "retime": {"1": [1000, 1250]}}, db, 25, o)
+    assert plan["pieces"][-1]["src_out_ms"] == 1360  # 1250 + 120 tail on the frame grid
+    assert cut.plan_pieces(doc["words"], {"keep": [[0, 1]]}, db, 25, o)["pieces"][-1]["src_out_ms"] >= 1480
+    base = _plan(keep={"keep": [[2, 3]]})
+    old_out = base["pieces"][-1]["src_out_ms"]
+    plan = _plan(keep={"keep": [[2, 3]], "set_out_ms": [[old_out, 3300]]})
+    assert abs(plan["pieces"][-1]["src_out_ms"] - 3300) <= 20
+
+
+def test_placeholder_after_a_word_that_does_not_end_a_piece_fails():
+    with pytest.raises(ValueError, match="does not end a piece"):
+        _plan(keep={"keep": [[0, 3]], "placeholders": [{"id": "x", "after_word": 2, "dur_s": 1.0}]})
+
+
+# ---------------------------------------------------------------- CLI + render (real ffmpeg)
+
+def _probe(path):
+    r = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries",
+                        "stream=codec_type,duration,nb_read_frames,r_frame_rate", "-of", "json", str(path)],
+                       capture_output=True, text=True, check=True)
+    return {s["codec_type"]: s for s in json.loads(r.stdout)["streams"]}
+
+
+def _audio(path):
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-vn", "-ac", "2", "-ar", "48000",
+                        "-f", "f32le", "-"], capture_output=True, check=True)
+    return np.frombuffer(r.stdout, dtype=np.float32).reshape(-1, 2)
+
+
+def _setup(tmp_path, spans=SPANS, dur=DUR, keep=KEEP, fps=25, video="testsrc2", **audio_kw):
+    src = mm.make_clip(tmp_path / "src.mkv", spans, dur, fps=fps, video=video, **audio_kw)
+    words = mm.write_json(tmp_path / "words.aligned.json", mm.words_doc(spans))
+    kp = mm.write_json(tmp_path / "keep.json", keep)
+    return src, words, kp
+
+
+@pytest.fixture(scope="module")
+def base_clip(tmp_path_factory):
+    """the default 25 fps clip (ramp video), its aligned words and keep.json, shared by the render tests."""
+    d = tmp_path_factory.mktemp("cutclip")
+    return _setup(d, video="ramp")
+
+
+def _gray(path):
+    r = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                       capture_output=True, check=True)
+    return np.frombuffer(r.stdout, dtype=np.uint8).reshape(-1, 160 * 90).mean(axis=1)
+
+
+def _av_ok(mp4, fps, frames):
+    s = _probe(mp4)
+    assert int(s["video"]["nb_read_frames"]) == frames
+    assert s["video"]["r_frame_rate"] == f"{fps}/1"
+    assert abs(float(s["audio"]["duration"]) - float(s["video"]["duration"])) < 1 / fps
+
+
+def test_render_lesson_writes_outputs_and_stays_in_sync(tmp_path, home, base_clip):
+    src, words, kp = base_clip
+    stem = tmp_path / "out" / "edit"
+    r = run_cli("cut.py", src, words, kp, "--out", stem)
+    assert r.returncode == 0, r.stderr
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    for k in ("pieces", "joins", "long_gaps_kept", "soft_joins", "placeholders", "channel_balance_db"):
+        assert k in cuts
+    p0 = cuts["pieces"][0]
+    for k in ("src_in", "src_out", "dst_in", "frames", "f_in", "f_out", "w0", "w1", "text"):
+        assert k in p0
+    assert cuts["fps"] == 25 and cuts["settings"]["pause_keep_ms"] == 150
+    wj = json.loads(Path(f"{stem}.words.json").read_text(encoding="utf-8"))
+    assert [w["src_i"] for w in wj["words"]] == [0, 1, 2, 3, 5, 6]
+    _av_ok(f"{stem}.mp4", 25, cuts["frames"])
+    # the cut audio has its words where words.json says
+    db = cut.slice_db(_audio(f"{stem}.mp4").mean(axis=1))
+    for w in wj["words"]:
+        mid = (w["start_ms"] + w["end_ms"]) // 20
+        assert db[mid] > -20
+
+
+def test_25fps_source_cut_at_30fps_keeps_av_in_sync(tmp_path, home, base_clip):
+    src, words, kp = base_clip
+    stem = tmp_path / "reel"
+    r = run_cli("cut.py", src, words, kp, "--out", stem, "--preset", "reels")
+    assert r.returncode == 0, r.stderr
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    assert cuts["fps"] == 30
+    fms = 1000 / 30
+    for p in cuts["pieces"]:
+        assert abs(p["src_in_ms"] - p["f_in"] * fms) < 0.001 and abs(p["src_out_ms"] - p["f_out"] * fms) < 0.001
+    _av_ok(f"{stem}.mp4", 30, cuts["frames"])
+    # every output frame shows the source frame of its source time (luma = 16 + source frame number)
+    src_gray, out_gray = _gray(src), _gray(f"{stem}.mp4")
+    for p in cuts["pieces"]:
+        for m in range(p["dst_f"], p["dst_f"] + p["frames"]):
+            t = p["src_in_ms"] / 1000 + (m - p["dst_f"]) / 30
+            n = int(np.argmin(np.abs(src_gray - out_gray[m])))
+            assert abs(n / 25 - t) <= 1 / 25 + 1e-6, (m, t, n)
+
+
+def test_unequal_channels_are_balanced(tmp_path, home):
+    src, words, kp = _setup(tmp_path, left_db=6.0)
+    stem = tmp_path / "bal"
+    r = run_cli("cut.py", src, words, kp, "--out", stem)
+    assert r.returncode == 0, r.stderr
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    assert abs(cuts["channel_balance_db"] - 6.0) < 0.3
+    a = _audio(f"{stem}.mp4")
+    rms = np.sqrt((a.astype(np.float64) ** 2).mean(axis=0))
+    assert abs(20 * np.log10(rms[0] / rms[1])) < 0.5
+
+
+def test_balanced_source_is_left_alone(tmp_path, home, base_clip):
+    src, words, kp = base_clip
+    stem = tmp_path / "eq"
+    r = run_cli("cut.py", src, words, kp, "--out", stem, "--no-render")
+    assert r.returncode == 0, r.stderr
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    assert abs(cuts["channel_balance_db"]) < 0.5 and cuts["channel_balance"] == "none"
+    assert not Path(f"{stem}.mp4").exists()
+
+
+def test_placeholder_inserts_black_and_room_tone(tmp_path, home):
+    keep = {"keep": [[0, 3], [5, 6]], "placeholders": [{"id": "ph1", "after_word": 3, "dur_s": 1.0}]}
+    src, words, kp = _setup(tmp_path, dur=9500, keep=keep)
+    stem = tmp_path / "ph"
+    r = run_cli("cut.py", src, words, kp, "--out", stem)
+    assert r.returncode == 0, r.stderr
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    ph = cuts["placeholders"][0]
+    assert ph["id"] == "ph1" and abs(ph["end"] - ph["start"] - 1.0) < 1e-6
+    rec = next(p for p in cuts["pieces"] if p.get("placeholder") == "ph1")
+    assert rec["frames"] == 25
+    _av_ok(f"{stem}.mp4", 25, cuts["frames"])
+    mid = (ph["start"] + ph["end"]) / 2
+    fr = subprocess.run(["ffmpeg", "-v", "error", "-ss", str(mid), "-i", f"{stem}.mp4", "-frames:v", "1",
+                         "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
+    assert np.frombuffer(fr, dtype=np.uint8).mean() < 20  # black
+    a = _audio(f"{stem}.mp4").mean(axis=1)
+    seg = a[int((ph["start"] + 0.1) * 48000): int((ph["end"] - 0.1) * 48000)]
+    level = 20 * np.log10(np.sqrt((seg.astype(np.float64) ** 2).mean()) + 1e-12)
+    assert -65 < level < -45  # room tone, not digital silence and not a word
+
+
+def test_preset_equals_explicit_flags(tmp_path, home, base_clip):
+    src, words, kp = base_clip
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    r1 = run_cli("cut.py", src, words, kp, "--out", a, "--preset", "reels", "--no-render")
+    r2 = run_cli("cut.py", src, words, kp, "--out", b, "--no-render", "--fps", "30", "--lead-ms", "60",
+                 "--tail-ms", "80", "--merge-gap-ms", "180", "--pause-max-ms", "260", "--pause-keep-ms", "70",
+                 "--end-air-ms", "1000")
+    assert r1.returncode == 0 and r2.returncode == 0, r1.stderr + r2.stderr
+    c1 = json.loads(Path(f"{a}.cuts.json").read_text(encoding="utf-8"))
+    c2 = json.loads(Path(f"{b}.cuts.json").read_text(encoding="utf-8"))
+    for k in ("fps", "frames", "settings", "pieces", "joins"):
+        assert c1[k] == c2[k], k
+    r3 = run_cli("cut.py", src, words, kp, "--out", tmp_path / "c", "--preset", "reels",
+                 "--pause-keep-ms", "100", "--no-render")
+    c3 = json.loads(Path(f"{tmp_path / 'c'}.cuts.json").read_text(encoding="utf-8"))
+    assert c3["settings"]["pause_keep_ms"] == 100 and c3["fps"] == 30
+
+
+def test_missing_ffmpeg_exits_3_one_line(tmp_path, home, monkeypatch):
+    kp = mm.write_json(tmp_path / "keep.json", KEEP)
+    words = mm.write_json(tmp_path / "w.json", mm.words_doc(SPANS))
+    empty = tmp_path / "nobin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    r = run_cli("cut.py", tmp_path / "src.mkv", words, kp, "--out", tmp_path / "x")
+    assert r.returncode == 3
+    lines = [x for x in r.stderr.splitlines() if x.strip()]
+    assert len(lines) == 1 and "ffmpeg" in lines[0]
+    assert not list(tmp_path.glob("x*"))
