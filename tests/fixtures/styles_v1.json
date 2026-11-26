@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "styles": [
+    {
+      "slug": "gabi-organic",
+      "name": "גבי אורגני",
+      "description": "d",
+      "creator": "c",
+      "pack": "C:/fake/gabi-organic/pack",
+      "skill": "C:/fake/gabi-organic/SKILL.md",
+      "fonts": "brand",
+      "colors": "brand",
+      "theme": "dark",
+      "status": "ready",
+      "aliases": [],
+      "board_url": "",
+      "created": "2026-11-01",
+      "updated": "2026-11-02"
+    },
+    {
+      "slug": "gabi-organic-en",
+      "name": "Gabi Organic EN",
+      "description": "d",
+      "creator": "c",
+      "pack": "C:/fake/gabi-organic-en/pack",
+      "skill": "C:/fake/gabi-organic-en/SKILL.md",
+      "fonts": "brand",
+      "colors": "brand",
+      "theme": "dark",
+      "status": "ready",
+      "aliases": [],
+      "board_url": "",
+      "created": "2026-11-01",
+      "updated": "2026-11-02"
+    },
+    {
+      "slug": "gabi-course",
+      "name": "קורס גבי",
+      "description": "d",
+      "creator": "c",
+      "pack": "C:/fake/gabi-course/pack",
+      "skill": "C:/fake/gabi-course/SKILL.md",
+      "fonts": "brand",
+      "colors": "brand",
+      "theme": "dark",
+      "status": "ready",
+      "aliases": [],
+      "board_url": "",
+      "created": "2026-11-01",
+      "updated": "2026-11-02"
+    }
+  ]
+}
