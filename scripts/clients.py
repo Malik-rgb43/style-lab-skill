@@ -279,7 +279,11 @@ WRITERS = {"add": cmd_add, "set": cmd_set, "link": cmd_link, "unlink": cmd_unlin
            "restore": cmd_restore}
 
 
-def main():
+def main(argv=None):
+    return store.exit_on_lock_timeout(_main, argv)
+
+
+def _main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("add")
@@ -295,7 +299,7 @@ def main():
     a = sub.add_parser("restore"); a.add_argument("slug")
     a = sub.add_parser("palette"); a.add_argument("client")
     a.add_argument("--pick", choices=("monochrome", "analogous", "accent"))
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     store.print_utf8()
     if args.cmd == "list":

@@ -494,6 +494,11 @@ def save(client_key, source_hex, kind):
 
 def main(argv=None):
     import store
+    return store.exit_on_lock_timeout(_main, argv)
+
+
+def _main(argv=None):
+    import store
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("hex")
     p.add_argument("--json", action="store_true")

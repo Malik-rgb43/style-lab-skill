@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import threading
 import time
 
@@ -133,3 +134,48 @@ def test_readers_during_writers(home):
     assert codes == [0, 0, 0, 0]
     data = store.read_json(p, [])
     assert len(data) == 100 and len(set(data)) == 100
+
+
+def test_home_relative_env_is_made_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("STYLE_LAB_HOME", "rel-home")
+    h = store.home()
+    assert h.is_absolute() and h == tmp_path / "rel-home" and h.is_dir()
+
+
+def test_lock_timeout_names_the_lock(home):
+    p = store.path("y.json")
+    with store.lock(p):
+        with pytest.raises(store.LockTimeout) as ei:
+            with store.lock(p, timeout=0.1):
+                pass
+    assert isinstance(ei.value, TimeoutError) and ei.value.lock_path == p.with_suffix(".json.lock")
+
+
+def _hold(p):
+    lk = p.with_suffix(p.suffix + ".lock")
+    lk.parent.mkdir(parents=True, exist_ok=True)
+    lk.write_text("")
+    return lk
+
+
+@pytest.mark.parametrize("script,argv,target", [
+    ("styles", ["styles.py", "add", "s1", "--name", "S One", "--pack", "."], "styles.json"),
+    ("clients", ["clients.py", "add", "--name", "Demo"], "clients.json"),
+    ("palette", ["#008754", "--save", "demo", "--pick", "accent"], "clients.json"),
+    ("doctor", ["session", "--set", "figma=ok"], "capabilities.json"),
+])
+def test_cli_lock_timeout_is_one_readable_line(home, monkeypatch, capsys, script, argv, target):
+    import importlib
+    mod = importlib.import_module(script)
+    monkeypatch.setattr(store, "LOCK_TIMEOUT", 0.1)
+    lk = _hold(store.path(target))
+    if script in ("styles", "clients"):
+        monkeypatch.setattr(sys, "argv", argv)
+        rc = mod.main()
+    else:
+        rc = mod.main(argv)
+    err = capsys.readouterr().err.strip().splitlines()
+    assert rc == 2 and len(err) == 1, err
+    assert str(lk) in err[0] and "another session is writing; retry, or delete the lock if no session is running" in err[0]
+    assert "Traceback" not in err[0]

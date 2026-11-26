@@ -270,7 +270,11 @@ def cmd_migrate(args):
 WRITERS = {"add": cmd_add, "set": cmd_set, "remove": cmd_remove}
 
 
-def main():
+def main(argv=None):
+    return store.exit_on_lock_timeout(_main, argv)
+
+
+def _main(argv=None):
     global _REG_OVERRIDE
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--registry")
@@ -291,7 +295,7 @@ def main():
     a = sub.add_parser("remove"); a.add_argument("slug")
     sub.add_parser("check")
     sub.add_parser("migrate")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     store.print_utf8()
     _REG_OVERRIDE = args.registry

@@ -271,6 +271,10 @@ def cmd_session(args):
 
 
 def main(argv=None):
+    return store.exit_on_lock_timeout(_main, argv)
+
+
+def _main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--json", action="store_true")
     p.add_argument("--deep", action="store_true", help="also probe torch CUDA (slow)")

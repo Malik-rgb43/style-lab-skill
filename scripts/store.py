@@ -15,6 +15,8 @@ import time
 from pathlib import Path
 
 STALE_LOCK_SECONDS = 60.0
+LOCK_TIMEOUT = 10.0  # seconds a writer waits for another session's lock
+LOCK_BUSY = "another session is writing; retry, or delete the lock if no session is running"
 
 _HEB = {
     "א": "a", "ב": "b", "ג": "g", "ד": "d", "ה": "h", "ו": "v", "ז": "z",
@@ -34,7 +36,7 @@ def print_utf8():
 
 def home() -> Path:
     env = os.environ.get("STYLE_LAB_HOME")
-    h = Path(env) if env else Path.home() / ".claude" / "style-lab"
+    h = Path(os.path.abspath(os.path.expanduser(env))) if env else Path.home() / ".claude" / "style-lab"
     h.mkdir(parents=True, exist_ok=True)
     return h
 
@@ -90,9 +92,27 @@ def write_json(p: Path, data) -> None:
                 os.unlink(tmp)
 
 
+class LockTimeout(TimeoutError):
+    """Another writer held `lock_path` for longer than the timeout."""
+
+    def __init__(self, lock_path):
+        self.lock_path = Path(lock_path)
+        super().__init__(f"could not acquire lock: {self.lock_path}")
+
+
+def exit_on_lock_timeout(fn, *args):
+    """Run a CLI main; a busy lock becomes one readable line on stderr and exit code 2."""
+    try:
+        return fn(*args)
+    except LockTimeout as e:
+        print(f"lock busy: {e.lock_path}: {LOCK_BUSY}", file=sys.stderr)
+        return 2
+
+
 @contextlib.contextmanager
-def lock(p: Path, timeout: float = 10.0):
+def lock(p: Path, timeout: float = None):
     p = Path(p)
+    timeout = LOCK_TIMEOUT if timeout is None else timeout
     p.parent.mkdir(parents=True, exist_ok=True)
     lk = p.with_suffix(p.suffix + ".lock")
     deadline = time.monotonic() + timeout
@@ -119,7 +139,7 @@ def lock(p: Path, timeout: float = 10.0):
             except OSError:
                 pass
             if time.monotonic() >= deadline:
-                raise TimeoutError(f"could not acquire lock: {lk}")
+                raise LockTimeout(lk)
             time.sleep(0.05)
     try:
         yield
