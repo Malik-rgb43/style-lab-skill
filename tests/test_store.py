@@ -29,18 +29,26 @@ def test_read_missing_returns_copy_of_default(home):
     assert default == {"items": []}
 
 
-def test_update_json_parallel(home):
+def test_update_json_parallel(home, monkeypatch):
+    # a slow machine can keep 7 other writers ahead of one for more than the default 10 s: a long
+    # timeout here, and a timeout shows as an error, not as a short count
+    monkeypatch.setattr(store, "LOCK_TIMEOUT", 120.0)
     p = store.path("list.json")
+    errors = []
 
     def worker(base):
-        for i in range(25):
-            store.update_json(p, [], lambda d, v=base * 100 + i: d.append(v))
+        try:
+            for i in range(25):
+                store.update_json(p, [], lambda d, v=base * 100 + i: d.append(v))
+        except BaseException as e:  # noqa: BLE001 - reported below
+            errors.append(repr(e))
 
     threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    assert errors == []
     data = store.read_json(p, [])
     assert len(data) == 200 and len(set(data)) == 200
 

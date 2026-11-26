@@ -140,7 +140,8 @@ def lock(p: Path, timeout: float = None):
                 pass
             if time.monotonic() >= deadline:
                 raise LockTimeout(lk)
-            time.sleep(0.05)
+            # jittered backoff: waiting writers do not poll in step and starve one another
+            time.sleep(random.uniform(0.01, 0.08))
     try:
         yield
     finally:
