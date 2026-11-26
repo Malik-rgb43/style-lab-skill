@@ -112,6 +112,15 @@ def test_budget_three_extra_sets(home, tmp_path):
                    "--owner-words", "כן").returncode == 0
 
 
+def test_owner_words_rtl_marks(home, tmp_path):
+    setup_env(home)
+    d = mk(tmp_path, "cur")
+    fill_sets(d, "plan", 3, 4)
+    assert project.next_set(d, "plan", 3, owner_ok_more=True, owner_words="כן, תמשיך‏") == 5
+    with pytest.raises(project._Bad):
+        project.next_set(d, "plan", 3, owner_ok_more=True, owner_words="‏ ‎")
+
+
 def test_sig_float_and_punctuation():
     assert project.sig("motion", "x", 0.15000000000000002) == project.sig("motion", "x", 0.15)
     assert project.sig("plan", "a", "קופסת־מתנה") == project.sig("plan", "a", "קופסת מתנה")

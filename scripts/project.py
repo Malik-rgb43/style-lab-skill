@@ -207,8 +207,10 @@ def record_shown(d, step, beat, set_no, options):
 
 
 def _bad_words(w):
-    return (not isinstance(w, str) or not w.strip()
-            or any(unicodedata.category(c) == "Cf" for c in w))
+    # Same rule as spend.py `_blank` (duplicated to avoid editing a file other work owns): blank when
+    # only whitespace and invisible Cf marks (RTL/LRM, zero-width) remain. Pasted Hebrew keeps its marks.
+    return (not isinstance(w, str)
+            or all(c.isspace() or unicodedata.category(c) == "Cf" for c in w))
 
 
 def next_set(d, step, beat, owner_ok_more=False, owner_words=None):
