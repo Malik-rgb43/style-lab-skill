@@ -34,7 +34,9 @@ def _amp(db):
     return 10 ** (db / 20.0) * math.sqrt(2)
 
 
-def track(dur_ms, words):
+def track(dur_ms, words, extra=()):
+    """words: (start, flat_end) at WORD_DB with a decaying tail; extra: (start, end, db) flat 700 Hz
+    sound with 2 ms ramps and no tail (an unlisted word, a breath)."""
     n = int(dur_ms * SR / 1000)
     t = np.arange(n) / SR
     env = np.zeros(n)
@@ -47,6 +49,12 @@ def track(dur_ms, words):
         tail[tail < 1e-4] = 0
         env[i1:] = np.maximum(env[i1:], tail)
     mono = _amp(ROOM_DB) * np.sin(2 * np.pi * 100 * t) + _amp(WORD_DB) * env * np.sin(2 * np.pi * 400 * t)
+    r2 = int(0.002 * SR)
+    for a, b, db in extra:
+        i0, i1 = int(a * SR / 1000), int(b * SR / 1000)
+        e = np.ones(i1 - i0)
+        e[:r2], e[-r2:] = np.linspace(0, 1, r2), np.linspace(1, 0, r2)
+        mono[i0:i1] += _amp(db) * e * np.sin(2 * np.pi * 700 * t[i0:i1])
     return np.stack([mono, mono], axis=1).astype(np.float32)
 
 
@@ -58,8 +66,8 @@ def _write_wav(path, audio):
         wf.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
 
 
-def make_source(tmp, words, dur_ms=DUR):
-    audio = track(dur_ms, words)
+def make_source(tmp, words, dur_ms=DUR, extra=()):
+    audio = track(dur_ms, words, extra)
     wav = tmp / "src.wav"
     _write_wav(wav, audio)
     src = tmp / "src.mkv"
@@ -162,14 +170,15 @@ def stream_durations(path):
 
 
 def thr_of(db):
-    return float(np.percentile(db, 10)) + 8
+    """the room tone + 4 dB: below it for 3 slices = the sound has died away."""
+    return float(np.percentile(db, 10)) + 4
 
 
 def decay_end_ms(db, after_ms):
     """first 10 ms slice after after_ms where the level has fallen below the room tone + 8 dB."""
     thr = thr_of(db)
     for j in range(int(after_ms // 10), len(db) - 1):
-        if db[j] < thr and db[j + 1] < thr:
+        if db[j] < thr and db[j + 1] < thr and db[j + 2] < thr:
             return j * 10
     raise AssertionError("no decay end")
 
@@ -180,6 +189,26 @@ def onset_ms(db, after_ms):
         if db[j] >= thr and db[j + 1] >= thr:
             return j * 10
     raise AssertionError("no onset")
+
+
+def max_quiet_run_ms(db, a_ms, b_ms):
+    """longest run of slices below the room tone + 4 dB between two times (dead air)."""
+    thr, run, best = thr_of(db), 0, 0
+    for j in range(int(a_ms // 10), int(b_ms // 10)):
+        run = run + 1 if db[j] < thr else 0
+        best = max(best, run)
+    return best * 10
+
+
+def join_gap(out, audio):
+    """(A's decay end, B's onset) on the output timeline: both measured on the source (in the
+    output they touch, there is no quiet between them to measure) and moved by each clip's offset."""
+    cuts = _read(out, ".cuts.json")
+    pa = [p for p in cuts["pieces"] if p["text"] == "A"][0]
+    pb = [p for p in cuts["pieces"] if p["text"] == "B"][0]
+    src_db = slices_db(audio.mean(axis=1).astype(np.float64))
+    end_a, on_b = decay_end_ms(src_db, A[1]), onset_ms(src_db, B[0] - 200)
+    return end_a - (pa["f_in"] - pa["dst_f"]) * FMS, on_b - (pb["f_in"] - pb["dst_f"]) * FMS
 
 
 def _read(stem, ext):
@@ -209,11 +238,12 @@ def straight_out(straight):
 # ---------------------------------------------------------------- tests
 
 def test_long_pause_closes_to_the_decay_end(straight_out):
-    stem, out, res, _ = straight_out
-    db = slices_db(load_mono(out + ".mp4"))
-    end_a = decay_end_ms(db, A[1])
-    on_b = onset_ms(db, end_a)
+    stem, out, res, audio = straight_out
+    end_a, on_b = join_gap(out, audio)
     assert -10 <= on_b - end_a <= FMS + 10, (end_a, on_b)
+    db = slices_db(load_mono(out + ".mp4"))
+    assert max_quiet_run_ms(db, A[0], on_b + 100) <= FMS + 10  # no dead air left at the join
+    assert not Path(out + ".tmp.mp4").exists()
     cuts = _read(out, ".cuts.json")
     assert cuts["frames"] < 90 - 15  # about 600 ms closed
     assert res["frames"] == cuts["frames"]
@@ -231,7 +261,7 @@ def test_decaying_tail_is_never_cut(straight_out):
     src_db = slices_db(audio.mean(axis=1).astype(np.float64))
     out_db = slices_db(load_mono(out + ".mp4"))
     end_a = decay_end_ms(src_db, A[1])
-    k0, k1 = A[0] // 10, end_a // 10 + 1
+    k0, k1 = A[0] // 10, end_a // 10
     assert np.abs(out_db[k0:k1] - src_db[k0:k1]).max() < 1.0
     # and so is B, its tail included, where the output put it
     pb = [p for p in cuts["pieces"] if p["text"] == "B"][0]
@@ -256,8 +286,9 @@ def test_lip_sync_is_exact(straight_out):
     # B's sound moved by exactly the same whole number of frames as its picture
     pb = [p for p in cuts["pieces"] if p["text"] == "B"][0]
     db = slices_db(load_mono(out + ".mp4"))
-    on_b = onset_ms(db, decay_end_ms(db, A[1]))
-    assert abs(on_b - (B[0] - (pb["f_in"] - pb["dst_f"]) * FMS)) <= 10
+    src_db = slices_db(straight_out[3].mean(axis=1).astype(np.float64))
+    k = int(round((B[0] - (pb["f_in"] - pb["dst_f"]) * FMS) / 10))
+    assert np.abs(db[k + 1:k + 20] - src_db[B[0] // 10 + 1:B[0] // 10 + 20]).max() < 1.0
     wb = [w for w in _read(out, ".words.json")["words"] if w["w"] == "B"][0]
     assert abs(wb["start_ms"] - (B[0] - (pb["f_in"] - pb["dst_f"]) * FMS)) <= 1
 
@@ -337,3 +368,104 @@ def test_cli_usage_errors(tmp_path):
     r = run_cli("tighten.py", tmp_path / "missing", "--out", tmp_path / "x")
     assert r.returncode == 1
     assert "error" in (r.stdout + r.stderr).lower()
+
+
+# ---------------------------------------------------------------- nothing swallowed
+
+def _one_piece(tmp_path, words, extra=(), aligned=None):
+    src, audio = make_source(tmp_path, words, extra=extra)
+    aligned = aligned or [(f"W{k}", a, b) for k, (a, b) in enumerate(words)]
+    stem = make_cut(tmp_path, "cut", src, audio, [{"f_in": 0, "f_out": 90}], [(w, a, b, 0) for w, a, b in aligned])
+    return stem, audio
+
+
+def test_gap_ms_leaves_that_much_room_tone(straight):
+    stem, _, _ = straight
+    out = str(Path(stem).parent / "gap100")
+    res = tighten.tighten(stem, out, gap_ms=100)
+    end_a, on_b = join_gap(out, straight[2])
+    assert 90 <= on_b - end_a <= 100 + FMS + 10, (end_a, on_b)
+    assert res["edge_bad"] == []
+
+
+def test_voice_that_never_dies_away_is_never_cut(tmp_path):
+    # A is sounding from 300 to 1400 ms but the aligner ends it at 800: 600 ms past the search limit
+    stem, _ = _one_piece(tmp_path, [(300, 1400), (1800, 2300)], aligned=[("A", 300, 800), ("B", 1800, 2300)])
+    r = run_cli("tighten.py", stem, "--out", tmp_path / "t")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "voice not died away" in r.stdout
+    cuts = _read(str(tmp_path / "t"), ".cuts.json")
+    assert cuts["frames"] == 90  # the pause after A is not closed
+    v = cuts["voice_not_died_away"]
+    assert [(x["cut_piece"], x["edge"], x["words"]) for x in v] == [(0, "end", "A")]
+    assert cuts["edge_bad"] == []
+
+
+@pytest.fixture
+def sound_in_gap(tmp_path):
+    # an unlisted -12 dB sound (a word the transcript does not have) alone in the pause between A and B
+    return _one_piece(tmp_path, [A, (1900, 2400)], extra=[(1250, 1400, -12.0)],
+                      aligned=[("A", *A), ("B", 1900, 2400)])
+
+
+def test_sound_in_the_pause_keeps_the_join(sound_in_gap, tmp_path):
+    stem, _ = sound_in_gap
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    assert res["frames"] == 90
+    assert len(res["sound_in_pause"]) == 1
+    assert 1250 <= res["sound_in_pause"][0]["sound_at_ms"] < 1400
+    assert res["edge_bad"] == []
+
+
+def test_missing_audit_catches_dropped_sound(sound_in_gap, tmp_path, monkeypatch):
+    stem, _ = sound_in_gap
+    monkeypatch.setattr(tighten, "_sound_between", lambda *a: [])  # a planner that misses the sound
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    assert res["frames"] < 90
+    miss = [e for e in res["edge_bad"] if e["edge"] == "missing"]
+    assert len(miss) == 1 and miss[0]["src_ms"][0] <= 1250 and miss[0]["src_ms"][1] >= 1400, res["edge_bad"]
+
+
+def test_soft_onset_below_the_voice_threshold_is_kept(tmp_path):
+    # a 40 ms breathy onset at about room tone + 6 dB right before B (below the +8 dB voice threshold)
+    stem, audio = _one_piece(tmp_path, [A, B], extra=[(B[0] - 40, B[0], -50.0)], aligned=[("A", *A), ("B", *B)])
+    out = str(tmp_path / "t")
+    res = tighten.tighten(stem, out)
+    assert res["edge_bad"] == []
+    cuts = _read(out, ".cuts.json")
+    pb = [p for p in cuts["pieces"] if p["text"] == "B"][0]
+    assert pb["voice_src_ms"][0] == B[0] - 40
+    assert cuts["frames"] < 90 - 12
+    off = pb["f_in"] - pb["dst_f"]
+    db = slices_db(load_mono(out + ".mp4"))
+    k = int(round((B[0] - 40 - off * FMS) / 10))
+    assert np.all(db[k:k + 4] > -52.5), db[k - 2:k + 6]  # the breath is there, not room tone (-55)
+
+
+def test_refuses_out_equal_to_stem(straight):
+    stem, _, _ = straight
+    with pytest.raises(ValueError, match="differ"):
+        tighten.tighten(stem, stem + ".mp4")
+    r = run_cli("tighten.py", stem, "--out", stem)
+    assert r.returncode == 1 and "differ" in r.stderr
+
+
+def test_output_is_atomic(straight, monkeypatch):
+    stem, _, _ = straight
+    out = str(Path(stem).parent / "atomic")
+    assert not Path(out + ".tmp.mp4").exists()
+    real = tighten._run
+
+    def failing_mux(cmd):
+        if "concat" in cmd:
+            real(cmd)  # let ffmpeg write the partial file, then report a failure
+            return subprocess.CompletedProcess(cmd, 1, "", "boom")
+        return real(cmd)
+
+    monkeypatch.setattr(tighten, "_run", failing_mux)
+    with pytest.raises(RuntimeError, match="mux"):
+        tighten.tighten(stem, out)
+    assert not Path(out + ".mp4").exists() and not Path(out + ".tmp.mp4").exists()
+    monkeypatch.setattr(tighten, "_run", real)
+    tighten.tighten(stem, out)
+    assert Path(out + ".mp4").is_file() and not Path(out + ".tmp.mp4").exists()
