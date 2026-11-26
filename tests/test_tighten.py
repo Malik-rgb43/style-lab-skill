@@ -34,7 +34,7 @@ def _amp(db):
     return 10 ** (db / 20.0) * math.sqrt(2)
 
 
-def track(dur_ms, words, extra=()):
+def track(dur_ms, words, extra=(), noisy_room=False):
     """words: (start, flat_end) at WORD_DB with a decaying tail; extra: (start, end, db) flat 700 Hz
     sound with 2 ms ramps and no tail (an unlisted word, a breath)."""
     n = int(dur_ms * SR / 1000)
@@ -48,7 +48,13 @@ def track(dur_ms, words, extra=()):
         tail = np.exp(-(np.arange(n - i1) / SR * 1000) / TAU)
         tail[tail < 1e-4] = 0
         env[i1:] = np.maximum(env[i1:], tail)
-    mono = _amp(ROOM_DB) * np.sin(2 * np.pi * 100 * t) + _amp(WORD_DB) * env * np.sin(2 * np.pi * 400 * t)
+    room = _amp(ROOM_DB) * np.sin(2 * np.pi * 100 * t)
+    if noisy_room:  # single-slice jumps: +5 dB on about half the odd slices, -5 dB on every 20th
+        g = np.zeros(n // 480 + 1)
+        g[1::2] = np.where(np.random.default_rng(3).random(len(g[1::2])) < 0.5, 5.0, 0.0)
+        g[::20] = -5.0
+        room = room * np.repeat(10 ** (g / 20), 480)[:n]
+    mono = room + _amp(WORD_DB) * env * np.sin(2 * np.pi * 400 * t)
     r2 = int(0.002 * SR)
     for a, b, db in extra:
         i0, i1 = int(a * SR / 1000), int(b * SR / 1000)
@@ -66,8 +72,8 @@ def _write_wav(path, audio):
         wf.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
 
 
-def make_source(tmp, words, dur_ms=DUR, extra=()):
-    audio = track(dur_ms, words, extra)
+def make_source(tmp, words, dur_ms=DUR, extra=(), noisy_room=False):
+    audio = track(dur_ms, words, extra, noisy_room)
     wav = tmp / "src.wav"
     _write_wav(wav, audio)
     src = tmp / "src.mkv"
@@ -103,7 +109,8 @@ def make_cut(tmp, stem_name, src, audio, pieces, words):
             ws = [k for k, w in enumerate(words) if w[3] == n]
             out_pieces.append({"id": n, "src_in_ms": round(p["f_in"] * FMS, 3), "src_out_ms": round(p["f_out"] * FMS, 3),
                                "dst_in_ms": round(dst * FMS, 3), "dst_f": dst, "frames": nf,
-                               "f_in": p["f_in"], "f_out": p["f_out"], "w0": ws[0], "w1": ws[-1],
+                               "f_in": p["f_in"], "f_out": p["f_out"], "w0": ws[0] if ws else -1,
+                               "w1": ws[-1] if ws else -1,
                                "text": " ".join(words[k][0] for k in ws)})
         vlab.append(f"[v{n}]")
         dst += nf
@@ -465,7 +472,114 @@ def test_output_is_atomic(straight, monkeypatch):
     monkeypatch.setattr(tighten, "_run", failing_mux)
     with pytest.raises(RuntimeError, match="mux"):
         tighten.tighten(stem, out)
-    assert not Path(out + ".mp4").exists() and not Path(out + ".tmp.mp4").exists()
+    for ext in (".mp4", ".cuts.json", ".words.json", ".tmp.mp4", ".tmp.cuts.json", ".tmp.words.json"):
+        assert not Path(out + ext).exists(), ext
     monkeypatch.setattr(tighten, "_run", real)
     tighten.tighten(stem, out)
     assert Path(out + ".mp4").is_file() and not Path(out + ".tmp.mp4").exists()
+
+
+# ---------------------------------------------------------------- round 2
+
+def test_quiet_unlisted_word_holds_the_join(tmp_path):
+    # an unlisted word at about room tone + 6 dB: below the +8 dB voice level, above the +4 dB edge level
+    stem, _ = _one_piece(tmp_path, [A, (1900, 2400)], extra=[(1100, 1300, -50.0)],
+                         aligned=[("A", *A), ("B", 1900, 2400)])
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    assert res["frames"] == 90
+    assert len(res["sound_in_pause"]) == 1 and 1100 <= res["sound_in_pause"][0]["sound_at_ms"] < 1300
+    assert res["edge_bad"] == []
+
+
+def test_noisy_room_single_slice_jumps_still_close(tmp_path):
+    src, audio = make_source(tmp_path, [A, B], noisy_room=True)
+    stem = make_cut(tmp_path, "cut", src, audio, [{"f_in": 0, "f_out": 90}], [("A", *A, 0), ("B", *B, 0)])
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    assert res["sound_in_pause"] == [] and res["voice_not_died_away"] == []
+    assert res["frames"] < 90 - 12
+    assert res["edge_bad"] == []
+
+
+def _three(tmp_path, words, aligned, extra=()):
+    """pieces 0-1500 ms (A), 2000-2300 ms (room tone only, no words), 2500-3500 ms (B)."""
+    src, audio = make_source(tmp_path, words, dur_ms=4000, extra=extra)
+    pieces = [{"f_in": 0, "f_out": 45}, {"f_in": 60, "f_out": 69}, {"f_in": 75, "f_out": 105}]
+    stem = make_cut(tmp_path, "cut", src, audio, pieces, [(w, a, b, pi) for w, a, b, pi in aligned])
+    return stem
+
+
+B3 = (2700, 3200)
+
+
+def test_non_consecutive_pieces_close_over_a_room_tone_piece(tmp_path):
+    stem = _three(tmp_path, [A, B3], [("A", *A, 0), ("B", *B3, 2)])
+    out = str(tmp_path / "t")
+    res = tighten.tighten(stem, out)
+    cuts = _read(out, ".cuts.json")
+    assert [d["cut_piece"] for d in cuts["dropped_air_pieces"]] == [1]
+    assert [j["type"] for j in cuts["joins"]] == ["stack"]
+    assert res["frames"] < 45 + 30 - 15
+    assert cuts["added_check"] == [] and res["edge_bad"] == []
+
+
+def test_held_join_over_a_room_tone_piece_is_the_cuts_own(tmp_path):
+    # an unlisted sound in piece 0's air after A: the join is held at piece 0's out / piece 2's in
+    stem = _three(tmp_path, [A, B3], [("A", *A, 0), ("B", *B3, 2)], extra=[(1100, 1300, -12.0)])
+    out = str(tmp_path / "t")
+    res = tighten.tighten(stem, out)
+    cuts = _read(out, ".cuts.json")
+    assert len(res["sound_in_pause"]) == 1
+    assert [j["type"] for j in cuts["joins"]] == ["keep"]
+    assert res["frames"] == 45 + 30  # both pieces whole, only the room-tone piece is gone
+    p0, p2 = cuts["pieces"]
+    assert (p0["f_in"], p0["f_out"], p2["f_in"], p2["f_out"]) == (0, 45, 75, 105)
+    assert cuts["added_check"] == [] and res["edge_bad"] == []
+
+
+def test_voice_not_died_over_a_room_tone_piece_keeps_the_pieces(tmp_path):
+    stem = _three(tmp_path, [(300, 1440), B3], [("A", 300, 800, 0), ("B", *B3, 2)])
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    assert [(v["cut_piece"], v["edge"]) for v in res["voice_not_died_away"]] == [(0, "end")]
+    assert res["frames"] == 45 + 30
+    assert res["edge_bad"] == []
+
+
+def test_added_audit_flags_source_outside_the_pieces(tmp_path, monkeypatch):
+    stem = _three(tmp_path, [A, B3], [("A", *A, 0), ("B", *B3, 2)])
+    real = tighten.plan
+
+    def leaky(*a, **k):  # a planner that lets piece 0's audio run 300 ms past its out-point
+        pl = real(*a, **k)
+        s = [it["S"] for it in pl["items"] if it["kind"] == "seg"][0]
+        s.a1_tl = s.P["hi"] - s.off * pl["fms"] + 300
+        return pl
+
+    monkeypatch.setattr(tighten, "plan", leaky)
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    added = [e for e in res["edge_bad"] if e["edge"] == "added"]
+    assert len(added) == 1 and added[0]["piece"] == 0, res["edge_bad"]
+
+
+def test_missing_ffmpeg_exits_3(straight, tmp_path, monkeypatch):
+    import cut
+    stem, _, _ = straight
+    monkeypatch.setattr(cut.shutil, "which", lambda name: None)
+    assert tighten.main([stem, "--out", str(tmp_path / "x")]) == 3
+
+
+def test_refuses_out_equal_to_the_raw_source_stem(straight):
+    stem, src, _ = straight
+    with pytest.raises(ValueError, match="raw source"):
+        tighten.tighten(stem, str(src)[: -len(src.suffix)])
+
+
+def test_gain_balance_without_gains_is_a_clean_error(straight, tmp_path):
+    stem, _, _ = straight
+    cuts = _read(stem, ".cuts.json")
+    cuts["channel_balance"] = "gain"
+    bad = tmp_path / "bad"
+    Path(str(bad) + ".cuts.json").write_text(json.dumps(cuts), encoding="utf-8")
+    Path(str(bad) + ".words.json").write_text(Path(stem + ".words.json").read_text(encoding="utf-8"), encoding="utf-8")
+    Path(str(bad) + ".mp4").write_bytes(Path(stem + ".mp4").read_bytes())
+    r = run_cli("tighten.py", bad, "--out", tmp_path / "o")
+    assert r.returncode == 1 and "gains" in r.stderr and "Traceback" not in r.stderr

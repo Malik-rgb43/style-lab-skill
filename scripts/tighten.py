@@ -11,8 +11,9 @@ below the room tone + --soft-db (4 dB), so a soft breathy onset or a long decay 
 A pause is only closed when it is safe to close:
   - both edges were found within the 400 ms search (a voice that never dies away is never cut
     into; the join is kept as the cut made it and listed in cuts.json voice_not_died_away)
-  - nothing in the pause is sound (any 10 ms slice >= room tone + --voice-db, 8 dB): an unlisted
-    word, a laugh or a breath there keeps the join as cut (listed in cuts.json sound_in_pause).
+  - nothing in the pause is sound (3 slices in a row >= room tone + --soft-db, the same rule as
+    the edges, so a single noisy slice is not sound): an unlisted word, a laugh or a breath there
+    keeps the join as cut (listed in cuts.json sound_in_pause).
     At a join between pieces the cut's own air on both sides is checked too.
 
   - lip sync is exact: picture and sound of every clip share one offset in whole frames
@@ -28,7 +29,9 @@ Checks (every time, on the in-memory output mix before encoding):
     measured without the cut's in/out points) vs the same span in the source; off by more than
     --check-db (0.05 dB, i.e. not 0.0 dB) goes into edge_bad. A cut that clipped a word shows here.
   missing audit: every stretch of the cut's timeline that is not in the output at full level and
-    holds any slice >= room tone + --voice-db goes into edge_bad (edge "missing").
+    holds sound (the same 3-slice rule, overlapping it by >= 5 ms) goes into edge_bad (edge "missing").
+  added audit: any output audio read from the source outside every kept piece (beyond the cut's
+    own 7.5 ms join crossfade) goes into edge_bad (edge "added").
 Any edge_bad item is printed with the piece and the CLI exits 1 (the files are still written so
 the join can be inspected).
 
@@ -91,11 +94,11 @@ def take(audio, i0, n):
 class Energy:
     """true edges on the 10 ms slice levels of the source.
 
-    voice = local room tone (10th percentile over +-3 s) + voice_db: what counts as sound.
-    soft  = room tone + soft_db: an edge is where QUIET_RUN slices in a row are below it."""
+    soft = local room tone (10th percentile over +-3 s) + soft_db: an edge is where QUIET_RUN
+    slices in a row are below it, sound is QUIET_RUN slices in a row at or above it."""
 
-    def __init__(self, db, voice_db, search_ms, soft_db):
-        self.db, self.voice_db, self.search_ms, self.soft_db = db, voice_db, search_ms, soft_db
+    def __init__(self, db, search_ms, soft_db):
+        self.db, self.search_ms, self.soft_db = db, search_ms, soft_db
 
     def at(self, j):
         return self.db[j] if 0 <= j < len(self.db) else -200.0
@@ -106,9 +109,6 @@ class Energy:
         if not len(w):
             w = self.db
         return float(np.percentile(w, 10))
-
-    def thr(self, ms):
-        return self.floor(ms) + self.voice_db
 
     def soft(self, ms):
         return self.floor(ms) + self.soft_db
@@ -127,16 +127,16 @@ class Energy:
 
     def true_start(self, ms):
         """(start_ms, found): walk back from the aligned word start to the first sound."""
-        thr_v, thr_s, k = self.thr(ms), self.soft(ms), int(ms // 10)
-        if self.at(k) < thr_v and self.at(k + 1) < thr_v:  # aligned start in room tone (a pinned retime)
+        thr, k = self.soft(ms), int(ms // 10)
+        if self._quiet(k, thr, 1):  # aligned start in room tone (a pinned retime): go to the first sound
             for j in range(k, k + 2 * self.search_ms // 10):
-                if self.at(j) >= thr_v and self.at(j + 1) >= thr_v:
+                if all(self.at(j + i) >= thr for i in range(QUIET_RUN)):
                     k = j
                     break
             else:
                 return float(ms), False
         for j in range(k, k - self.search_ms // 10, -1):
-            if self._quiet(j, thr_s, -1):
+            if self._quiet(j, thr, -1):
                 return (j + 1) * 10.0, True
         return k * 10.0 - self.search_ms, False
 
@@ -152,27 +152,42 @@ class Energy:
             u += 10
         return u
 
+    def loud_runs(self, a_ms, b_ms, min_overlap_ms=5.0):
+        """sound = QUIET_RUN or more slices in a row >= the soft threshold (the same rule as the
+        edges, so a single noisy slice is not sound). Returns the runs that overlap [a, b) by at
+        least min_overlap_ms: [(run_start_ms, run_end_ms, loudest_db)]."""
+        if b_ms - a_ms < min_overlap_ms:
+            return []
+        thr = self.soft((a_ms + b_ms) / 2)
+        j0, j1 = int(a_ms // 10) - QUIET_RUN, int(math.ceil(b_ms / 10)) + QUIET_RUN
+        runs, start = [], None
+        for j in range(j0, j1 + 1):
+            loud = j < j1 and self.at(j) >= thr
+            if loud and start is None:
+                start = j
+            elif not loud and start is not None:
+                if j - start >= QUIET_RUN and min(b_ms, j * 10.0) - max(a_ms, start * 10.0) >= min_overlap_ms:
+                    runs.append((start * 10.0, j * 10.0, float(max(self.at(k) for k in range(start, j)))))
+                start = None
+        return runs
+
     def sound_in(self, a_ms, b_ms):
-        """loudest slice >= the voice threshold fully inside [a, b): (slice_ms, db), or None."""
-        j0, j1 = int(math.ceil(a_ms / 10 - 1e-9)), int(math.floor(b_ms / 10 + 1e-9))
-        if j1 <= j0:
+        """the loudest sound run overlapping [a, b): (slice_ms, db) inside [a, b), or None."""
+        runs = self.loud_runs(a_ms, b_ms)
+        if not runs:
             return None
-        thr = self.thr((a_ms + b_ms) / 2)
-        js = [j for j in range(j0, j1) if self.at(j) >= thr]
-        if not js:
-            return None
-        j = max(js, key=self.at)
-        return j * 10.0, float(self.at(j))
+        r0, r1, db = max(runs, key=lambda r: r[2])
+        return max(r0, a_ms), db
 
     def sound_span(self, lo, hi):
         """first sound and true end inside [lo, hi): (on, found, end, died), None when only room tone."""
-        thr = self.thr((lo + hi) / 2)
-        loud = [j for j in range(int(lo // 10), int(hi // 10)) if self.at(j) >= thr and self.at(j + 1) >= thr]
-        if not loud:
+        runs = self.loud_runs(lo, hi)
+        if not runs:
             return None
-        on, found = self.true_start(loud[0] * 10.0 + 5)
-        end, died = self.true_end((loud[-1] + 1) * 10.0)
-        return on, found, max((loud[-1] + 1) * 10.0, end), died
+        on, found = self.true_start(max(runs[0][0], lo) + 5)
+        last = min(runs[-1][1], hi)
+        end, died = self.true_end(last)
+        return on, found, max(last, end), died
 
 
 # ---------------------------------------------------------------- plan
@@ -280,7 +295,7 @@ def plan(cuts, words_doc, src_db, opts):
     """Pure placement: cut.py cuts.json + words.json + source slice levels -> timeline items."""
     fps = int(cuts["fps"])
     fms = 1000.0 / fps
-    E = Energy(np.asarray(src_db, dtype=np.float64), opts["voice_db"], opts["search_ms"], opts.get("soft_db", 4.0))
+    E = Energy(np.asarray(src_db, dtype=np.float64), opts["search_ms"], opts.get("soft_db", 4.0))
     pieces = _pieces(cuts, fms)
     keep_ph = opts["keep_placeholders"]
     words = []
@@ -330,20 +345,29 @@ def plan(cuts, words_doc, src_db, opts):
         if not hold:
             for a, b, j_ms, db in _sound_between(E, pv, s):
                 sound_held.append({"cut_piece": sorted({pv.P["id"], s.P["id"]}), "src_ms": [round(a, 1), round(b, 1)],
-                                   "sound_at_ms": j_ms, "db": round(db, 1), "thr_db": round(E.thr(j_ms), 1),
+                                   "sound_at_ms": j_ms, "db": round(db, 1), "thr_db": round(E.soft(j_ms), 1),
                                    "before": _words_text(pv.words, True), "after": _words_text(s.words)})
                 hold = True
-        off = unchanged if hold else math.floor((s.on - (end_tl + opts["gap_ms"])) / fms + 1e-6)
-        if not same and not consecutive:  # a dropped room-tone piece between: no hole in the timeline
-            off = max(off, math.ceil((s.P["lo"] - (pv.P["hi"] - pv.off * fms)) / fms - 1e-6))
-        kind = "stack"
-        if off <= unchanged:  # already as tight as wanted (or held): never widen, never go back in the source
-            off = unchanged
+        # pieces that touch on the timeline: s starts where pv's piece ends (a dropped room-tone
+        # piece between them leaves no hole)
+        touching = s.P["f_in"] - (pv.P["f_out"] - pv.off)
+        if hold:  # the join as the cut made it: pv's piece out-point, s's piece in-point
             if same:
                 _absorb(pv, s)
                 continue
-            if consecutive:
-                kind = "keep"
+            off, kind = touching, "keep"
+        else:
+            off = math.floor((s.on - (end_tl + opts["gap_ms"])) / fms + 1e-6)
+            if not same and not consecutive:
+                off = max(off, touching)
+            kind = "stack"
+            if off <= unchanged:  # already as tight as wanted: never widen, never go back in the source
+                off = unchanged
+                if same:
+                    _absorb(pv, s)
+                    continue
+                if consecutive:
+                    kind = "keep"
         s.off = off
         joins.append([kind, pv, s])
         out.append(s)
@@ -364,10 +388,10 @@ def plan(cuts, words_doc, src_db, opts):
     if lead_phs:
         for p in lead_phs:
             items.append({"kind": "ph", "P": p, "v0": p["dst_f"], "v1": p["dst_f"] + p["frames"]})
-        on_tl = first.on - first.off * fms
-        bridges.append({"old0": 0.0, "old1": first.on - first.P["old_off"] * fms, "new0": 0.0,
-                        "fi": None, "fo": ("lin", on_tl - BRIDGE_XF_MS, on_tl)})
-        first.a0_tl, first.fi = on_tl - BRIDGE_XF_MS, ("lin", on_tl - BRIDGE_XF_MS, on_tl)
+        w1 = first.on - first.off * fms  # D = 0 before the first clip
+        w0 = max(w1 - BRIDGE_XF_MS, first.P["lo"] - first.off * fms)
+        bridges.append({"old0": 0.0, "old1": w1, "new0": 0.0, "fi": None, "fo": ("lin", w0, w1)})
+        first.a0_tl, first.fi = w0, ("lin", w0, w1)
     else:
         first.v0 = 0
     jinfo = {}
@@ -385,6 +409,10 @@ def plan(cuts, words_doc, src_db, opts):
             if x1 - x0 < XF_MIN_MS:
                 c = (x0 + x1) / 2
                 x0, x1 = c - XF_MIN_MS / 2, c + XF_MIN_MS / 2
+            # never read source outside the kept pieces (s's piece starts no later than pv's ends)
+            x0, x1 = max(x0, s_lo_tl), min(x1, pv_hi_tl)
+            if x1 < x0:
+                x0 = x1 = (x0 + x1) / 2
             pv.a1_tl, pv.fo, s.a0_tl, s.fi = x1, ("pow", x0, x1), x0, ("pow", x0, x1)
             v = math.ceil(x0 / fms - 1e-6)
             if v * fms > on_tl + 1e-6:
@@ -402,22 +430,20 @@ def plan(cuts, words_doc, src_db, opts):
 
     def place_phs(pv, s):
         """placeholders after pv (and before s, or at the very end): original air on both sides."""
-        D = pv.P["old_off"] - pv.off
-        end_tl = pv.end - pv.off * fms
-        pv.a1_tl, pv.fo = end_tl + BRIDGE_XF_MS, ("lin", end_tl, end_tl + BRIDGE_XF_MS)
+        D = pv.P["old_off"] - pv.off  # new timeline = old timeline + D frames, on both sides
+        z1 = min(pv.end - pv.off * fms + BRIDGE_XF_MS, pv.P["hi"] - pv.off * fms)
+        z0 = min(pv.end - pv.off * fms, z1)
+        pv.a1_tl, pv.fo = z1, ("lin", z0, z1)
         phi = [{"kind": "ph", "P": p, "v0": p["dst_f"] + D, "v1": p["dst_f"] + D + p["frames"]} for p in pv.ph_after]
-        old0 = pv.end - pv.P["old_off"] * fms
-        new0 = old0 + D * fms
         if s is not None:
-            on_tl = s.on - s.off * fms
-            old1 = s.on - s.P["old_off"] * fms
-            bridges.append({"old0": old0, "old1": old1, "new0": new0, "fi": ("lin", new0, new0 + BRIDGE_XF_MS),
-                            "fo": ("lin", on_tl - BRIDGE_XF_MS, on_tl)})
-            s.a0_tl, s.fi = on_tl - BRIDGE_XF_MS, ("lin", on_tl - BRIDGE_XF_MS, on_tl)
+            w1 = s.on - s.off * fms
+            w0 = max(w1 - BRIDGE_XF_MS, s.P["lo"] - s.off * fms)
+            bridges.append({"old0": z0 - D * fms, "old1": w1 - D * fms, "new0": z0, "fi": ("lin", z0, z1),
+                            "fo": ("lin", w0, w1)})
+            s.a0_tl, s.fi = w0, ("lin", w0, w1)
             s.v0 = phi[-1]["v1"]
         else:
-            bridges.append({"old0": old0, "old1": old_total_ms, "new0": new0,
-                            "fi": ("lin", new0, new0 + BRIDGE_XF_MS), "fo": None})
+            bridges.append({"old0": z0 - D * fms, "old1": old_total_ms, "new0": z0, "fi": ("lin", z0, z1), "fo": None})
         pv.v1 = phi[0]["v0"]
         return phi
 
@@ -558,8 +584,38 @@ def missing_audit(pl):
             ws = [w for w in pl["words"] if w["P"] is q and w["s1"] > sa - 300 and w["s0"] < sb + 300]
             rows.append({"edge": "missing", "cut_piece": q["id"], "cut_ms": [round(a, 1), round(b, 1)],
                          "src_ms": [round(sa, 1), round(sb, 1)], "sound_at_ms": hit[0], "db": round(hit[1], 1),
-                         "thr_db": round(E.thr(hit[0]), 1), "ok": False,
+                         "thr_db": round(E.soft(hit[0]), 1), "ok": False,
                          "words": " ".join(w["w"] for w in ws)})
+    return rows
+
+
+def added_audit(pl, ids):
+    """the output's audio may come only from the kept pieces of the source (plus the cut's own
+    audio around placeholders): any clip reading source outside every kept piece is listed.
+    The cut's own join crossfade reaches JOIN_XF_MS / 2 past a piece edge and is allowed."""
+    fms = pl["fms"]
+    tol = JOIN_XF_MS / 2 + 0.5
+    kept = _union([(p["lo"] - tol, p["hi"] + tol) for p in pl["pieces"] if not p["ph"]])
+    rows = []
+    for it in pl["items"]:
+        if it["kind"] != "seg":
+            continue
+        s = it["S"]
+        a, b = s.a0_tl + s.off * fms, s.a1_tl + s.off * fms
+        cur = a
+        outside = []
+        for k0, k1 in kept:
+            if k1 <= cur or k0 >= b:
+                continue
+            if k0 > cur:
+                outside.append((cur, min(k0, b)))
+            cur = max(cur, k1)
+        if cur < b:
+            outside.append((cur, b))
+        for x0, x1 in outside:
+            if x1 - x0 > 0.5:
+                rows.append({"edge": "added", "piece": ids[id(it)], "src_ms": [round(x0, 1), round(x1, 1)],
+                             "cut_piece": s.parts, "ok": False, "words": _words_text(s.words)})
     return rows
 
 
@@ -576,8 +632,8 @@ def _select(ranges):
     return "+".join("(" + "+".join(t[i:i + 20]) + ")" for i in range(0, len(t), 20))
 
 
-def render(pl, source, old_mp4, out_stem, audio, crf=18):
-    """<out>.mp4, written to <out>.tmp.mp4 first and moved into place (no half file on failure)."""
+def render(pl, source, old_mp4, out_path, audio, crf=18):
+    """write the tightened video + mixed audio to out_path (an mp4; the caller moves it into place)."""
     fps = pl["fps"]
     runs = []  # [input, [(f0, f1), ...]]
     for it in pl["items"]:
@@ -591,43 +647,36 @@ def render(pl, source, old_mp4, out_stem, audio, crf=18):
             runs.append([inp, [(f0, f1)]])
     flag = _graph_flag()
     enc = ["-c:v", "libx264", "-preset", "fast", "-crf", str(crf), "-pix_fmt", "yuv420p", "-r", str(fps), "-g", str(fps)]
-    final, part_out = out_stem + ".mp4", out_stem + ".tmp.mp4"
-    try:
-        with tempfile.TemporaryDirectory(prefix="sltight_") as tmp:
-            parts = []
-            for r, (inp, ranges) in enumerate(runs):
-                nf = sum(b - a for a, b in ranges)
-                fg = os.path.join(tmp, f"fg{r}.txt")
-                with open(fg, "w", encoding="ascii") as f:
-                    f.write(f"[0:v]setpts=PTS-STARTPTS,fps={fps},select='{_select(ranges)}',setpts=N/{fps}/TB,"
-                            f"trim=end_frame={nf},setsar=1,format=yuv420p[v]")
-                part = os.path.join(tmp, f"p{r:03d}.mp4")
-                res = _run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", inp, flag, fg, "-map", "[v]", *enc, "-an",
-                            "-frames:v", str(nf), part])
-                if res.returncode != 0:
-                    msg = res.stderr.strip().splitlines()
-                    raise RuntimeError("ffmpeg video part failed: " + (msg[-1] if msg else "unknown error"))
-                parts.append(part)
-            wav = os.path.join(tmp, "mix.wav")
-            with wave.open(wav, "wb") as wf:
-                wf.setnchannels(2)
-                wf.setsampwidth(2)
-                wf.setframerate(AR)
-                wf.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
-            lst = os.path.join(tmp, "parts.txt")
-            with open(lst, "w", encoding="utf-8") as f:
-                f.write("".join("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n" for p in parts))
-            res = _run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-i", wav,
-                        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-                        "-movflags", "+faststart", "-f", "mp4", part_out])
+    with tempfile.TemporaryDirectory(prefix="sltight_") as tmp:
+        parts = []
+        for r, (inp, ranges) in enumerate(runs):
+            nf = sum(b - a for a, b in ranges)
+            fg = os.path.join(tmp, f"fg{r}.txt")
+            with open(fg, "w", encoding="ascii") as f:
+                f.write(f"[0:v]setpts=PTS-STARTPTS,fps={fps},select='{_select(ranges)}',setpts=N/{fps}/TB,"
+                        f"trim=end_frame={nf},setsar=1,format=yuv420p[v]")
+            part = os.path.join(tmp, f"p{r:03d}.mp4")
+            res = _run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", inp, flag, fg, "-map", "[v]", *enc, "-an",
+                        "-frames:v", str(nf), part])
             if res.returncode != 0:
                 msg = res.stderr.strip().splitlines()
-                raise RuntimeError("ffmpeg mux failed: " + (msg[-1] if msg else "unknown error"))
-        os.replace(part_out, final)
-    except BaseException:
-        if os.path.exists(part_out):
-            os.remove(part_out)
-        raise
+                raise RuntimeError("ffmpeg video part failed: " + (msg[-1] if msg else "unknown error"))
+            parts.append(part)
+        wav = os.path.join(tmp, "mix.wav")
+        with wave.open(wav, "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(AR)
+            wf.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
+        lst = os.path.join(tmp, "parts.txt")
+        with open(lst, "w", encoding="utf-8") as f:
+            f.write("".join("file '" + p.replace("\\", "/").replace("'", "'\\''") + "'\n" for p in parts))
+        res = _run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", lst, "-i", wav,
+                    "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", "-f", "mp4", out_path])
+        if res.returncode != 0:
+            msg = res.stderr.strip().splitlines()
+            raise RuntimeError("ffmpeg mux failed: " + (msg[-1] if msg else "unknown error"))
 
 
 # ---------------------------------------------------------------- outputs
@@ -696,13 +745,14 @@ def _records(pl, cuts):
     return pieces, joins, words, phs, ids
 
 
-def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=0, voice_db=8.0, soft_db=4.0,
+def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=0, soft_db=4.0,
             search_ms=400, check_ms=120, check_db=0.05, crf=18):
     """Close the join pauses of a cut.py cut; write <out>.mp4/.cuts.json/.words.json; return a summary.
 
     The summary (and cuts.json) carries edge_check (every clip start and end, output vs source
-    level), missing_check (sound in a stretch of the cut that is not in the output), edge_bad (both
-    kinds of failure), voice_not_died_away and sound_in_pause (joins kept as the cut made them)."""
+    level), missing_check (sound in a stretch of the cut that is not in the output), added_check
+    (output audio read from outside every kept piece), edge_bad (all failures),
+    voice_not_died_away and sound_in_pause (joins kept as the cut made them)."""
     stem, out_stem = _strip(stem), _strip(out_stem)
     if os.path.normcase(os.path.abspath(stem)) == os.path.normcase(os.path.abspath(out_stem)):
         raise ValueError("--out must differ from the input stem (the cut is read while the output is written)")
@@ -722,18 +772,26 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
         raise ValueError(f"source of the cut not found: {source}")
     if not os.path.isfile(stem + ".mp4"):
         raise ValueError(f"cut not found: {stem}.mp4")
+    if os.path.normcase(os.path.abspath(out_stem)) == os.path.normcase(os.path.abspath(os.path.splitext(source)[0])):
+        raise ValueError("--out must differ from the raw source's stem (it would overwrite the recording)")
+    mode = cuts.get("channel_balance", "none")
+    if mode not in ("none", "gain", "copy_left", "copy_right"):
+        raise ValueError(f"{stem}.cuts.json: unknown channel_balance {mode!r}")
+    g = cuts.get("gains")
+    if mode == "gain" and not (isinstance(g, list) and len(g) == 2 and all(isinstance(x, (int, float)) and x > 0 for x in g)):
+        raise ValueError(f"{stem}.cuts.json: channel_balance is 'gain' but gains is missing or not two positive numbers")
     src = apply_balance(load_audio(source), cuts)
     old = load_audio(stem + ".mp4")
     opts = {"min_pause_ms": min_pause_ms, "keep_placeholders": keep_placeholders, "gap_ms": gap_ms,
-            "voice_db": voice_db, "soft_db": soft_db, "search_ms": search_ms}
+            "soft_db": soft_db, "search_ms": search_ms}
     pl = plan(cuts, wdoc, slice_db(src.mean(axis=1)), opts)
     audio = mix(pl, src, old)
     pieces, joins, words, phs, ids = _records(pl, cuts)
     edges = edge_check(pl, src, audio, check_ms, check_db, ids)
     missing = missing_audit(pl)
-    bad = [e for e in edges if not e["ok"]] + missing
+    added = added_audit(pl, ids)
+    bad = [e for e in edges if not e["ok"]] + missing + added
     os.makedirs(os.path.dirname(os.path.abspath(out_stem)) or ".", exist_ok=True)
-    render(pl, source, stem + ".mp4", out_stem, audio, crf)
     fms = pl["fms"]
     frames = pl["frames"]
     settings = dict(opts, check_ms=check_ms, check_db=check_db, crf=crf)
@@ -741,13 +799,27 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
            "duration_s": round(frames / fps, 3), "duration_before_s": round(int(cuts["frames"]) / fps, 3),
            "settings": settings, "pieces": pieces, "joins": joins, "placeholders": phs,
            "dropped_air_pieces": pl["dropped_air_pieces"], "voice_not_died_away": pl["voice_not_died_away"],
-           "sound_in_pause": pl["sound_in_pause"], "edge_check": edges, "missing_check": missing, "edge_bad": bad}
+           "sound_in_pause": pl["sound_in_pause"], "edge_check": edges, "missing_check": missing,
+           "added_check": added, "edge_bad": bad}
     for k in ("channel_balance", "channel_balance_db", "gains", "preset"):
         if k in cuts:
             doc[k] = cuts[k]
-    _dump(out_stem + ".cuts.json", doc)
-    _dump(out_stem + ".words.json", {"source": os.path.abspath(out_stem + ".mp4"), "language": wdoc.get("language"),
-                                     "duration_ms": int(frames * fms), "words": words})
+    wd = {"source": os.path.abspath(out_stem + ".mp4"), "language": wdoc.get("language"),
+          "duration_ms": int(frames * fms), "words": words}
+    # all three files are written under temp names and moved into place together
+    final = [out_stem + ".mp4", out_stem + ".cuts.json", out_stem + ".words.json"]
+    temp = [out_stem + ".tmp.mp4", out_stem + ".tmp.cuts.json", out_stem + ".tmp.words.json"]
+    try:
+        render(pl, source, stem + ".mp4", temp[0], audio, crf)
+        _dump(temp[1], doc)
+        _dump(temp[2], wd)
+        for a, b in zip(temp, final):
+            os.replace(a, b)
+    except BaseException:
+        for t in temp:
+            if os.path.exists(t):
+                os.remove(t)
+        raise
     return {"out": out_stem, "frames": frames, "duration_s": doc["duration_s"],
             "duration_before_s": doc["duration_before_s"], "pieces": len(pieces), "joins": joins,
             "placeholders": phs, "edge_check": edges, "missing_check": missing, "edge_bad": bad,
@@ -764,8 +836,8 @@ def main(argv=None):
     ap.add_argument("--min-pause-ms", type=int, default=250, help="close every pause at least this long")
     ap.add_argument("--no-placeholders", action="store_true", help="drop placeholders and close their joins")
     ap.add_argument("--gap-ms", type=int, default=0, help="room tone left between a voice end and the next start")
-    ap.add_argument("--voice-db", type=float, default=8.0, help="sound = room tone + this (dB)")
-    ap.add_argument("--soft-db", type=float, default=4.0, help="an edge = 3 slices below room tone + this (dB)")
+    ap.add_argument("--soft-db", type=float, default=4.0,
+                    help="edge = 3 slices below room tone + this, sound = 3 slices at or above it (dB)")
     ap.add_argument("--check-db", type=float, default=0.05, help="edge check tolerance (dB)")
     a = ap.parse_args(argv)
     try:
@@ -774,7 +846,7 @@ def main(argv=None):
         print(str(e), file=sys.stderr)
         return 3
     try:
-        res = tighten(a.stem, a.out, a.min_pause_ms, not a.no_placeholders, gap_ms=a.gap_ms, voice_db=a.voice_db,
+        res = tighten(a.stem, a.out, a.min_pause_ms, not a.no_placeholders, gap_ms=a.gap_ms,
                       soft_db=a.soft_db, check_db=a.check_db)
     except cut.MissingTool as e:
         print(str(e), file=sys.stderr)
@@ -794,7 +866,10 @@ def main(argv=None):
     bad = res["edge_bad"]
     print(f"edge check: {len(res['edge_check'])} clip edges + missing audit, {len(bad)} problem(s)")
     for e in bad:
-        if e["edge"] == "missing":
+        if e["edge"] == "added":
+            print(f"  ADDED: piece {e['piece']} plays source {e['src_ms'][0] / 1000:.2f}-{e['src_ms'][1] / 1000:.2f}s "
+                  f"that is in no kept piece of the cut (cut piece {e['cut_piece']})")
+        elif e["edge"] == "missing":
             print(f"  MISSING: cut piece {e['cut_piece']} src {e['src_ms'][0] / 1000:.2f}-{e['src_ms'][1] / 1000:.2f}s "
                   f"is not in the output but has sound ({e['db']:.1f} dB at {e['sound_at_ms'] / 1000:.2f}s; {e['words']})")
         else:
