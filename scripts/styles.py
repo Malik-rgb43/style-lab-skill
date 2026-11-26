@@ -36,7 +36,9 @@ NAME_SOURCES = ("user", "claude")
 EDITABLE = {"name", "description", "pack", "skill", "creator", "fonts", "colors", "status",
             "board_url", "aliases", "notes", "theme",
             "kind", "aspect", "name_source", "version", "rules_count"}
-V2_DEFAULTS = {"kind": "trained", "aspect": "9:16", "name_source": "user", "version": 1, "rules_count": 0}
+V2_DEFAULTS = {"kind": "trained", "aspect": "9:16", "name_source": "user", "version": 1, "rules_count": 0,
+               "requires": []}
+LEVELS = ("required", "recommended")
 _REG_OVERRIDE = None  # set from --registry
 
 
@@ -68,7 +70,7 @@ def migrate(data):
     for s in data.setdefault("styles", []):
         for k, v in V2_DEFAULTS.items():
             if k not in s:
-                s[k] = v
+                s[k] = json.loads(json.dumps(v))  # fresh list per style
                 changed = True
     return data, changed
 
@@ -194,6 +196,7 @@ def cmd_add(data, args):
         "name_source": args.name_source,
         "version": 1,
         "rules_count": 0,
+        "requires": [],
         "created": today(),
         "updated": today(),
     })
@@ -208,6 +211,38 @@ def cmd_show(data, args):
         return 1
     print(json.dumps({**s, "clients": clients_for(s["slug"])}, ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_require(data, args):
+    s = find(data, args.style)
+    if not s:
+        print(f"no style {args.style!r}", file=sys.stderr)
+        return 1
+    name = args.name.strip()
+    if not name or not args.why.strip():
+        print("--name and --why must not be empty", file=sys.stderr)
+        return 1
+    entry = {"name": name, "why": args.why.strip(), "level": args.level, "fallback": (args.fallback or "").strip()}
+    req = s.setdefault("requires", [])
+    req[:] = [r for r in req if r.get("name") != name] + [entry]  # same name: replaced
+    s["updated"] = today()
+    print(f"{s['slug']} {args.level}: {name}")
+    return None
+
+
+def cmd_unrequire(data, args):
+    s = find(data, args.style)
+    if not s:
+        print(f"no style {args.style!r}", file=sys.stderr)
+        return 1
+    before = len(s.get("requires", []))
+    s["requires"] = [r for r in s.get("requires", []) if r.get("name") != args.name.strip()]
+    if len(s["requires"]) == before:
+        print(f"{s['slug']} does not require {args.name!r}", file=sys.stderr)
+        return 1
+    s["updated"] = today()
+    print(f"{s['slug']}: removed {args.name}")
+    return None
 
 
 def cmd_set(data, args):
@@ -327,7 +362,8 @@ def cmd_migrate(args):
     return 0
 
 
-WRITERS = {"add": cmd_add, "set": cmd_set, "remove": cmd_remove}
+WRITERS = {"add": cmd_add, "set": cmd_set, "remove": cmd_remove, "require": cmd_require,
+           "unrequire": cmd_unrequire}
 
 
 def main(argv=None):
@@ -353,6 +389,10 @@ def _main(argv=None):
     a = sub.add_parser("show"); a.add_argument("key")
     a = sub.add_parser("set"); a.add_argument("slug"); a.add_argument("pairs", nargs="+")
     a = sub.add_parser("remove"); a.add_argument("slug")
+    a = sub.add_parser("require", help="record a connection the style depends on")
+    a.add_argument("style"); a.add_argument("--name", required=True); a.add_argument("--why", required=True)
+    a.add_argument("--level", choices=LEVELS, required=True); a.add_argument("--fallback")
+    a = sub.add_parser("unrequire"); a.add_argument("style"); a.add_argument("--name", required=True)
     sub.add_parser("check")
     sub.add_parser("migrate")
     args = p.parse_args(argv)

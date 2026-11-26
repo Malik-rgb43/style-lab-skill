@@ -40,16 +40,27 @@ def everything(monkeypatch):
 
 
 def fake_models(tmp_path, monkeypatch, which=("model_wav2vec2_he", "model_whisper_he",
-                                              "model_mms_fa", "model_whisper_multi")):
+                                              "model_mms_fa", "model_whisper_multi"), env="HF_HOME"):
     hf, th = tmp_path / "hf", tmp_path / "torch"
-    monkeypatch.setenv("HF_HOME", str(hf))
+    for k in ("HF_HOME", "HF_HUB_CACHE", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(k, raising=False)
+    if env == "HF_HOME":
+        monkeypatch.setenv("HF_HOME", str(hf))
+        hub = hf / "hub"
+    else:
+        monkeypatch.setenv("HF_HUB_CACHE", str(hf))
+        hub = hf
     monkeypatch.setenv("TORCH_HOME", str(th))
-    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
     for n in which:
-        kind, item = doctor.MODELS[n]
-        d = (hf / "hub" / item) if kind == "hf" else (th / "hub" / "checkpoints" / item)
-        d.parent.mkdir(parents=True, exist_ok=True)
-        d.mkdir() if kind == "hf" else d.write_text("x")
+        kind, mid = doctor.MODELS[n]
+        if kind == "hf":
+            snap = hub / ("models--" + mid.replace("/", "--")) / "snapshots" / "abc"
+            snap.mkdir(parents=True)
+            (snap / "config.json").write_text("{}")
+        else:
+            d = th / "hub" / "checkpoints"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / doctor.align.os.path.basename(doctor.align.MMS_URL)).write_text("x")
 
 
 def caps():
@@ -172,3 +183,47 @@ def test_model_check_never_loads(home, tmp_path, monkeypatch):
     fake_models(tmp_path, monkeypatch, which=("model_mms_fa",))
     assert doctor.check_model("model_mms_fa")["ok"] is True
     assert doctor.check_model("model_whisper_multi")["ok"] is False
+
+
+def test_models_found_via_hf_hub_cache(home, tmp_path, monkeypatch):
+    fake_models(tmp_path, monkeypatch, which=("model_whisper_he",), env="HF_HUB_CACHE")
+    assert doctor.check_model("model_whisper_he")["ok"] is True
+    assert doctor.check_model("model_wav2vec2_he")["ok"] is False
+
+
+def test_empty_model_folder_is_missing(home, tmp_path, monkeypatch):
+    fake_models(tmp_path, monkeypatch, which=())
+    (tmp_path / "hf" / "hub" / "models--ivrit-ai--whisper-large-v3-turbo-ct2").mkdir(parents=True)
+    assert doctor.check_model("model_whisper_he")["ok"] is False
+
+
+def _style_with(home, tmp_path, *reqs):
+    import styles
+    styles.main(["add", "--name", "Demo", "--pack", str(tmp_path)])
+    for name, level in reqs:
+        styles.main(["require", "demo", "--name", name, "--why", "needed", "--level", level,
+                     "--fallback", "do it by hand"])
+
+
+def test_style_missing_required_exit_4(home, everything, tmp_path, monkeypatch, capsys):
+    fake_models(tmp_path, monkeypatch)
+    _style_with(home, tmp_path, ("higgsfield", "required"))
+    assert doctor.main(["--style", "demo"]) == 4
+    out = capsys.readouterr().out
+    assert "higgsfield" in out and "do it by hand" in out
+    doctor.main(["session", "--set", "higgsfield=ok"])
+    assert doctor.main(["--style", "demo"]) == 0
+    assert "✓ higgsfield" in capsys.readouterr().out
+
+
+def test_style_recommended_missing_exit_0_with_note(home, everything, tmp_path, monkeypatch, capsys):
+    fake_models(tmp_path, monkeypatch)
+    _style_with(home, tmp_path, ("pexels", "recommended"), ("ffmpeg", "required"))
+    assert doctor.main(["--style", "demo"]) == 0
+    out = capsys.readouterr().out
+    assert "חסר pexels" in out and "only recommended" in out and "✓ ffmpeg" in out
+
+
+def test_style_unknown(home, everything, tmp_path, monkeypatch):
+    fake_models(tmp_path, monkeypatch)
+    assert doctor.main(["--style", "nope"]) == 1

@@ -8,6 +8,8 @@ Commands:
     doctor.py                                    run local checks, print the table per stage
     doctor.py --deep                             also probe torch CUDA (slow)
     doctor.py --json                             same, print the capability map as JSON
+    doctor.py --style <slug>                     check the connections the style requires (styles.py require);
+                                                 exit 4 when a required one is missing
     doctor.py session --set name=ok|missing [--note ".."]   record an MCP server / skill seen in this session
     doctor.py session --clear                    forget the recorded session block
 """
@@ -25,6 +27,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import align  # noqa: E402,F401  (cache helpers only; no torch import)
 import store  # noqa: E402
 
 STAGES = {
@@ -44,12 +47,12 @@ PAID_STAGES = {"cloud_asr"}
 
 BINARIES = ["ffmpeg", "ffprobe", "node", "blender", "yt-dlp", "gh"]
 MODULES = ["numpy", "cv2", "torch", "torchaudio", "transformers", "faster_whisper", "PIL"]
-# Precise cut models: (kind, cache folder / file name). Presence only; a model is never loaded here.
+# Precise cut models: presence in the cache only (same rule as align.py); a model is never loaded here.
 MODELS = {
-    "model_wav2vec2_he": ("hf", "models--imvladikon--wav2vec2-large-xlsr-53-hebrew"),
-    "model_whisper_he": ("hf", "models--ivrit-ai--whisper-large-v3-turbo-ct2"),
-    "model_mms_fa": ("torch", "model.pt"),
-    "model_whisper_multi": ("hf", "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo"),
+    "model_wav2vec2_he": ("hf", "imvladikon/wav2vec2-large-xlsr-53-hebrew"),
+    "model_whisper_he": ("hf", "ivrit-ai/whisper-large-v3-turbo-ct2"),
+    "model_mms_fa": ("mms", ""),
+    "model_whisper_multi": ("hf", "mobiuslabsgmbh/faster-whisper-large-v3-turbo"),
 }
 ENV_KEYS = ["RUNPOD_API_KEY", "RUNPOD_ENDPOINT_ID"]
 
@@ -68,7 +71,7 @@ HINTS = {
     "faster_whisper": "pip install faster-whisper",
     "transformers": "pip install transformers (about 10 MB; the Hebrew aligner loads through it)",
     "PIL": "pip install pillow",
-    "model_wav2vec2_he": "Hebrew aligner, about 1.2 GB: run align.py with --allow-download after the user says yes",
+    "model_wav2vec2_he": "Hebrew aligner, about 1.3 GB: run align.py with --allow-download after the user says yes",
     "model_whisper_he": "Hebrew check ASR, about 1.6 GB: run check_cut.py with --allow-download after the user says yes",
     "model_mms_fa": "aligner for other languages (torchaudio MMS_FA), about 1.2 GB: run align.py --lang en with --allow-download after the user says yes",
     "model_whisper_multi": "check ASR for other languages (large-v3-turbo), about 1.6 GB: run check_cut.py with --allow-download after the user says yes",
@@ -199,27 +202,9 @@ def check_module(name, deep=False):
     return d
 
 
-def _model_roots(kind):
-    """Cache folders to look in, from the environment first, then the library defaults."""
-    env = os.environ
-    home = Path.home()
-    roots = []
-    if kind == "hf":
-        if env.get("HUGGINGFACE_HUB_CACHE"):
-            roots.append(Path(env["HUGGINGFACE_HUB_CACHE"]))
-        hf = Path(env["HF_HOME"]) if env.get("HF_HOME") else (
-            Path(env["XDG_CACHE_HOME"]) / "huggingface" if env.get("XDG_CACHE_HOME") else home / ".cache" / "huggingface")
-        roots.append(hf / "hub")
-    else:
-        th = Path(env["TORCH_HOME"]) if env.get("TORCH_HOME") else (
-            Path(env["XDG_CACHE_HOME"]) / "torch" if env.get("XDG_CACHE_HOME") else home / ".cache" / "torch")
-        roots.append(th / "hub" / "checkpoints")
-    return roots
-
-
 def check_model(name):
-    kind, item = MODELS[name]
-    found = any((r / item).exists() for r in _model_roots(kind))
+    kind, model_id = MODELS[name]
+    found = align.mms_cached() if kind == "mms" else align.hf_model_cached(model_id)
     return {"ok": found, "version": "", "note": "" if found else "not in the local cache",
             "hint": "" if found else HINTS[name]}
 
@@ -291,6 +276,33 @@ def print_table(data):
             print(f"  {'✓' if s.get('ok') else 'חסר'} {n}" + (f"  {s['note']}" if s.get("note") else ""))
 
 
+def style_requirements(data, style_key):
+    """Rows for the style's `requires` against the capability map. Returns (rows, style) or (None, None)."""
+    import styles  # local import: styles.py reads the registry only
+    st = styles.find(styles.load_registry(), style_key)
+    if not st:
+        return None, None
+    rows = []
+    for r in st.get("requires", []):
+        n = r.get("name", "")
+        ok = bool(data["local"].get(n, {}).get("ok") or data.get("session", {}).get(n, {}).get("ok"))
+        rows.append({"name": n, "ok": ok, "level": r.get("level", "required"),
+                     "why": r.get("why", ""), "fallback": r.get("fallback", "")})
+    return rows, st
+
+
+def print_style_table(st, rows):
+    print(f"[style {st['slug']}]")
+    if not rows:
+        print("  no required connections recorded")
+    for r in rows:
+        print(f"  {'✓' if r['ok'] else 'חסר'} {r['name']}  ({r['level']})  {r['why']}"
+              + ("" if r["ok"] or not r["fallback"] else f"  | fallback: {r['fallback']}"))
+    missing = [r for r in rows if not r["ok"]]
+    if missing and all(r["level"] == "recommended" for r in missing):
+        print("  note: only recommended connections are missing; editing can go on")
+
+
 def cmd_session(args):
     p = store.path("capabilities.json")
     if args.clear:
@@ -320,6 +332,7 @@ def _main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--json", action="store_true")
     p.add_argument("--deep", action="store_true", help="also probe torch CUDA (slow)")
+    p.add_argument("--style", help="also check the connections this style requires (exit 4 if one is missing)")
     sub = p.add_subparsers(dest="cmd")
     s = sub.add_parser("session")
     s.add_argument("--set", action="append")
@@ -330,10 +343,23 @@ def _main(argv=None):
     if args.cmd == "session":
         return cmd_session(args)
     data = run_checks(args.deep)
+    rows = st = None
+    if args.style:
+        rows, st = style_requirements(data, args.style)
+        if st is None:
+            print(f"no style {args.style!r}", file=sys.stderr)
+            return 1
     if args.json:
-        print(json.dumps(data, ensure_ascii=False, indent=2))
+        out = dict(data)
+        if rows is not None:
+            out["style"] = {"slug": st["slug"], "requires": rows}
+        print(json.dumps(out, ensure_ascii=False, indent=2))
     else:
         print_table(data)
+        if rows is not None:
+            print_style_table(st, rows)
+    if rows and any(not r["ok"] and r["level"] == "required" for r in rows):
+        return 4
     return 0
 
 

@@ -66,6 +66,7 @@ Rules for every script that writes here (`store.py` does this for all of them):
 | name_source | `user` \| `claude` | who chose the name |
 | version | whole number | bump it when the rules change; `lessons.py` adds 1 whenever it rewrites the style's learned rules |
 | rules_count | whole number | approved style-layer rules (set by `lessons.py`) |
+| requires | list, default `[]` | connections the style depends on: `{name, why, level: required\|recommended, fallback}`; `name` is a key of the capability map (a local tool or a session MCP/skill). Managed by `styles.py require <slug> --name --why --level [--fallback]` / `unrequire <slug> --name`; `doctor.py --style <slug>` checks them (exit 4 when a `required` one is missing) |
 | aliases | list | other names that find it; never another style's slug, name or alias |
 | board_url, notes | text | |
 | created / updated | ISO dates | set by the script |
@@ -79,7 +80,7 @@ empty, and an alias that is another style's slug, name or alias is refused.
 
 `python scripts/styles.py migrate` upgrades a v1 registry in place: it sets `version: 2`, adds
 the missing fields with defaults (`kind trained`, `aspect 9:16`, `name_source user`,
-`version 1`, `rules_count 0`) and writes `styles.json.bak-YYYYMMDD` first. Reading a v1 file
+`version 1`, `rules_count 0`, `requires []`) and writes `styles.json.bak-YYYYMMDD` first. Reading a v1 file
 upgrades it in memory only; any write through `styles.py` leaves a v2 file with the backup.
 `styles.py check` lists a missing pack or skill (a problem for `ready` styles, expected while
 `training`); offer to relink (`set <slug> pack=...`) or archive it. `check` (on stdout) and
@@ -134,16 +135,17 @@ re-runs of the local check.
     "RUNPOD_API_KEY": {"ok": false, "version": "", "hint": "set the RUNPOD_API_KEY environment variable (paid cloud ASR)"}
   },
   "session": {"higgsfield": {"ok": true, "note": "MCP, paid credits"}},
-  "stages": {"cut": {"uses": ["ffmpeg", "torch", "torchaudio", "faster_whisper"], "missing": [], "paid": []}}
+  "stages": {"cut": {"uses": ["ffmpeg", "torch", "torchaudio", "transformers", "faster_whisper", "model_wav2vec2_he", "model_whisper_he"], "missing": [], "paid": []}}
 }
 ```
 - `local`: binaries (ffmpeg, ffprobe, node, blender, yt-dlp, gh), HyperFrames, Python modules
-  (numpy, cv2, torch, torchaudio, faster_whisper, PIL) and env keys. Env keys are checked for
+  (numpy, cv2, torch, torchaudio, transformers, faster_whisper, PIL), the cut models (the Hugging
+  Face / torch cache folder is looked for, cache presence only, a model is never loaded) and env keys. Env keys are checked for
   presence only; a value is never read into the output or the file. `cuda` is `not probed`
   unless `doctor.py --deep` ran.
 - `session`: MCP servers and skills Claude saw in its own tool list, recorded by Claude.
 - `stages`: per stage, what it uses, what is missing and what costs money. The stage map is
-  `STAGES` at the top of `scripts/doctor.py`: `train`, `train_profile`, `cut`, `frames`,
+  `STAGES` at the top of `scripts/doctor.py`: `train`, `train_profile`, `cut`, `cut_other_languages`, `frames`,
   `build`, `3d`, `cloud_asr` (paid), `publish`.
 
 ## lessons/lessons.json (the learning loop)

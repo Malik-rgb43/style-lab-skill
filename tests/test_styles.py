@@ -205,3 +205,31 @@ def test_check_still_fails_on_missing_ready_path(home, tmp_path):
     run_cli("styles.py", "set", "aaa", f"pack={tmp_path / 'gone'}")
     r = run_cli("styles.py", "check")
     assert r.returncode == 1 and "dangling: client Demo Shop -> style bbb (missing style)" in r.stdout
+
+
+def test_require_unrequire_roundtrip(home, tmp_path):
+    run_cli("styles.py", "add", "--name", "Demo", "--pack", tmp_path)
+    r = run_cli("styles.py", "require", "demo", "--name", "higgsfield", "--why", "AI B-roll",
+                "--level", "recommended", "--fallback", "stock footage")
+    assert r.returncode == 0, r.stderr
+    d = json.loads((home / "styles.json").read_text(encoding="utf-8"))
+    assert d["styles"][0]["requires"] == [{"name": "higgsfield", "why": "AI B-roll",
+                                           "level": "recommended", "fallback": "stock footage"}]
+    assert "higgsfield" in run_cli("styles.py", "show", "demo").stdout
+    run_cli("styles.py", "require", "demo", "--name", "higgsfield", "--why", "x", "--level", "required")
+    d = json.loads((home / "styles.json").read_text(encoding="utf-8"))
+    assert len(d["styles"][0]["requires"]) == 1 and d["styles"][0]["requires"][0]["level"] == "required"
+    assert run_cli("styles.py", "unrequire", "demo", "--name", "higgsfield").returncode == 0
+    d = json.loads((home / "styles.json").read_text(encoding="utf-8"))
+    assert d["styles"][0]["requires"] == []
+    assert run_cli("styles.py", "unrequire", "demo", "--name", "higgsfield").returncode == 1
+    assert run_cli("styles.py", "require", "demo", "--name", "a", "--why", "b", "--level", "bad").returncode != 0
+
+
+def test_migrate_adds_requires(home):
+    seed(home)
+    run_cli("styles.py", "migrate")
+    d = json.loads((home / "styles.json").read_text(encoding="utf-8"))
+    assert all(s["requires"] == [] for s in d["styles"])
+    d["styles"][0]["requires"].append({"name": "x"})
+    assert d["styles"][1]["requires"] == []

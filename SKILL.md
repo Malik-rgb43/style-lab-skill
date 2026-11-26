@@ -67,6 +67,7 @@ name if not given), a description, a pack and a style skill `style-<slug>`, in `
 ```
 python scripts/styles.py {list | show <slug or name> | check | migrate}   # one per call; migrate = v1 -> v2 + dated .bak
 python scripts/styles.py add [<slug>] --name "<name>" --pack <folder> --description "..." [--kind trained|described|derived] [--aspect 9:16|16:9|1:1|4:5]
+python scripts/styles.py {require <slug> --name N --why W --level required|recommended [--fallback F] | unrequire <slug> --name N}
 python scripts/styles.py set <slug> name="<new name>" status=ready aliases="..." theme=light version=2
 ```
 Status `training` (phase A), `ready` (after A5; only these are offered), `archived`; `remove`
@@ -81,11 +82,8 @@ website → `references/stage-c-client.md`; palettes: `references/palette.md`. C
 B; "לקוח חדש / פלטת צבעים" → C; "change / rename / improve style X" → `styles.py set`, hand rules
 in its STYLE.md and skill (learned rules only through `lessons.py`, `references/learning-loop.md`).
 **Where things live** (style pack and project folders): `references/store-schema.md`. `refs/`
-videos are local study copies, never published. Scripts (local, free): `doctor.py`, `styles.py`,
-`clients.py`, `palette.py`, `store.py`, `lessons.py`, `taste.py`, `transcribe_words.py`,
-`align.py`, `cut.py`, `tighten.py`, `check_cut.py`, `cutlang.py`, `word_edges.py`,
-`cut_silences.py` and `verify_cut.py` (fallback only), `build_reference_library.py`;
-`transcribe_cloud_ivrit.py` is paid. Pages: `assets/{board,plan,review}-template.html`.
+videos are local study copies, never published. Scripts (local, free): every `scripts/*.py`
+(`cut_silences.py`, `verify_cut.py` = fallback only); `transcribe_cloud_ivrit.py` is paid. Pages: `assets/{board,plan,review}-template.html`.
 
 ## Phase A: train a style (build the style pack)
 
@@ -142,7 +140,7 @@ design, motion, placement and 2-3 library refs; the planning patterns; the sound
 pair. Start from the general rules in `references/craft-rules.md` and write only what differs.
 Recommended: build the recurring parts (captions, headline, speaker layout, CTA) as a tested
 component kit in `kit/`. Save the skill to `~/.claude/skills/style-<slug>/SKILL.md`, then
-`styles.py set <slug> status=ready board_url=<board artifact URL>`. Tell the user the style's
+`styles.py set <slug> status=ready board_url=<board artifact URL>`. Fill `requires` (`styles.py require`) with the connections training showed the style depends on. Tell the user the style's
 name and that a new session will list it.
 
 ## Phase B: edit a clip in a trained style
@@ -154,6 +152,7 @@ is the first suggestion; a new client: stage C first) or none (brand defaults). 
 the one the user named, else ask with the ready styles as options (one: say which); none ready:
 offer phase A. Load `style-<slug>`, read `clients.py show <client>` (palette, fonts, logo, dos /
 don'ts) and write both into `plan.json` so every round uses the same client and style.
+Run `doctor.py --style <slug>` before planning; a missing `required` connection (exit 4) = stop and ask.
 
 ### B1. Transcript and cut (precise pipeline, details in `references/stage-b-edit.md`)
 1. `transcribe_words.py raw.mp4 --out words.json` (Hebrew: `--language he --model <ivrit-ai folder>`);
@@ -164,8 +163,8 @@ don'ts) and write both into `plan.json` so every round uses the same client and 
    drop sentence openings repeated in full; prefer the last complete take; write `keep.json`.
 4. `cut.py raw.mp4 words.aligned.json keep.json --out <stem> --preset reels|lesson|vsl`
    (reels: Reels, lesson: lessons, vsl: VSLs/talking heads, then `tighten.py <stem> --out <o>`).
-5. `check_cut.py <stem>` until clean or every item is explained; only then planning, on
-   `<stem>.mp4` and `<stem>.words.json`. `cut_silences.py`/`verify_cut.py`: fallback, user must accept.
+5. `check_cut.py <final stem>` (for vsl the tighten output) until clean or every item is
+   explained; only then planning, on `<final stem>.mp4` and `<final stem>.words.json`. `cut_silences.py`/`verify_cut.py`: fallback, user must accept.
 
 ### B2. The edit plan (show it unasked)
 First read the rules that apply: `python scripts/lessons.py rules --style <s> --client <c>`
