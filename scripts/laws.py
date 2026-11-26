@@ -39,7 +39,7 @@ VIDEO_CONF_MIN = 0.3      # a video supports a law only if its own confidence is
 LIST_MIN_VIDEOS = 2
 LIST_MIN_CONFIDENCE = 0.3
 LIFT_CAP = 999.0
-CO_S = 0.04              # lag-0: events of different layers closer than this are one moment (1 frame)
+CO_S = 0.04              # lag-0: same-moment events closer than this are co-occurrences (1 frame)
 
 
 def _union_len(intervals, lo, hi):
@@ -57,6 +57,32 @@ def _union_len(intervals, lo, hi):
     return total
 
 
+VISUAL_LAYERS = ("cut", "motion", "text")
+
+
+def _is_visual(e):
+    a = e.get("attrs") or {}
+    return e["layer"] in VISUAL_LAYERS or (e["layer"] == "manual" and (a.get("kind") == "visual" or
+                                                                     a.get("layer") == "visual"))
+
+
+def same_moment(a, b):
+    """True when two events at lag 0 are one moment of the picture, not a sync: both visual (cut, motion,
+    text, or a manual event with attrs.kind "visual") in different layers, or one manual and one automatic
+    event of the same layer (the manual one names it in attrs.layer). Word and sound events never are."""
+    if a["layer"] != b["layer"] and _is_visual(a) and _is_visual(b):
+        return True
+    for m, o in ((a, b), (b, a)):
+        if m["layer"] == "manual" and o["layer"] != "manual" and (m.get("attrs") or {}).get("layer") == o["layer"]:
+            return True
+    return False
+
+
+def _ord(e):
+    """Stable order of simultaneous events: a word comes first (the hit lands on the word), then by type."""
+    return (e["layer"] != "word", e["type"])
+
+
 def _match(xs, ys, window_s):
     """Greedy one-to-one matching in time order: each X takes the earliest unused Y that starts 0..window
     after it. Events of one source never match; at lag 0 only X before Y in type order counts, so two
@@ -68,9 +94,8 @@ def _match(xs, ys, window_s):
         while j < len(ys) and yt[j] <= x["t"] + window_s + 1e-9:
             y = ys[j]
             lag = y["t"] - x["t"]
-            same_moment = lag < CO_S and y["layer"] != x["layer"]     # a co-occurrence, not a law
-            ok = (j not in used and y.get("src") != x.get("src") and not same_moment
-                  and (lag > 1e-6 or x["type"] < y["type"]))
+            ok = (j not in used and y.get("src") != x.get("src") and not (lag < CO_S and same_moment(x, y))
+                  and (lag > 1e-6 or _ord(x) < _ord(y)))
             if ok:
                 used.add(j)
                 lags.append(max(0.0, lag))
@@ -87,8 +112,9 @@ def _mine(streams, window_s=WINDOW_S, spans=None, layers=None):
     """(laws, co_occurrences) from {video id: events}; spans {video id: duration_s} (default: the stream's
     own extent, also when a duration is 0 or less); layers {video id: set of measured layers}: a video is
     skipped for a pair when the layer of X or of Y was not measured in it (default: all measured).
-    co_occurrences [{a, b, occurrences, videos}] are lag-0 pairs of different layers (a cut and a camera
-    move, a manual and an automatic event within one frame): one moment, not a rule.
+    co_occurrences [{a, b, occurrences, videos}] are lag-0 pairs that are one moment of the picture
+    (same_moment: a cut and a camera move, a manual and an automatic event of one layer): not a rule.
+    A word or a sound at lag 0 with anything stays a law (the hit lands on the word).
 
     Per video and (X, Y) pair, X and Y are matched one-to-one (_match); the video's confidence is
     matched X / all X. Law = {when, then, anchor, lag, support_videos, occurrences, followed, confidence,
@@ -119,7 +145,7 @@ def _mine(streams, window_s=WINDOW_S, spans=None, layers=None):
             for b in evs[a_i + 1:]:
                 if b["t"] - a["t"] >= CO_S:
                     break
-                if a["layer"] != b["layer"] and a["src"] != b["src"] and a["type"] != b["type"] and (
+                if same_moment(a, b) and a["src"] != b["src"] and a["type"] != b["type"] and (
                         ok_layers is None or (a["layer"] in ok_layers and b["layer"] in ok_layers)):
                     key = tuple(sorted((a["type"], b["type"])))
                     co.setdefault(key, {})[vid] = co.get(key, {}).get(vid, 0) + 1

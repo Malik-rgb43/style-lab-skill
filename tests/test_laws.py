@@ -180,3 +180,14 @@ def test_box_merge_by_position():
              {"t": 1.8, "box": [0.1, 0.6, 0.3, 0.1], "h_pct": 10}]       # other place: its own event
     big = [e for e in events({"measure": {"text": {"boxes": boxes}}}) if e["type"] == "big_text"]
     assert [e["t"] for e in big] == [1.0, 1.8]
+
+
+def test_lag0_word_sfx_is_a_law_cut_camera_is_co_occurrence():
+    c = lambda t, typ, layer: {"t": t, "type": typ, "src": f"{typ}{t}", "layer": layer}  # noqa: E731
+    streams = {v: [c(1.0, "word:number", "word"), c(1.0, "sfx:hit", "sound"),
+                   c(4.0, "cut", "cut"), c(4.0, "camera:scale", "motion")] for v in ("a", "b", "c")}
+    ls, co = laws._mine(streams)
+    pairs = {(l["when"], l["then"]): l for l in ls}
+    assert pairs[("word:number", "sfx:hit")]["lag"]["median"] == 0
+    assert not any({l["when"], l["then"]} == {"cut", "camera:scale"} for l in ls)
+    assert co == [{"a": "camera:scale", "b": "cut", "occurrences": 3, "videos": 3}]
