@@ -62,7 +62,9 @@ def test_nearest_named_every_reference():
 def test_analyse_move_peak_and_end():
     m = tm.analyse_move(_sample("power3.out", 15), 30)
     assert m["peak_at"] <= 0.2 and m["end"] == "soft"
-    assert m["dur_f"] == 14 and m["ease_name"] == "power3.out"
+    # a soft tail with no hold after it ends within a frame of the last sample (its last steps
+    # are below the noise floor), so 13-15
+    assert 13 <= m["dur_f"] <= 15 and m["ease_name"] == "power3.out"
     lin = np.r_[np.linspace(0.2, 0.8, 15), [0.8] * 5]  # linear, then a hard stop and a hold
     m = tm.analyse_move(lin, 30)
     assert 0.3 <= m["peak_at"] <= 0.7 and m["end"] == "hard"
@@ -228,3 +230,49 @@ def test_very_short_clip(tmp_path):
     clip = mm.make_motion_clip(tmp_path / "short.mp4", dur_s=0.12, fps=25)
     doc = tm.track(clip)
     assert tm.validate(doc) == [] and doc["camera_moves"] == [] and doc["elements"] == []
+
+
+def _noisy_move(name, n, noise, seed, step=1, pre=8, post=8):
+    rng = np.random.default_rng(seed)
+    a = tm.bezier_y(np.linspace(0, 1, n), EASES[name])
+    if step > 1:
+        a = np.repeat(a[::step], step)[:n]
+    v = np.r_[[0.0] * pre, a, [1.0] * post] * 0.4 + 0.3
+    return v + rng.normal(0, noise, len(v))
+
+
+def test_noisy_power3_out_keeps_its_name():
+    hits = 0
+    for seed in range(5):
+        v = _noisy_move("power3.out", 25, 0.002, seed)  # 0.5 % of the 0.4 delta
+        moves = tm.segment_moves(v, 30)
+        assert len(moves) == 1
+        a, b = tm.move_slice(v, *moves[0])
+        m = tm.analyse_move(v[a:b + 1], 30)
+        hits += m["ease_name"] in ("power3.out", "power2.out", "power4.out")
+        # the last quarter of a power3.out moves under 0.5 % of the delta, inside the noise, so the
+        # visible move ends early: the fitted (shorter) duration and curve still match what is seen
+        assert 16 <= m["dur_f"] <= 26
+    assert hits >= 4
+
+
+def test_noisy_linear_has_a_hard_end():
+    rng = np.random.default_rng(2)
+    v = np.r_[[0.3] * 8, np.linspace(0.3, 0.7, 16), [0.7] * 8] + rng.normal(0, 0.001, 32)
+    moves = tm.segment_moves(v, 30)
+    a, b = tm.move_slice(v, *moves[0])
+    m = tm.analyse_move(v[a:b + 1], 30)
+    assert abs(m["dur_f"] - 15) <= 2 and m["end"] == "hard"
+
+
+def test_noisy_stepped_move_is_one_move():
+    ok = 0
+    for seed in range(5):
+        v = _noisy_move("power2.out", 31, 0.0003, seed, step=2)
+        moves = tm.segment_moves(v, 30)
+        if len(moves) != 1:
+            continue
+        a, b = tm.move_slice(v, *moves[0])
+        m = tm.analyse_move(v[a:b + 1], 30)
+        ok += abs(m["dur_f"] - 30) <= 3 and m["ease_name"] in ("power2.out", "power1.out", "power3.out")
+    assert ok >= 4

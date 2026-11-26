@@ -15,34 +15,41 @@ How it is measured (all local, free):
   - frames come from measure_video.decode_gray; shots are the spans between the cuts of
     measure.json (frames inside a gradual transition are skipped). Without --measure the cuts are
     detected here with measure_video.detect_cuts.
-  - camera: LK optical flow on good features from the shot start, a RANSAC partial affine
-    (scale, rotation, translation) from the shot-start frame to each frame; reset at every cut.
-    A shot with too few trackable features, or features on one small object only (their box
-    spans < 40 % of the frame), keeps the identity (no camera move is invented).
+  - camera: LK optical flow on good features, a RANSAC partial affine (scale, rotation,
+    translation) from the reference frame to each frame; the reference is the shot start. When
+    tracking fails (too few features, or features on one small object only: their box spans
+    < 40 % of the frame) the frame is a gap (NaN) and tracking restarts from the identity after
+    it; nothing is carried across a gap. Camera moves shorter than 6 frames or with rmse above
+    0.08 are jitter: dropped and counted (camera_jitter_dropped).
     tx / ty are the motion of the frame centre, in fractions of the frame; rotation in degrees.
-  - elements: each frame is warped back into the shot-start frame (camera-stabilised), compared
-    with the shot's temporal-median background, and the changed regions become connected
-    components, tracked frame to frame by IoU >= 0.3 (a fast move that breaks the overlap is
-    still matched by centre distance and a similar area). x / y are the weighted centre in frame
-    fractions, scale the weighted spread relative to the track's median, opacity the mean
-    contrast relative to the track's 90th percentile. Limitation: an element that stays still for
-    most of a shot becomes part of the median background.
-  - unique frames: a frame that repeats the one before (on-2s / on-3s animation, a variable
-    frame rate made constant) is not a real sample. Only the first frame of a short repeat run
-    (<= MAX_STEP_HOLD frames) is a sample; a longer run is a real hold (its first and last frames
-    are samples). Moves are found and fitted on these samples, so hold frames never read as easing.
-    Where a stepped move really starts and ends is uncertain by up to one picture; those two
-    times are searched at quarter-picture offsets for the smoothest fit.
-  - a move is a run of at least min_frames frames whose speed is above 5 % of the peak speed,
-    widened to where the motion really starts and stops, with an overshoot's way back included.
-  - the easing fit works on progress 0..1 over time 0..1: a coarse grid over x1, x2 in [0, 1]
-    and y1, y2 in [-0.5, 1.5], then Nelder-Mead (numpy only) from the best cells over (x1, x2),
-    with y1, y2 solved by least squares at each step (the curve is linear in them for a fixed
-    x1, x2). The bezier is evaluated by solving x(t) = x with Newton's method and a bisection
-    fallback. Named eases are compared by curve distance with their standard cubic-bezier
-    equivalents (NAMED).
+  - elements: each frame is warped back into the reference frame (camera-stabilised), compared
+    with the temporal-median background (ghosts of resting elements repaired, threshold raised
+    by the local noise), and the changed regions become connected components, tracked frame to
+    frame by IoU >= 0.3 (a fast move that breaks the overlap is still matched by centre distance
+    and a similar area). An element lives >= 0.4 s, covers >= 0.4 % of the frame and moves
+    rigidly (a similarity warp of its previous picture predicts the next one); non-rigid blobs
+    (a talking person, cloth, water) are summarised under nonrigid_regions, not tracked.
+    Components that move together are merged. x / y are the weighted centre in frame fractions,
+    scale the weighted spread relative to the track's median, opacity the mean contrast relative
+    to the track's 90th percentile.
+  - noise: per series, the position noise sigma is the smaller of a second-difference MAD and
+    the 20th percentile of the frame speed; the noise floor of the speed is 3 * sqrt(2) * sigma.
+  - stepping, per series: a frame whose speed is under the noise floor between higher speeds
+    (within 3 frames on both sides) is a held picture (on 2s, on 3s, a variable frame rate made
+    constant), not a sample. The step period is the autocorrelation peak of the speed.
+  - a move is a run of speed above the noise floor, split where the speed dips under 5 % of
+    that run's own peak; its delta (medians of the holds on both sides) must be at least
+    15 sigma and the property's minimum.
+  - the fit works on the samples only: progress 0..1 over time 0..1 with the start and end time
+    free (the holds around the move pin v0 and v1 as their medians), so a soft tail lost in the
+    noise and the true start of a stepped move are found by the fit. Coarse grid over x1, x2 in
+    [0, 1] and y1, y2 in [-0.5, 1.5], then Nelder-Mead (numpy only) over (x1, x2, start, end),
+    with y1, y2 solved by least squares at each step (the curve is linear in them). The bezier
+    is evaluated by solving x(t) = x with Newton's method and a bisection fallback. peak_at,
+    end, overshoot and settle come from the fitted curve. Named eases are compared by curve
+    distance with their standard cubic-bezier equivalents (NAMED).
 
-Exit: 0 done, 1 error, 2 bad input, 3 ffmpeg missing (one line, with an install hint).
+Exit: 0 done, 1 error, 2 bad input (missing or corrupt video, bad measure.json), 3 ffmpeg missing.
 """
 import argparse
 import json
@@ -57,23 +64,40 @@ import store  # noqa: E402
 from cut import MissingTool, require_ffmpeg  # noqa: E402
 
 SCHEMA = "motion/1"
-MOVE_SPEED_FRAC = 0.05   # a move: speed above this fraction of the peak speed ...
-MIN_FRAMES = 3           # ... for at least this many frames
-EXTEND_FRAC = 0.002      # the move is widened while the speed stays above this fraction of its peak
-MAX_STEP_HOLD = 3        # a repeat run up to this long is stepped animation, longer is a real hold
+NOISE_K = 3.0            # the speed noise floor is NOISE_K * sqrt(2) * sigma
+MOVE_SPEED_FRAC = 0.05   # a run is split where its speed dips under this fraction of its own peak
+MIN_FRAMES = 3           # a move lasts at least this many frames
+SNR_DELTA = 15.0         # ... and its delta is at least this many sigma
+MAX_STEP_HOLD = 3        # a held picture sits between higher speeds within this many frames
 HARD_END_FRAC = 0.3      # end speed / peak speed at or above this = hard stop
 SETTLE_TOL = 0.01        # settled = within 1 % of the move's delta
-MIN_FEATURES = 20        # fewer trackable features = the camera is not measured (identity)
+FIT_MAX_PTS = 90         # the fit uses at most this many samples (evenly picked)
+FIT_ITERS = 160          # Nelder-Mead iterations per start
+MIN_FEATURES = 20        # fewer trackable features = a camera gap
 CAM_SPREAD = 0.4         # ... or features that span less than this share of the frame (one object)
+CAM_MIN_F = 6            # camera moves shorter than this ...
+CAM_MAX_RMSE = 0.08      # ... or with a worse fit are jitter
+EL_MIN_LIFE_S = 0.4      # an element lives at least this long ...
+EL_MIN_AREA = 0.004      # ... covers at least this share of the frame ...
+RIGID_MAX_RES = 0.35     # ... and its similarity-warp residual (median) stays under this
 CHANGE_PX = 8            # gray levels, as in measure_video
 REPEAT_FRAC = 0.0005     # fewer changed pixels than this = a repeated frame (measure_video)
 STAGGER_GAP_S = 0.6      # entrances closer than this belong to one stagger group
-STAGGER_MIN = 3          # ... of at least this many elements
+STAGGER_SPAN_S = 2.0     # a group spans at most this long
+STAGGER_MAX = 12         # ... has at most this many members
+STAGGER_MIN = 3          # ... and at least this many
+STAGGER_AREA_RATIO = 3.0  # members of similar size
+STAGGER_ANGLE = 45.0     # ... and similar entrance direction (degrees)
 # smallest |delta| that counts as a move, per property
-MIN_DELTA = {"scale": 0.004, "x": 0.003, "y": 0.003, "rotation": 0.25}
+MIN_DELTA = {"scale": 0.015, "x": 0.008, "y": 0.008, "rotation": 0.5}  # visible camera moves only (1.5 % zoom, 0.8 % of the frame)
 EL_MIN_DELTA = {"x": 0.004, "y": 0.004, "scale": 0.03, "opacity": 0.08}
 CAM_PROPS = ("scale", "x", "y", "rotation")
 EL_PROPS = ("x", "y", "scale", "opacity")
+
+
+class BadInput(ValueError):
+    """A corrupt video or a malformed measure.json: the CLI prints one line and exits 2."""
+
 
 # Named eases as their standard cubic-bezier equivalents (the CSS / easings.net tables that GSAP's
 # power eases are usually quoted with: power1 = quad, power2 = cubic, power3 = quart,
@@ -309,245 +333,385 @@ def mirror_bezier(b):
     return [round(1 - x2, 3), round(1 - y2, 3), round(1 - x1, 3), round(1 - y1, 3)]
 
 
-# ---------------------------------------------------------------- samples, moves
+# ---------------------------------------------------------------- noise, stepping, samples
 
-def _repeat_mask(v, repeat=None):
-    """Frame i repeats frame i-1: the value did not change (or the caller says so)."""
-    v = np.asarray(v, float)
-    n = len(v)
-    rng = float(v.max() - v.min()) if n else 0.0
-    same = np.zeros(n, bool)
-    if n > 1:
-        same[1:] = np.abs(np.diff(v)) <= 1e-4 * rng + 1e-12
-    if repeat is not None:
-        same = same | np.asarray(repeat, bool)[:n]
-    same[0] = False
-    return same
-
-
-def _runs(same):
-    """[(i, j)] inclusive runs of frames that repeat the run's first frame."""
-    n, out, i = len(same), [], 0
-    while i < n:
-        j = i
-        while j + 1 < n and same[j + 1]:
-            j += 1
-        out.append((i, j))
-        i = j + 1
-    return out
+def noise_sigma(values):
+    """Position noise (one frame) of a series: the smaller of the second-difference MAD and the
+    20th percentile of the frame speed (both scaled to a gaussian sigma). Holds, stepped pictures
+    and smooth motion each keep one of the two honest."""
+    v = np.asarray(values, float)
+    v = v[np.isfinite(v)]
+    if len(v) < 4:
+        return 0.0
+    s = np.abs(np.diff(v))
+    sb = float(np.percentile(s, 20)) / (0.2533 * math.sqrt(2))
+    d2 = v[2:] - 2 * v[1:-1] + v[:-2]
+    sa = 1.4826 * float(np.median(np.abs(d2 - np.median(d2)))) / math.sqrt(6)
+    return min(sa, sb)
 
 
-def animation_step(values, repeat=None, max_hold=MAX_STEP_HOLD):
-    """Frames per drawn picture while the series moves: 1 = every frame, 2 = on twos, ..."""
-    runs = _runs(_repeat_mask(values, repeat))
-    lens = [j - i + 1 for i, j in runs[1:-1] if j - i + 1 <= max_hold]
-    if not lens:
-        return 1
-    vals, counts = np.unique(lens, return_counts=True)
-    return int(vals[int(np.argmax(counts))])
+def _floor(sigma, values):
+    v = np.asarray(values, float)
+    rng = float(np.nanmax(v) - np.nanmin(v)) if len(v) else 0.0
+    return max(NOISE_K * math.sqrt(2) * sigma, 1e-9 * rng + 1e-12)
 
 
-def sample_points(values, repeat=None, max_hold=MAX_STEP_HOLD, _windows=False):
-    """(times, indices) of the real samples (see the module docstring, "unique frames").
+def _runs_of(mask):
+    """[(a, b)] inclusive index runs where mask is True."""
+    m = np.asarray(mask, bool)
+    if not len(m):
+        return []
+    d = np.diff(np.r_[0, m.astype(np.int8), 0])
+    return list(zip(np.nonzero(d == 1)[0].tolist(), (np.nonzero(d == -1)[0] - 1).tolist()))
 
-    The first frame of every run is a sample. A run longer than max_hold is a real hold, so its
-    end is a sample too. With stepped animation (k frames per picture) the motion after a hold
-    starts somewhere inside the hold's last picture and the next picture's start, so that
-    sample's time is the middle of that window: run end - (k - 1) + k / 2."""
+
+def step_holds(values, repeat=None, sigma=None):
+    """bool per frame: the frame repeats the picture before it (a held picture inside motion).
+    repeat: frames known to repeat (a whole-frame repeat) are holds too."""
     v = np.asarray(values, float)
     n = len(v)
-    if n == 0:
-        return np.zeros(0), np.zeros(0, int)
-    runs = _runs(_repeat_mask(v, repeat))
-    k = animation_step(v, repeat, max_hold)
-    pts, win = {}, {}
-    for r, (i, j) in enumerate(runs):
-        pts[i] = float(i)
-        if j - i + 1 > max_hold:
-            if r == len(runs) - 1 or k == 1:
-                pts[j] = float(j)
-            else:
-                f = max(i + 1, j - (k - 1))
-                pts[f] = min(float(j), f + k / 2.0)
-                win[f] = (float(f), float(min(j + 1, f + k)))
-    idx = np.array(sorted(pts), int)
-    times = np.array([pts[i] for i in idx])
-    if _windows:  # (times, idx, step, {idx: (lo, hi) window of a hold-end sample})
-        return times, idx, k, win
-    return times, idx
+    hold = np.zeros(n, bool)
+    if n < 3:
+        return hold
+    sigma = noise_sigma(v) if sigma is None else sigma
+    low = np.abs(np.diff(v)) <= _floor(sigma, v)
+    hi = (~low).astype(np.int8)
+    k = MAX_STEP_HOLD
+    pad = np.r_[np.zeros(k, np.int8), hi, np.zeros(k, np.int8)]
+    c = np.cumsum(np.r_[0, pad])
+    i = np.arange(len(low))
+    left = c[i + k] - c[i] > 0          # a higher speed within k steps before
+    right = c[i + 2 * k + 1] - c[i + k + 1] > 0  # ... and within k steps after
+    hold[1:] = low & left & right
+    if repeat is not None:
+        # a repeated whole frame is a held picture only inside motion; the repeats of a static
+        # stretch before or after a move are the rest, and must stay samples of it
+        rep = np.zeros(n, bool)
+        r = np.asarray(repeat, bool)[:n]
+        rep[:len(r)] = r
+        hold[1:] |= rep[1:] & left & right
+    hold[0] = False
+    return hold
 
 
-def true_samples(values, repeat=None, max_hold=MAX_STEP_HOLD):
-    """Frame indices of the real samples (sample_points without the times)."""
-    return sample_points(values, repeat, max_hold)[1]
+def animation_step(values, repeat=None):
+    """Frames per drawn picture while the series moves (1 = every frame, 2 = on 2s, 3 = on 3s):
+    the autocorrelation peak of the speed over the moving part, when held pictures are common."""
+    v = np.asarray(values, float)
+    if len(v) < 8:
+        return 1
+    sigma = noise_sigma(v)
+    s = np.abs(np.diff(v))
+    act = np.nonzero(s > _floor(sigma, v))[0]
+    if len(act) < 4:
+        return 1
+    seg = s[act[0]:act[-1] + 1]
+    hold = step_holds(v, repeat, sigma)[act[0] + 1:act[-1] + 2]
+    if len(seg) < 8 or hold.mean() < 0.25:
+        return 1
+    x = seg - seg.mean()
+    den = float((x * x).sum())
+    if den <= 0:
+        return 1
+    ac = {lag: float((x[:-lag] * x[lag:]).sum()) / den for lag in (2, 3, 4) if lag < len(x)}
+    if not ac:
+        return 1
+    top = max(ac.values())
+    if top < 0.2:
+        return 1
+    return min(lag for lag, a in ac.items() if a >= 0.8 * top)
+
+
+def true_samples(values, repeat=None):
+    """Frame indices that are real samples (every frame but the held pictures)."""
+    return np.nonzero(~step_holds(values, repeat))[0]
 
 
 def resample_unique(values, repeat=None):
-    """The series with held frames replaced by interpolation between the real samples."""
+    """The series with held pictures replaced by interpolation between the real samples."""
     v = np.asarray(values, float)
     if len(v) < 2:
         return v.copy()
-    t, u = sample_points(v, repeat)
-    return np.interp(np.arange(len(v)), t, v[u])
+    u = true_samples(v, repeat)
+    return np.interp(np.arange(len(v)), u, v[u])
 
 
 def speed_series(values, fps, repeat=None):
-    """|dv/dt| per frame step (units per second), on unique frames; len n-1."""
+    """|dv/dt| per frame step (units per second), on the real samples; len n-1."""
     v = resample_unique(values, repeat)
     return np.abs(np.diff(v)) * float(fps) if len(v) > 1 else np.zeros(0)
 
 
+def _local_delta(v, i0, i1, lo=0, hi=None):
+    """(v0, v1): medians of a few frames on each side of a move (inside [lo, hi])."""
+    hi = len(v) - 1 if hi is None else hi
+    w = max(2, min(6, (i1 - i0) // 2 + 1))
+    a = v[max(lo, i0 - w + 1):i0 + 1]
+    b = v[i1:min(hi, i1 + w - 1) + 1]
+    return float(np.median(a)), float(np.median(b))
+
+
 def segment_moves(values, fps, min_frames=MIN_FRAMES, repeat=None, min_delta=0.0):
-    """[(i0, i1)] frame ranges (inclusive) of the moves in a value series."""
-    v = resample_unique(values, repeat)
+    """[(i0, i1)] frame ranges (inclusive) of the moves in a value series (module docstring)."""
+    v = np.asarray(values, float)
     n = len(v)
-    if n < 2:
+    if n < 2 or not np.isfinite(v).all():
         return []
-    s = np.abs(np.diff(v))
-    peak = float(s.max())
-    if peak <= 0:
-        return []
-    above = s > MOVE_SPEED_FRAC * peak
-    runs, k = [], 0
-    while k < len(s):
-        if above[k]:
-            j = k
-            while j + 1 < len(s) and above[j + 1]:
-                j += 1
-            runs.append([k, j])
-            k = j + 1
-        else:
-            k += 1
+    sigma = noise_sigma(v)
+    hold = step_holds(v, repeat, sigma)
+    u = np.nonzero(~hold)[0]
+    vi = np.interp(np.arange(n), u, v[u])
+    s = np.abs(np.diff(vi))
+    act = s > _floor(sigma, v)
+    if len(act) > 2:  # a single quiet step inside a move does not end it
+        act[1:-1] |= act[:-2] & act[2:]
     moves = []
-    for a, b in runs:
-        if b - a + 1 < min_frames:
-            continue
-        rp = float(s[a:b + 1].max())
-        while a > 0 and s[a - 1] > EXTEND_FRAC * rp and s[a - 1] <= s[a] * 1.1 + 1e-15:
-            a -= 1
-        while b + 1 < len(s) and s[b + 1] > EXTEND_FRAC * rp and s[b + 1] <= s[b] * 1.1 + 1e-15:
-            b += 1
-        i0, i1 = a, b + 1
-        if moves and i0 <= moves[-1][1]:
-            moves[-1][1] = max(moves[-1][1], i1)
-        else:
-            moves.append([i0, i1])
-    # an overshoot's way back belongs to the move it settles
-    merged = []
+    for a, b in _runs_of(act):
+        seg = s[a:b + 1]
+        core = _runs_of(seg > MOVE_SPEED_FRAC * float(seg.max()))
+        cuts = [a]
+        for (_c0, c1), (d0, _d1) in zip(core, core[1:]):
+            cuts.append(a + c1 + 1 + int(np.argmin(seg[c1 + 1:d0])) if d0 > c1 + 1 else a + d0)
+        cuts.append(b + 1)
+        for k in range(len(cuts) - 1):
+            moves.append([cuts[k], cuts[k + 1]])
+    merged = []  # an overshoot's way back belongs to the move it settles
     for m in moves:
         if merged:
             p = merged[-1]
-            d_prev, d_cur = v[p[1]] - v[p[0]], v[m[1]] - v[m[0]]
-            if m[0] - p[1] <= 2 and d_prev * d_cur < 0 and abs(d_cur) < 0.5 * abs(d_prev):
+            d_prev = vi[p[1]] - vi[p[0]]
+            d_cur = vi[m[1]] - vi[m[0]]
+            if m[0] - p[1] <= 3 and d_prev * d_cur < 0 and abs(d_cur) < 0.5 * abs(d_prev):
                 p[1] = m[1]
                 continue
         merged.append(m)
     out = []
+    need = max(float(min_delta), SNR_DELTA * sigma)
     for k, (i0, i1) in enumerate(merged):
-        d = v[i1] - v[i0]
-        nxt = merged[k + 1][0] if k + 1 < len(merged) else n - 1
-        j = i1
-        while j < nxt and (v[j + 1] - v[j]) * d < 0 and abs(v[j + 1] - v[j]) > 1e-4 * abs(d):
-            j += 1
-        back = abs(v[j] - v[i1])
-        if j - i1 >= 2 and 0.01 * abs(d) <= back < 0.5 * abs(d):
-            i1 = j
-        if abs(v[i1] - v[i0]) >= min_delta and i1 - i0 >= min_frames:
+        lo = merged[k - 1][1] if k else 0
+        hi = merged[k + 1][0] if k + 1 < len(merged) else n - 1
+        v0, v1 = _local_delta(vi, i0, i1, lo, hi)
+        if i1 - i0 >= min_frames and abs(v1 - v0) >= need and abs(v1 - v0) > 0:
             out.append((int(i0), int(i1)))
     return out
 
+
+def move_slice(values, i0, i1, lo=0, hi=None, pad=None):
+    """(a, b): the move's frame range widened into the holds on both sides (at most `pad`
+    frames, default max(8, the move's length), and never past lo / hi), so analyse_move sees
+    v0 and v1 and has room to find the true start and end."""
+    hi = len(values) - 1 if hi is None else hi
+    pad = max(8, int(i1) - int(i0)) if pad is None else pad
+    return max(int(lo), int(i0) - pad), min(int(hi), int(i1) + pad)
+
+
+# ---------------------------------------------------------------- one move
 
 def _empty_move():
     b = [0.0, 0.0, 1.0, 1.0]
     return {"dur_f": 0, "dur_s": 0.0, "delta": 0.0, "peak_speed": 0.0, "peak_at": 0.0, "overshoot": 0.0,
             "settle_f": 0, "end": "hard", "bezier": b, "custom_ease": custom_ease(b), "rmse": 0.0,
-            "ease_name": "linear"}
+            "ease_name": "linear", "step_f": 1}
 
 
-def _move_from_samples(fu, vu, fps):
-    """Move dict from real sample times fu (frames) and values vu, or None when degenerate."""
-    span = float(fu[-1] - fu[0])
-    if span <= 0:
+def _abc(t, ts, te, x1, x2):
+    u = np.clip((t - ts) / max(te - ts, 1e-6), 0.0, 1.0)
+    tau = _solve_t(u, x1, x2)
+    w = 1.0 - tau
+    return 3 * w * w * tau, 3 * w * tau * tau, tau ** 3
+
+
+def _outer_ends(t, vs, r0, r1):
+    """(v0, v1): medians of the outer half of the holds before r0 and after r1 (the part far
+    from the move, so a soft tail lost in the noise does not pull them), else the end samples."""
+    pre = t[t <= r0]
+    post = t[t >= r1]
+    if len(pre) >= 2:
+        before = vs[(t <= r0) & (t <= pre[0] + max(1.0, (r0 - pre[0]) / 2))]
+    else:
+        before = vs[:1]
+    if len(post) >= 2:
+        after = vs[(t >= r1) & (t >= post[-1] - max(1.0, (post[-1] - r1) / 2))]
+    else:
+        after = vs[-1:]
+    return float(np.median(before)), float(np.median(after))
+
+
+def _ly(A, B, r):
+    """Least-squares (y1, y2) for A*y1 + B*y2 = r, kept in [-1, 2]."""
+    aa, ab, b2 = float(A @ A), float(A @ B), float(B @ B)
+    ar, br = float(A @ r), float(B @ r)
+    det = aa * b2 - ab * ab
+    if abs(det) < 1e-14:
+        y1 = y2 = (ar + br) / max(1e-14, aa + 2 * ab + b2)
+    else:
+        y1, y2 = (b2 * ar - ab * br) / det, (aa * br - ab * ar) / det
+    return min(2.0, max(-1.0, y1)), min(2.0, max(-1.0, y2))
+
+
+def _fit_move(t, vs, ts_rng, te_rng):
+    """Fit (x1, y1, x2, y2, ts, te, v0, v1) to samples (t frames, vs values); ts_rng / te_rng are
+    (low, start, high). Returns a dict or None (no change in value)."""
+    if len(t) > FIT_MAX_PTS:
+        keep = np.unique(np.linspace(0, len(t) - 1, FIT_MAX_PTS).round().astype(int))
+        t, vs = t[keep], vs[keep]
+    (ts_lo, ts0, ts_hi), (te_lo, te0, te_hi) = ts_rng, te_rng
+    min_len = 1.0
+    v0, v1 = _outer_ends(t, vs, ts0, te0)
+    d = v1 - v0
+    if abs(d) < 1e-12:
         return None
-    v0, v1 = vu[0], vu[-1]
-    delta = v1 - v0
-    if abs(delta) < 1e-12:  # out and back: measure against the largest excursion
-        delta = vu[int(np.argmax(np.abs(vu - v0)))] - v0
-        if abs(delta) < 1e-12:
-            return None
-    prog = (vu - v0) / delta
-    tn = (fu - fu[0]) / span
-    sp = np.abs(np.diff(vu)) / np.diff(fu) * float(fps)
-    mids = (tn[:-1] + tn[1:]) / 2
+
+    def clamp(q):
+        x1, x2 = min(1.0, max(0.0, q[0])), min(1.0, max(0.0, q[1]))
+        ts = min(ts_hi, max(ts_lo, q[2]))
+        te = min(te_hi, max(te_lo, q[3]))
+        if te - ts < min_len:
+            te = ts + min_len
+        return x1, x2, ts, te
+
+    def evaluate(x1, x2, ts, te):
+        A, B, C = _abc(t, ts, te, x1, x2)
+        r = (vs - v0) / d - C
+        y1, y2 = _ly(A, B, r)
+        res = A * y1 + B * y2 - r
+        return float(np.sqrt(np.mean(res * res))), y1, y2, v0, v1
+
+    def obj(q):
+        x1, x2, ts, te = clamp(q)
+        e = evaluate(x1, x2, ts, te)
+        pen = abs(x1 - q[0]) + abs(x2 - q[1]) + 0.01 * (abs(ts - q[2]) + abs(te - q[3]))
+        return (e[0] if e else 10.0) + pen
+
+    # coarse grid over x1, x2 (y1, y2 by least squares) at a few start / end pairs
+    gx = np.linspace(0.0, 1.0, 11)
+    X1, X2 = (g.ravel() for g in np.meshgrid(gx, gx, indexing="ij"))
+    starts = []
+    for ts in sorted({ts0, max(ts_lo, ts0 - (ts0 - ts_lo) / 2)}):
+        for te in sorted({te0, min(te_hi, te0 + (te_hi - te0) / 2)}):
+            if te - ts < min_len:
+                continue
+            u = np.clip((t - ts) / (te - ts), 0, 1)
+            tau = _solve_t(u[None, :], X1[:, None], X2[:, None])
+            w = 1.0 - tau
+            A, B, C = 3 * w * w * tau, 3 * w * tau * tau, tau ** 3
+            r = (vs - v0) / d - C
+            aa, ab, b2 = (A * A).sum(1), (A * B).sum(1), (B * B).sum(1)
+            ar, br = (A * r).sum(1), (B * r).sum(1)
+            det = aa * b2 - ab * ab
+            ok = np.abs(det) > 1e-14
+            sd = np.where(ok, det, 1.0)
+            y1 = np.clip(np.where(ok, (b2 * ar - ab * br) / sd, 0.0), -0.5, 1.5)
+            y2 = np.clip(np.where(ok, (aa * br - ab * ar) / sd, 1.0), -0.5, 1.5)
+            sse = (((A * y1[:, None] + B * y2[:, None]) - r) ** 2).sum(1)
+            gi = int(np.argmin(sse))
+            starts.append((float(sse[gi]), [X1[gi], X2[gi], ts, te]))
+    if not starts:
+        return None
+    starts.sort(key=lambda z: z[0])
+    span = max(1.0, te0 - ts0)
+    best_q, best_f = None, math.inf
+    for _sse, q0 in starts[:2]:
+        q, fq = _nelder_mead(obj, q0, step=[0.07, 0.07, max(0.5, 0.1 * span), max(0.5, 0.1 * span)],
+                             iters=FIT_ITERS)
+        if fq < best_f:
+            best_q, best_f = q, fq
+    x1, x2, ts, te = clamp(best_q)
+    e = evaluate(x1, x2, ts, te)
+    if e is None:
+        return None
+    _rm, y1, y2, v0, v1 = e
+    return {"bezier": _round_bezier([x1, y1, x2, y2]), "ts": ts, "te": te, "v0": v0, "v1": v1, "t": t, "vs": vs}
+
+
+def _analyse(values, fps, repeat=None):
+    """(Move, ts, te) of the main move in values (frames ts..te, fractional) or (empty, None, None)."""
+    v = np.asarray(values, float)
+    n = len(v)
+    if n < 2 or not np.isfinite(v).all():
+        return _empty_move(), None, None
+    sigma = noise_sigma(v)
+    hold = step_holds(v, repeat, sigma)
+    step = animation_step(v, repeat)
+    idx = np.nonzero(~hold)[0]
+    if step > 1:
+        # on 2s / 3s the first picture of a move is held like the others, but the frame before it
+        # is static, so step_holds cannot see the hold: drop the (step-1) static frames just before
+        # the first change (they show the first picture, not the rest before the move)
+        moving = np.nonzero(np.abs(np.diff(v)) > _floor(sigma, v))[0]
+        if len(moving):
+            first = int(moving[0]) + 1
+            idx = idx[(idx <= first - step) | (idx >= first)]
+    t, vs = idx.astype(float), v[idx]
+    rough = segment_moves(v, fps, min_frames=1, repeat=repeat)
+    if rough:
+        vi = np.interp(np.arange(n), idx, vs)
+        r0, r1 = max(rough, key=lambda m: abs(np.subtract(*_local_delta(vi, m[0], m[1]))))
+    else:
+        moving = np.nonzero(np.abs(np.diff(v)) > 0)[0]
+        if not len(moving):
+            return _empty_move(), None, None
+        r0, r1 = int(moving[0]), int(moving[-1]) + 1
+    # a soft tail slows below the per-frame noise floor before it stops: extend the end while the
+    # 3-frame average still approaches the end value by more than the noise over 3 frames
+    vi_all = np.interp(np.arange(n), idx, vs) if len(idx) else v
+    sm = np.convolve(vi_all, np.ones(3) / 3, mode="same")
+    sgn = np.sign(vi_all[min(n - 1, r1)] - vi_all[r0]) or 1.0
+    thr = max(2.0 * sigma, 1e-6 * float(np.ptp(v)))
+    while r1 + 3 < n - 1 and min(sm[r1 + 3] - sm[r1], vi_all[r1 + 3] - vi_all[r1]) * sgn > thr:
+        r1 += 1
+    while r0 - 3 > 0 and min(sm[r0] - sm[r0 - 3], vi_all[r0] - vi_all[r0 - 3]) * sgn > thr:
+        r0 -= 1
+    dur0 = max(1.0, float(r1 - r0))
+    ext = max(4.0, 1.5 * dur0)
+    inner = min(2.0, dur0 / 3)
+    ts_rng = (max(t[0], r0 - ext), float(r0), r0 + inner)
+    te_rng = (r1 - inner, float(r1), min(t[-1], r1 + ext))
+    # no hold before (after) the move: the series starts (ends) with it, so the first (last)
+    # sample is the start (end); a free start there would trade duration against the ease
+    fl = _floor(sigma, v)
+    if r0 - t[0] < 2 or (len(vs) > 1 and abs(vs[1] - vs[0]) > fl):
+        ts_rng = (float(t[0]),) * 3
+    if t[-1] - r1 < 2 or (len(vs) > 1 and abs(vs[-1] - vs[-2]) > fl):
+        te_rng = (float(t[-1]),) * 3
+    f = _fit_move(t, vs, ts_rng, te_rng)
+    if f is None:
+        return _empty_move(), None, None
+    bez, ts, te, v0, v1 = f["bezier"], f["ts"], f["te"], f["v0"], f["v1"]
+    d = v1 - v0
+    dur = te - ts
+    inside = (f["t"] >= ts) & (f["t"] <= te)
+    if inside.sum() < 2:
+        inside = np.ones(len(f["t"]), bool)
+    u = np.clip((f["t"][inside] - ts) / dur, 0, 1)
+    prog = (f["vs"][inside] - v0) / d
+    rmse = float(np.sqrt(np.mean((bezier_y(u, bez) - prog) ** 2)))
+    uu = np.linspace(0.0, 1.0, 201)
+    yy = bezier_y(uu, bez)
+    sp = np.abs(np.gradient(yy, uu))
     peak = float(sp.max())
-    peak_at = float(mids[sp >= 0.95 * peak].mean()) if peak > 0 else 0.0
-    tail = sp[mids >= 0.9]
-    end_speed = float(tail.mean()) if len(tail) else float(sp[-1])
-    end = "hard" if peak > 0 and end_speed >= HARD_END_FRAC * peak else "soft"
-    pk = int(np.argmax(prog))
-    overshoot = max(0.0, float(prog[pk]) - 1.0)
+    peak_at = float(uu[sp >= 0.98 * peak].mean()) if peak > 0 else 0.0
+    end = "hard" if peak > 0 and float(sp[uu >= 0.9].mean()) >= HARD_END_FRAC * peak else "soft"
+    pk = int(np.argmax(yy))
+    overshoot = max(0.0, float(yy[pk]) - 1.0)
     settle_f = 0
     if overshoot > SETTLE_TOL:
-        off = np.nonzero(np.abs(prog - 1.0) > SETTLE_TOL)[0]
+        off = np.nonzero(np.abs(yy - 1.0) > SETTLE_TOL)[0]
         last = int(off[-1]) if len(off) else pk
-        settle_end = fu[min(last + 1, len(fu) - 1)]
-        settle_f = max(1, int(round(settle_end - fu[pk])))
-    bez, rmse = fit_bezier(prog, tn)
-    return {"dur_f": int(round(span)), "dur_s": round(span / float(fps), 4), "delta": round(float(delta), 5),
-            "peak_speed": round(peak, 5), "peak_at": round(peak_at, 4), "overshoot": round(overshoot, 4),
-            "settle_f": int(settle_f), "end": end, "bezier": bez, "custom_ease": custom_ease(bez),
-            "rmse": round(rmse, 5), "ease_name": nearest_named(bez)}
-
-
-def move_slice(values, i0, i1, pad=MAX_STEP_HOLD + 2):
-    """(a, b): the move's frame range widened by up to `pad` still frames on each side, so
-    analyse_move sees the holds around a stepped move (where its true start and end can lie)."""
-    v = np.asarray(values, float)
-    a, b = int(i0), int(i1)
-    while a > 0 and i0 - a < pad and v[a - 1] == v[i0]:
-        a -= 1
-    while b + 1 < len(v) and b - i1 < pad and v[b + 1] == v[i1]:
-        b += 1
-    return a, b
+        settle_f = max(1, int(round((uu[min(last + 1, len(uu) - 1)] - uu[pk]) * dur)))
+    move = {"dur_f": int(round(dur)), "dur_s": round(dur / float(fps), 4), "delta": round(d, 5),
+            "peak_speed": round(abs(d) * peak / (dur / float(fps)), 5), "peak_at": round(peak_at, 4),
+            "overshoot": round(overshoot, 4), "settle_f": int(settle_f), "end": end, "bezier": bez,
+            "custom_ease": custom_ease(bez), "rmse": round(rmse, 5), "ease_name": nearest_named(bez),
+            "step_f": int(step)}
+    return move, ts, te
 
 
 def analyse_move(values, fps, repeat=None):
-    """Move dict of one move's values (one property, the move's frames; holds at either end and
-    repeated frames inside are handled). See the module docstring.
-
-    Stepped animation (k frames per picture) leaves the true start and end uncertain by up to
-    one picture: the start lies in the last still picture's window, the end after the picture
-    before the final one. Both are tried at quarter-picture offsets and the times that give the
-    smoothest bezier fit (lowest rmse) are kept."""
-    v = np.asarray(values, float)
-    if len(v) < 2:
-        return _empty_move()
-    fu, u, k, win = sample_points(v, repeat, _windows=True)
-    lo_hi = None
-    while len(u) > 2 and v[u[1]] == v[u[0]]:
-        u, fu = u[1:], fu[1:]
-    if int(u[0]) in win:
-        lo_hi = win[int(u[0])]
-    while len(u) > 2 and v[u[-2]] == v[u[-1]]:
-        u, fu = u[:-1], fu[:-1]
-    vu = v[u]
-    best = _move_from_samples(fu, vu, fps)
-    if best is None:
-        return _empty_move()
-    if k > 1 and len(fu) >= 4:
-        starts = [lo_hi[0] + q * (lo_hi[1] - lo_hi[0]) for q in (0, 0.25, 0.5, 0.75)] if lo_hi else [fu[0]]
-        ends = [fu[-1] - q * k for q in (0, 0.25, 0.5, 0.75) if fu[-1] - q * k > fu[-2]]
-        cur = fu.copy()
-        for pos, cands in ((0, starts), (-1, ends)):
-            for c in cands:
-                if c == cur[pos] or not (pos == 0 and c < cur[1] or pos == -1 and c > cur[-2]):
-                    continue
-                trial = cur.copy()
-                trial[pos] = c
-                m = _move_from_samples(trial, vu, fps)
-                if m is not None and m["rmse"] < best["rmse"] - 1e-6:
-                    best, cur = m, trial
-    return best
+    """Move dict of the main move in `values` (one property; best with the holds on both sides,
+    see move_slice). Noise, held pictures and an uncertain start / end are handled by the fit
+    (module docstring). Extra key: step_f, the frames per drawn picture."""
+    return _analyse(values, fps, repeat)[0]
 
 
 def stagger(onsets, frame_s=0.0):
@@ -568,7 +732,8 @@ def stagger(onsets, frame_s=0.0):
 
 
 def _series_moves(series, fps, repeat=None, min_delta=None, props=EL_PROPS):
-    """[(prop, i0, i1, Move)] for every move of every property, in time order."""
+    """[(prop, i0, i1, Move, ts, te)] for every move of every property, in time order.
+    i0 / i1: the segment's frames; ts / te: the fitted start and end (fractional frames)."""
     md = min_delta or EL_MIN_DELTA
     out = []
     for prop in props:
@@ -576,33 +741,41 @@ def _series_moves(series, fps, repeat=None, min_delta=None, props=EL_PROPS):
         if vals is None or len(vals) < 2:
             continue
         vals = np.asarray(vals, float)
-        for i0, i1 in segment_moves(vals, fps, repeat=repeat, min_delta=md.get(prop, 0.0)):
-            a, b = move_slice(vals, i0, i1)
+        segs = segment_moves(vals, fps, repeat=repeat, min_delta=md.get(prop, 0.0))
+        for k, (i0, i1) in enumerate(segs):
+            lo = (segs[k - 1][1] + i0) // 2 if k else 0
+            hi = (i1 + segs[k + 1][0]) // 2 if k + 1 < len(segs) else len(vals) - 1
+            a, b = move_slice(vals, i0, i1, lo, hi)
             rep = None if repeat is None else np.asarray(repeat, bool)[a:b + 1]
-            out.append((prop, i0, i1, analyse_move(vals[a:b + 1], fps, rep)))
-    return sorted(out, key=lambda m: (m[1], m[0]))
+            m, ts, te = _analyse(vals[a:b + 1], fps, rep)
+            if ts is None:
+                continue
+            out.append((prop, i0, i1, m, a + ts, a + te))
+    return sorted(out, key=lambda m: (m[4], m[0]))
 
 
 def entrance_exit(track, fps=None, moves=None, edge_f=3):
     """{"in": Move|None, "hold_s", "out": Move|None, "mirrored"} of an element track.
 
     in: the move that starts within edge_f frames of the track's first frame (the longest if
-    several props animate together); out: another move that ends within edge_f frames of the
-    track's last frame. mirrored: both exist, durations within 25 %, and the exit curve is the
-    time-reversed entrance curve (curve distance <= 0.05)."""
+    several props animate together), unless the element was already there at the cut
+    (track["present_at_cut"]); out: another move that ends within edge_f frames of the track's
+    last frame, unless the element is still there at the next cut (track["present_at_end"]).
+    mirrored: both exist, durations within 25 %, and the exit curve is the time-reversed entrance
+    curve (curve distance <= 0.05)."""
     fps = float(fps or track.get("fps") or 25.0)
     series = track.get("series", {})
     n = max((len(v) for v in series.values()), default=0)
     if moves is None:
         moves = _series_moves(series, fps, track.get("repeat"))
-    first = [m for m in moves if m[1] <= edge_f]
-    last = [m for m in moves if m[2] >= n - 1 - edge_f]
-    m_in = max(first, key=lambda m: m[2] - m[1]) if first else None
-    last = [m for m in last if m is not m_in and (m_in is None or m[1] >= m_in[2] - 1)]
-    m_out = max(last, key=lambda m: m[2] - m[1]) if last else None
-    a = m_in[2] if m_in else 0
-    b = m_out[1] if m_out else max(0, n - 1)
-    hold_s = round(max(0, b - a) / fps, 4)
+    first = [] if track.get("present_at_cut") else [m for m in moves if m[4] <= edge_f]
+    last = [] if track.get("present_at_end") else [m for m in moves if m[5] >= n - 1 - edge_f]
+    m_in = max(first, key=lambda m: m[5] - m[4]) if first else None
+    last = [m for m in last if m is not m_in and (m_in is None or m[4] >= m_in[5] - 1)]
+    m_out = max(last, key=lambda m: m[5] - m[4]) if last else None
+    a = m_in[5] if m_in else 0
+    b = m_out[4] if m_out else max(0, n - 1)
+    hold_s = round(max(0.0, b - a) / fps, 4)
     mirrored = False
     if m_in and m_out:
         di, do = m_in[3]["dur_f"], m_out[3]["dur_f"]
@@ -612,6 +785,41 @@ def entrance_exit(track, fps=None, moves=None, edge_f=3):
     def pub(m):
         return None if m is None else dict(m[3], prop=m[0])
     return {"in": pub(m_in), "hold_s": hold_s, "out": pub(m_out), "mirrored": mirrored}
+
+
+def _similar_dir(a, b):
+    if a is None or b is None:
+        return a is None and b is None
+    ang = abs(math.degrees(math.atan2(a[1], a[0]) - math.atan2(b[1], b[0]))) % 360
+    return min(ang, 360 - ang) <= STAGGER_ANGLE
+
+
+def stagger_groups(entries, fps):
+    """Stagger groups from [{"id", "shot", "onset", "area", "dir"}] (dir: (dx, dy) of the entrance
+    or None for a fade / pop): onsets less than STAGGER_GAP_S apart, a group spans at most
+    STAGGER_SPAN_S and STAGGER_MAX members, of similar size and entrance direction."""
+    groups = []
+    for shot in sorted({e["shot"] for e in entries}):
+        cur = []
+        for e in sorted((e for e in entries if e["shot"] == shot), key=lambda e: e["onset"]):
+            if cur:
+                med_area = float(np.median([c["area"] for c in cur]))
+                fits = (e["onset"] - cur[-1]["onset"] <= STAGGER_GAP_S
+                        and e["onset"] - cur[0]["onset"] <= STAGGER_SPAN_S and len(cur) < STAGGER_MAX
+                        and max(e["area"], med_area) <= STAGGER_AREA_RATIO * max(1e-9, min(e["area"], med_area))
+                        and _similar_dir(e["dir"], cur[0]["dir"]))
+                if not fits:
+                    if len(cur) >= STAGGER_MIN:
+                        groups.append(cur)
+                    cur = []
+            cur.append(e)
+        if len(cur) >= STAGGER_MIN:
+            groups.append(cur)
+    out = []
+    for g in groups:
+        on = [e["onset"] for e in g]
+        out.append(dict(stagger(on, 1.0 / fps), members=[e["id"] for e in g], onsets=[round(t, 4) for t in on]))
+    return out
 
 
 # ---------------------------------------------------------------- camera
@@ -646,14 +854,14 @@ def _spread_ok(pts, w, h):
 
 
 def camera_track(frames, cut_frames=()):
-    """(n, 4) scale, tx, ty, rotation of each frame relative to its shot start (reset at every
-    cut frame). Needs cv2; a shot without enough trackable features stays at the identity."""
+    """(n, 4) scale, tx, ty, rotation of each frame relative to its reference frame: the shot
+    start (every cut frame), or the first good frame after a gap. Gap frames (tracking failed)
+    are NaN; nothing is carried across a gap. Needs cv2."""
     cv2 = _cv2()
     if cv2 is None:
         raise ImportError("cv2 is not installed")
     n = len(frames)
-    out = np.zeros((n, 4))
-    out[:, 0] = 1.0
+    out = np.full((n, 4), np.nan)
     if n == 0:
         return out
     h, w = frames[0].shape
@@ -661,20 +869,30 @@ def camera_track(frames, cut_frames=()):
     feat = dict(maxCorners=300, qualityLevel=0.01, minDistance=max(5, w // 48), blockSize=7)
     lk = dict(winSize=(21, 21), maxLevel=3, criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01))
     ident = np.array([[1.0, 0, 0], [0, 1.0, 0]])
-    M, ref_pts, cur_pts, prev = ident.copy(), None, None, None
+    tracking, M, ref_pts, cur_pts, prev = False, ident.copy(), None, None, None
 
     def detect(img):
         p = cv2.goodFeaturesToTrack(img, **feat)
         return np.zeros((0, 1, 2), np.float32) if p is None else p.astype(np.float32)
 
+    def begin(img):
+        p = detect(img)
+        if len(p) >= MIN_FEATURES and _spread_ok(p, w, h):
+            return True, p
+        return False, p
+
     for i in range(n):
         f = np.ascontiguousarray(frames[i])
-        if i in starts:
-            M = ident.copy()
-            cur_pts = detect(f)
-            ref_pts = cur_pts.copy()
+        if i in starts or not tracking:
+            if i in starts or i % 3 == 0 or prev is None:  # a gap retries every 3rd frame
+                ok, pts = begin(f)
+                tracking = ok
+                if ok:
+                    M, ref_pts, cur_pts = ident.copy(), pts.copy(), pts
+                    out[i] = [1.0, 0.0, 0.0, 0.0]
             prev = f
             continue
+        good_m = False
         if len(cur_pts) >= MIN_FEATURES:
             nxt, st, _ = cv2.calcOpticalFlowPyrLK(prev, f, cur_pts, None, **lk)
             back, st2, _ = cv2.calcOpticalFlowPyrLK(f, prev, nxt, None, **lk)
@@ -684,13 +902,17 @@ def camera_track(frames, cut_frames=()):
             if len(cur_pts) >= MIN_FEATURES:
                 est, inl = cv2.estimateAffinePartial2D(ref_pts, cur_pts, method=cv2.RANSAC,
                                                        ransacReprojThreshold=1.0, maxIters=2000, confidence=0.995)
-                spread = inl is not None and _spread_ok(cur_pts[inl.ravel() == 1], w, h)
-                if est is not None and int(inl.sum()) >= MIN_FEATURES and spread:
-                    M = est
+                if est is not None and inl is not None and int(inl.sum()) >= MIN_FEATURES:
                     keep = inl.ravel() == 1
-                    ref_pts, cur_pts = ref_pts[keep], cur_pts[keep]
+                    if _spread_ok(cur_pts[keep], w, h):
+                        M, good_m = est, True
+                        ref_pts, cur_pts = ref_pts[keep], cur_pts[keep]
+        if not good_m:  # a gap: this frame is unknown, restart after it
+            tracking = False
+            prev = f
+            continue
         out[i] = _decompose(M, w, h)
-        if len(cur_pts) < 2 * MIN_FEATURES:  # refill: new features, mapped back to shot-start coords
+        if len(cur_pts) < 2 * MIN_FEATURES:  # refill: new features, mapped back to reference coords
             fresh = detect(f)
             if len(fresh):
                 inv = cv2.invertAffineTransform(M)
@@ -701,21 +923,33 @@ def camera_track(frames, cut_frames=()):
     return out
 
 
-def camera_moves(cam, fps, shot_ranges=None, repeat=None, t_offset=0.0):
-    """Camera moves (Move + {"prop", "i0", "i1", "t0"}) of a camera_track, per shot range."""
+def camera_segments(cam):
+    """[(f0, f1)] inclusive runs of measured (non-NaN) camera rows."""
+    ok = np.isfinite(np.asarray(cam, float)).all(axis=1) if len(cam) else np.zeros(0, bool)
+    return _runs_of(ok)
+
+
+def camera_moves(cam, fps, shot_ranges=None, repeat=None, t_offset=0.0, stats=None):
+    """Camera moves (Move + {"prop", "i0", "i1", "t0"}) of a camera_track, per measured segment
+    of each shot range. Moves shorter than CAM_MIN_F frames or with rmse above CAM_MAX_RMSE are
+    jitter: dropped and counted in stats["camera_jitter_dropped"]."""
     cam = np.asarray(cam, float)
     ranges = shot_ranges or [(0, len(cam) - 1)]
     out = []
     for f0, f1 in ranges:
-        for ci, prop in enumerate(CAM_PROPS):
-            vals = cam[f0:f1 + 1, ci]
-            rep = None if repeat is None else np.asarray(repeat, bool)[f0:f1 + 1]
-            for i0, i1 in segment_moves(vals, fps, repeat=rep, min_delta=MIN_DELTA[prop]):
-                a, b = move_slice(vals, i0, i1)
-                r2 = None if rep is None else rep[a:b + 1]
-                m = analyse_move(vals[a:b + 1], fps, r2)
-                m.update(prop=prop, i0=f0 + i0, i1=f0 + i1, t0=round(t_offset + (f0 + i0) / float(fps), 4))
-                out.append(m)
+        for s0, s1 in camera_segments(cam[f0:f1 + 1]):
+            g0, g1 = f0 + s0, f0 + s1
+            rep = None if repeat is None else np.asarray(repeat, bool)[g0:g1 + 1]
+            for ci, prop in enumerate(CAM_PROPS):
+                series = {prop: cam[g0:g1 + 1, ci]}
+                for _p, i0, i1, m, ts, te in _series_moves(series, fps, rep, MIN_DELTA, (prop,)):
+                    if m["dur_f"] < CAM_MIN_F or m["rmse"] > CAM_MAX_RMSE:
+                        if stats is not None:
+                            stats["camera_jitter_dropped"] = stats.get("camera_jitter_dropped", 0) + 1
+                        continue
+                    m.update(prop=prop, i0=g0 + int(math.floor(ts)), i1=g0 + int(math.ceil(te)),
+                             t0=round(t_offset + (g0 + ts) / float(fps), 4))
+                    out.append(m)
     return sorted(out, key=lambda m: (m["t0"], m["prop"]))
 
 
@@ -779,30 +1013,114 @@ def _erode(m, r):
     return ~_shift_or(~m, r, np.logical_or)
 
 
-def element_tracks(frames, fps, cam=None, thr=14, t_offset=0.0, repeat=None):
-    """Tracks of moving elements in one shot's frames (see the module docstring).
+def _rigid_residual(cv2, prev, cur):
+    """How badly a similarity warp of the previous picture of an element predicts the current one
+    (0 = exactly, 1 = not at all). prev / cur: dicts with the masked difference crop "dpatch", its
+    box origin "box", centre "cx", "cy" and "spread"."""
+    s = cur["spread"] / max(prev["spread"], 1e-9)
+    px0, py0 = prev["box"][:2]
+    bx0, by0, bw, bh = cur["box"]
+    M = np.array([[s, 0.0, cur["cx"] - s * prev["cx"] + s * px0 - bx0],
+                  [0.0, s, cur["cy"] - s * prev["cy"] + s * py0 - by0]], np.float32)
+    W = cv2.warpAffine(prev["dpatch"], M, (bw, bh), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+    D = cur["dpatch"]
+    tot = float(D.sum())
+    if tot <= 0:
+        return 1.0
+    alpha = tot / max(float(W.sum()), 1e-9)
+    return float(np.abs(D - alpha * W).sum()) / tot
 
-    Returns [{"id", "t0", "t1", "fps", "f0", "series": {"x", "y", "scale", "opacity"}, "repeat"}],
-    f0 = the track's first frame inside the shot. cam: this shot's camera_track rows (or None)."""
+
+def _merge_tracks(raw, w, h):
+    """Merge raw tracks that move together (letters of a word, parts of one card): they share
+    >= 80 % of both lifetimes, stay near each other, and their displacement and scale change
+    agree within 1.5 px / 5 %."""
+    n = len(raw)
+    parent = list(range(n))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    tol = max(1.5, 0.004 * w)
+    for i in range(n):
+        A = raw[i]
+        la = len(A["cx"])
+        for j in range(i + 1, n):
+            B = raw[j]
+            lb = len(B["cx"])
+            s0, s1 = max(A["f0"], B["f0"]), min(A["f0"] + la, B["f0"] + lb)
+            ov = s1 - s0
+            if ov < 3 or ov < 0.8 * la or ov < 0.8 * lb:
+                continue
+            ia, ib = slice(s0 - A["f0"], s1 - A["f0"]), slice(s0 - B["f0"], s1 - B["f0"])
+            ax, ay = np.array(A["cx"][ia]), np.array(A["cy"][ia])
+            bx, by = np.array(B["cx"][ib]), np.array(B["cy"][ib])
+            near = math.hypot(ax[0] - bx[0], ay[0] - by[0]) <= 2.5 * (A["spread"][s0 - A["f0"]] + B["spread"][s0 - B["f0"]])
+            if not near:
+                continue
+            dmov = max(np.abs((ax - ax[0]) - (bx - bx[0])).mean(), np.abs((ay - ay[0]) - (by - by[0])).mean())
+            sa, sb = np.log(np.array(A["spread"][ia]) + 1e-9), np.log(np.array(B["spread"][ib]) + 1e-9)
+            dsc = np.abs((sa - sa[0]) - (sb - sb[0])).mean()
+            if dmov <= tol and dsc <= 0.05:
+                parent[find(j)] = find(i)
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(raw[i])
+    out = []
+    for g in groups.values():
+        if len(g) == 1:
+            out.append(g[0])
+            continue
+        s0 = max(t["f0"] for t in g)
+        s1 = min(t["f0"] + len(t["cx"]) for t in g)
+        m = {"f0": s0, "cx": [], "cy": [], "spread": [], "sum": [], "area": [],
+             "res": [r for t in g for r in t["res"]], "boxsum": np.sum([t["boxsum"] for t in g], axis=0),
+             "nbox": sum(t["nbox"] for t in g)}
+        for f in range(s0, s1):
+            k = [f - t["f0"] for t in g]
+            ws = np.array([t["sum"][kk] for t, kk in zip(g, k)])
+            cxs = np.array([t["cx"][kk] for t, kk in zip(g, k)])
+            cys = np.array([t["cy"][kk] for t, kk in zip(g, k)])
+            sps = np.array([t["spread"][kk] for t, kk in zip(g, k)])
+            W = max(float(ws.sum()), 1e-9)
+            cx, cy = float((ws * cxs).sum() / W), float((ws * cys).sum() / W)
+            var = float((ws * (sps ** 2 + (cxs - cx) ** 2 + (cys - cy) ** 2)).sum() / W)
+            m["cx"].append(cx)
+            m["cy"].append(cy)
+            m["spread"].append(math.sqrt(max(var, 1e-9)))
+            m["sum"].append(W)
+            m["area"].append(sum(t["area"][kk] for t, kk in zip(g, k)))
+        out.append(m)
+    return out
+
+
+def _track_range(frames, a0, a1, cam, thr, stabilise):
+    """Raw tracks of frames a0..a1 of one shot (one measured camera segment)."""
     cv2, nd = _cv2(), _ndimage()
-    n = len(frames)
-    if n < 3 or (cv2 is None and nd is None):
-        return []
     h, w = frames[0].shape
-    moving_cam = cam is not None and len(cam) == n and (
-        np.abs(cam[:, 0] - 1).max() > 1e-3 or np.abs(cam[:, 1:3]).max() > 5e-4 or np.abs(cam[:, 3]).max() > 0.05)
+    n = a1 - a0 + 1
 
     def stab(i):
         f = frames[i]
-        if not moving_cam or cv2 is None:
+        if not stabilise or cv2 is None:
             return f, None
         inv = cv2.invertAffineTransform(camera_matrix(cam[i], w, h))
         g = cv2.warpAffine(f, inv, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
         ok = cv2.warpAffine(np.full((h, w), 255, np.uint8), inv, (w, h), flags=cv2.INTER_NEAREST) > 0
         return g, ok
 
-    idx = np.unique(np.linspace(0, n - 1, min(n, 61)).round().astype(int))
-    bg = np.median(np.stack([stab(i)[0] for i in idx]), axis=0).astype(np.int16)
+    idx = np.unique(np.linspace(a0, a1, min(n, 61)).round().astype(int))
+    stack = np.stack([stab(i)[0] for i in idx])
+    bg = np.median(stack, axis=0).astype(np.int16)
+    # the threshold rises with the local noise (grain, water, a moving face)
+    noise = np.median(np.abs(stack.astype(np.int16) - bg[None]), axis=0).astype(np.float32)
+    del stack
+    if cv2 is not None:
+        noise = cv2.blur(noise, (5, 5))
+    thr_map = np.maximum(float(thr), 3.0 * noise).astype(np.int16)
     min_area = max(12, int(0.0008 * h * w))
     k = max(3, w // 64)
     kern = np.ones((k, k), np.uint8)
@@ -811,7 +1129,7 @@ def element_tracks(frames, fps, cam=None, thr=14, t_offset=0.0, repeat=None):
         d = np.abs(g.astype(np.int16) - bg)
         if ok is not None:
             d[~ok] = 0
-        m = d > thr
+        m = d > thr_map
         if cv2 is not None:
             m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_CLOSE, kern) > 0
             m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, np.ones((2, 2), np.uint8)) > 0
@@ -819,12 +1137,12 @@ def element_tracks(frames, fps, cam=None, thr=14, t_offset=0.0, repeat=None):
             m = nd.binary_opening(nd.binary_closing(m, structure=kern), structure=np.ones((2, 2)))
         return d, m
 
-    # Ghosts: an element that rests for most of the shot is part of the median, so where it is
+    # Ghosts: an element that rests for most of the range is part of the median, so where it is
     # absent the median shows a "ghost" of it. A ghost has edges in the background but none in the
     # frame along its outline; there the frame shows the real background, which patches bg.
     # Pass 1 (sampled frames) only repairs bg; pass 2 tracks.
     g_bg = _grad(bg)
-    for i in np.unique(np.linspace(0, n - 1, min(n, 120)).round().astype(int)):
+    for i in np.unique(np.linspace(a0, a1, min(n, 60)).round().astype(int)):
         g, ok = stab(i)
         _d, m = fg(g, ok)
         g_cur = None
@@ -834,49 +1152,51 @@ def element_tracks(frames, fps, cam=None, thr=14, t_offset=0.0, repeat=None):
             reg = np.zeros((y1 - y0, x1 - x0), bool)
             reg[y - y0:y - y0 + bh, x - x0:x - x0 + bw] = sub
             ring = _dilate(reg, 2) & ~_erode(reg, 2)
+            if not ring.any():
+                continue
             if g_cur is None:
                 g_cur = _grad(g)
-            eb = float(g_bg[y0:y1, x0:x1][ring].mean()) if ring.any() else 0.0
-            ec = float(g_cur[y0:y1, x0:x1][ring].mean()) if ring.any() else 0.0
+            eb = float(g_bg[y0:y1, x0:x1][ring].mean())
+            ec = float(g_cur[y0:y1, x0:x1][ring].mean())
             if eb > 4.0 and ec < 0.5 * eb:
                 patch = _dilate(reg, 2)
                 if ok is not None:
                     patch &= ok[y0:y1, x0:x1]
                 bg[y0:y1, x0:x1][patch] = g[y0:y1, x0:x1][patch]
-                g_bg = _grad(bg)
+                g_bg[max(0, y0 - 1):y1 + 1, max(0, x0 - 1):x1 + 1] = _grad(
+                    bg[max(0, y0 - 1):y1 + 1, max(0, x0 - 1):x1 + 1])
 
-    active, done, next_id = [], [], 0
-    for i in range(n):
+    active, done = [], []
+    for i in range(a0, a1 + 1):
         g, ok = stab(i)
         d, m = fg(g, ok)
         obs = []
         for x, y, bw, bh, area, sub in _components(m, min_area):
-            wts = np.maximum(0.0, d[y:y + bh, x:x + bw].astype(float) - thr / 2.0) * sub
+            wts = np.maximum(0.0, (d[y:y + bh, x:x + bw] - thr_map[y:y + bh, x:x + bw] / 2.0).astype(np.float32)) * sub
             sw = float(wts.sum())
             if sw <= 0:
                 continue
             yy, xx = np.mgrid[y:y + bh, x:x + bw]
             cx, cy = float((wts * xx).sum() / sw), float((wts * yy).sum() / sw)
             var = float((wts * ((xx - cx) ** 2 + (yy - cy) ** 2)).sum() / sw)
-            spread = math.sqrt(max(var, 1e-9))
-            obs.append({"box": (x, y, bw, bh), "cx": cx, "cy": cy, "spread": spread, "sum": sw, "area": area})
-        matched = set()
-        still = []
+            obs.append({"box": (x, y, bw, bh), "cx": cx, "cy": cy, "spread": math.sqrt(max(var, 1e-9)),
+                        "sum": sw, "area": area, "dpatch": wts})
+        matched, still = set(), []
         for tr in active:
             best, bscore = None, 0.0
             for oi, o in enumerate(obs):
                 if oi in matched:
                     continue
-                iou = _iou(tr["box"], o["box"])
+                iou = _iou(tr["last"]["box"], o["box"])
                 if iou >= 0.3 and iou > bscore:
                     best, bscore = oi, iou
             if best is None:  # a fast move: nearest centre with a similar area
                 for oi, o in enumerate(obs):
                     if oi in matched:
                         continue
-                    diag = math.hypot(*tr["box"][2:]) + math.hypot(*o["box"][2:])
+                    diag = math.hypot(*tr["last"]["box"][2:]) + math.hypot(*o["box"][2:])
                     dist = math.hypot(o["cx"] - tr["cx"][-1], o["cy"] - tr["cy"][-1])
-                    ratio = o["area"] / max(1, tr["area"])
+                    ratio = o["area"] / max(1, tr["area"][-1])
                     if dist <= 0.5 * diag and 1 / 3 <= ratio <= 3 and (best is None or dist < bscore):
                         best, bscore = oi, dist
             if best is None:
@@ -884,31 +1204,86 @@ def element_tracks(frames, fps, cam=None, thr=14, t_offset=0.0, repeat=None):
                 continue
             o = obs[best]
             matched.add(best)
-            tr["box"], tr["area"] = o["box"], o["area"]
-            for kk in ("cx", "cy", "spread", "sum"):
-                tr[kk].append(o[kk])
+            if cv2 is not None and len(tr["cx"]) % 2 == 1:
+                tr["res"].append(_rigid_residual(cv2, tr["last"], o))
+            _append_obs(tr, o)
             still.append(tr)
         for oi, o in enumerate(obs):
             if oi not in matched:
-                still.append({"id": next_id, "f0": i, "box": o["box"], "area": o["area"], "cx": [o["cx"]],
-                              "cy": [o["cy"]], "spread": [o["spread"]], "sum": [o["sum"]]})
-                next_id += 1
+                tr = {"f0": i, "cx": [], "cy": [], "spread": [], "sum": [], "area": [], "res": [],
+                      "boxsum": np.zeros(4), "nbox": 0}
+                _append_obs(tr, o)
+                still.append(tr)
         active = still
     done.extend(active)
+    for tr in done:
+        tr.pop("last", None)
+    return done
+
+
+def _append_obs(tr, o):
+    for kk in ("cx", "cy", "spread", "sum", "area"):
+        tr[kk].append(o[kk])
+    x, y, bw, bh = o["box"]
+    tr["boxsum"] = tr["boxsum"] + np.array([x, y, x + bw, y + bh], float)
+    tr["nbox"] += 1
+    tr["last"] = o
+
+
+def element_tracks(frames, fps, cam=None, thr=14, t_offset=0.0, repeat=None, nonrigid=None):
+    """Tracks of rigid moving elements in one shot's frames (see the module docstring).
+
+    Returns [{"id", "t0", "t1", "fps", "f0", "present_at_cut", "present_at_end", "area",
+    "series": {"x", "y", "scale", "opacity"}, "repeat"}]; f0 = first frame inside the shot,
+    area = median share of the frame. cam: this shot's camera_track rows (NaN = gap) or None.
+    nonrigid: a list that receives {"t0", "t1", "box", "area"} of blobs that live long enough
+    but do not move rigidly."""
+    cv2, nd = _cv2(), _ndimage()
+    n = len(frames)
+    if n < 3 or (cv2 is None and nd is None):
+        return []
+    h, w = frames[0].shape
+    segs = camera_segments(cam) if cam is not None and len(cam) == n else []
+    if segs:
+        ranges = [(a, b, True) for a, b in segs if b - a + 1 >= 3]
+    else:
+        ranges = [(0, n - 1, False)]
+    min_life = max(3, int(math.ceil(EL_MIN_LIFE_S * fps)))
+    min_area = EL_MIN_AREA * h * w
     out = []
-    for tr in sorted(done, key=lambda t: (t["f0"], t["id"])):
-        L = len(tr["cx"])
-        if L < 3:
-            continue
-        sp = np.array(tr["spread"])
-        scale = sp / max(1e-9, float(np.median(sp)))
-        op_raw = np.array(tr["sum"]) / np.maximum(sp ** 2, 1e-9)
-        opacity = np.clip(op_raw / max(1e-9, float(np.percentile(op_raw, 90))), 0, 1.5)
-        rep = None if repeat is None else np.asarray(repeat, bool)[tr["f0"]:tr["f0"] + L]
-        out.append({"id": f"el{len(out)}", "t0": round(t_offset + tr["f0"] / float(fps), 4),
-                    "t1": round(t_offset + (tr["f0"] + L - 1) / float(fps), 4), "fps": float(fps), "f0": tr["f0"],
-                    "series": {"x": np.array(tr["cx"]) / w, "y": np.array(tr["cy"]) / h, "scale": scale,
-                               "opacity": opacity}, "repeat": rep})
+    for a0, a1, moving_ok in ranges:
+        stabilise = False
+        if moving_ok and cam is not None:
+            c = cam[a0:a1 + 1]
+            stabilise = bool(np.abs(c[:, 0] - 1).max() > 1e-3 or np.abs(c[:, 1:3]).max() > 5e-4
+                             or np.abs(c[:, 3]).max() > 0.05)
+        raw = [t for t in _track_range(frames, a0, a1, cam, thr, stabilise) if len(t["cx"]) >= 3]
+        for tr in _merge_tracks(raw, w, h):
+            L = len(tr["cx"])
+            area = float(np.median(tr["area"]))
+            if L < min_life or area < min_area:
+                continue
+            rigid = not tr["res"] or float(np.median(tr["res"])) <= RIGID_MAX_RES
+            t0 = round(t_offset + tr["f0"] / float(fps), 4)
+            t1 = round(t_offset + (tr["f0"] + L - 1) / float(fps), 4)
+            if not rigid:
+                if nonrigid is not None:
+                    bx = tr["boxsum"] / max(1, tr["nbox"])
+                    nonrigid.append({"t0": t0, "t1": t1, "area": round(area / (h * w), 4),
+                                     "box": [round(bx[0] / w, 4), round(bx[1] / h, 4),
+                                             round((bx[2] - bx[0]) / w, 4), round((bx[3] - bx[1]) / h, 4)]})
+                continue
+            sp = np.array(tr["spread"])
+            scale = sp / max(1e-9, float(np.median(sp)))
+            op_raw = np.array(tr["sum"]) / np.maximum(sp ** 2, 1e-9)
+            opacity = np.clip(op_raw / max(1e-9, float(np.percentile(op_raw, 90))), 0, 1.5)
+            rep = None if repeat is None else np.asarray(repeat, bool)[tr["f0"]:tr["f0"] + L]
+            out.append({"id": f"el{len(out)}", "t0": t0, "t1": t1, "fps": float(fps), "f0": tr["f0"],
+                        "present_at_cut": tr["f0"] == 0, "present_at_end": tr["f0"] + L - 1 == n - 1,
+                        "area": round(area / (h * w), 5),
+                        "series": {"x": np.array(tr["cx"]) / w, "y": np.array(tr["cy"]) / h, "scale": scale,
+                                   "opacity": opacity}, "repeat": rep})
+    out.sort(key=lambda e: (e["f0"], e["id"]))
     return out
 
 
@@ -946,13 +1321,31 @@ def _graph(vals, nd=5):
     return [round(float(x), nd) for x in vals]
 
 
+def _entry_dir(tr, moves):
+    """(dx, dy) of an element's entrance (frame fractions) or None for a fade / pop."""
+    ins = [m for m in moves if m[0] in ("x", "y") and m[4] <= 3]
+    if not ins:
+        return None
+    a = int(max(0, math.floor(min(m[4] for m in ins))))
+    b = int(min(len(tr["series"]["x"]) - 1, math.ceil(max(m[5] for m in ins))))
+    dx = float(tr["series"]["x"][b] - tr["series"]["x"][a])
+    dy = float(tr["series"]["y"][b] - tr["series"]["y"][a])
+    return (dx, dy) if math.hypot(dx, dy) >= 0.01 else None
+
+
 def track(video, measure=None, *, analysis_width=320):
-    """Measure the motion of one video. Returns the motion/1 document (not written)."""
+    """Measure the motion of one video. Returns the motion/1 document (not written).
+    Raises BadInput for a video that cannot be read."""
     import measure_video as mv
     video = Path(video)
     sha = mv.sha256_of(video)
-    frames, fps = mv.decode_gray(video, analysis_width)
+    try:
+        frames, fps = mv.decode_gray(video, analysis_width)
+    except RuntimeError as e:
+        raise BadInput(str(e)) from None
     n = len(frames)
+    if n == 0 or not fps:
+        raise BadInput("the video has no decodable frames")
     not_run = []
     if measure is not None:
         cuts = measure.get("cuts") or []
@@ -970,86 +1363,81 @@ def track(video, measure=None, *, analysis_width=320):
     if cv2 is None and _ndimage() is None:
         not_run.append("elements")
 
-    cam_out, elements, speed_g, value_g = [], [], {}, {}
+    cam_out, elements, speed_g, value_g, nonrigid = [], [], {}, {}, []
+    stats = {"camera_jitter_dropped": 0}
+    entries = []
     for si, (f0, f1) in enumerate(shots):
         fr = frames[f0:f1 + 1]  # a view, no copy
         rep = repeat[f0:f1 + 1].copy()
         rep[0] = False
-        cam = camera_track(fr) if cv2 is not None else np.tile([1.0, 0, 0, 0], (len(fr), 1))
-        for m in camera_moves(cam, fps, repeat=rep, t_offset=f0 / float(fps)):
-            mid = f"cam{len(cam_out)}"
-            ci = CAM_PROPS.index(m["prop"])
-            vals = cam[m["i0"]:m["i1"] + 1, ci]
-            r2 = rep[m["i0"]:m["i1"] + 1]
-            value_g[mid] = _graph(vals)
-            speed_g[mid] = _graph(speed_series(vals, fps, r2))
-            m = {k: v for k, v in m.items() if k not in ("i0", "i1")}
-            cam_out.append(dict(m, id=mid, shot=si))
+        cam = camera_track(fr) if cv2 is not None else None
+        if cam is not None:
+            for m in camera_moves(cam, fps, repeat=rep, t_offset=f0 / float(fps), stats=stats):
+                mid = f"cam{len(cam_out)}"
+                ci = CAM_PROPS.index(m["prop"])
+                a, b = max(0, m["i0"]), min(len(cam) - 1, m["i1"])
+                vals = cam[a:b + 1, ci]
+                value_g[mid] = _graph(vals)
+                speed_g[mid] = _graph(speed_series(vals, fps, rep[a:b + 1]))
+                m = {k: v for k, v in m.items() if k not in ("i0", "i1")}
+                cam_out.append(dict(m, id=mid, shot=si))
         if "elements" in not_run:
             continue
-        for tr in element_tracks(fr, fps, cam=cam if cv2 is not None else None, t_offset=f0 / float(fps), repeat=rep):
+        nr = []
+        for tr in element_tracks(fr, fps, cam=cam, t_offset=f0 / float(fps), repeat=rep, nonrigid=nr):
             L = len(tr["series"]["x"])
             moves = _series_moves(tr["series"], fps, tr["repeat"])
-            pops = tr["f0"] > 0 or tr["f0"] + L - 1 < len(fr) - 1
-            if not moves and not (pops and L >= max(3, int(0.25 * fps))):
+            pops = not tr["present_at_cut"] or not tr["present_at_end"]
+            if not moves and not pops:
                 continue
             eid = f"el{len(elements)}"
             mv_out = []
-            for k, (prop, i0, i1, m) in enumerate(moves):
+            for k, (prop, _i0, _i1, m, ts, te) in enumerate(moves):
                 mid = f"{eid}.{prop}{k}"
-                vals = tr["series"][prop][i0:i1 + 1]
-                r2 = None if tr["repeat"] is None else tr["repeat"][i0:i1 + 1]
+                a, b = max(0, int(math.floor(ts))), min(L - 1, int(math.ceil(te)))
+                vals = tr["series"][prop][a:b + 1]
+                r2 = None if tr["repeat"] is None else tr["repeat"][a:b + 1]
                 value_g[mid] = _graph(vals)
                 speed_g[mid] = _graph(speed_series(vals, fps, r2))
-                mv_out.append(dict(m, id=mid, prop=prop, t0=round(tr["t0"] + i0 / float(fps), 4)))
+                mv_out.append(dict(m, id=mid, prop=prop, t0=round(tr["t0"] + ts / float(fps), 4)))
             ee = entrance_exit(tr, fps, moves)
-            elements.append({"id": eid, "shot": si, "t0": tr["t0"], "t1": tr["t1"], "moves": mv_out,
-                             "entrance_exit": ee, "_onset": tr["t0"], "_appears": tr["f0"] > 0})
-
-    groups = []
-    by_shot = {}
-    for e in elements:
-        if e["_appears"]:
-            by_shot.setdefault(e["shot"], []).append(e)
-    for _si, els in sorted(by_shot.items()):
-        els.sort(key=lambda e: e["_onset"])
-        cur = []
-        for e in els:
-            if cur and e["_onset"] - cur[-1]["_onset"] > STAGGER_GAP_S:
-                if len(cur) >= STAGGER_MIN:
-                    groups.append(cur)
-                cur = []
-            cur.append(e)
-        if len(cur) >= STAGGER_MIN:
-            groups.append(cur)
-    stagger_groups = []
-    for g in groups:
-        on = [e["_onset"] for e in g]
-        stagger_groups.append(dict(stagger(on, 1.0 / fps), members=[e["id"] for e in g],
-                                   onsets=[round(t, 4) for t in on]))
-    for e in elements:
-        e.pop("_onset")
-        e.pop("_appears")
+            elements.append({"id": eid, "shot": si, "t0": tr["t0"], "t1": tr["t1"], "area": tr["area"],
+                             "moves": mv_out, "entrance_exit": ee})
+            if not tr["present_at_cut"]:
+                in_ts = min((m[4] for m in moves if m[4] <= 3), default=0.0) if ee["in"] else 0.0
+                onset = tr["t0"] + in_ts / float(fps)
+                entries.append({"id": eid, "shot": si, "onset": round(onset, 4), "area": tr["area"],
+                                "dir": _entry_dir(tr, moves)})
+        for r in nr:
+            nonrigid.append(dict(r, shot=si))
 
     all_moves = cam_out + [m for e in elements for m in e["moves"]]
     names = {}
     for m in all_moves:
         names[m["ease_name"]] = names.get(m["ease_name"], 0) + 1
+    nonrigid.sort(key=lambda r: -(r["t1"] - r["t0"]))
     doc = {
         "schema": SCHEMA,
         "video": {"id": sha[:12], "sha256": sha, "fps": round(float(fps), 4), "frames": int(n),
-                  "duration_s": round(n / float(fps), 4) if fps else 0.0},
+                  "duration_s": round(n / float(fps), 4)},
         "cadence": cad,
         "shots": [{"t0": round(a / float(fps), 4), "t1": round(b / float(fps), 4)} for a, b in shots],
         "camera_moves": cam_out,
+        "camera_jitter_dropped": int(stats["camera_jitter_dropped"]),
         "elements": elements,
-        "stagger_groups": stagger_groups,
+        "nonrigid_regions": {"count": len(nonrigid),
+                             "time_s": round(sum(r["t1"] - r["t0"] for r in nonrigid), 3),
+                             "area": _stats([r["area"] for r in nonrigid]),
+                             "longest": nonrigid[:10]},
+        "stagger_groups": stagger_groups(entries, fps),
         "speed_graphs": speed_g,
         "value_graphs": value_g,
         "summary": {"moves": len(all_moves), "dur_s": _stats([m["dur_s"] for m in all_moves]),
                     "peak_at": _stats([m["peak_at"] for m in all_moves]),
                     "overshoot": _stats([m["overshoot"] for m in all_moves]),
                     "hard_end_share": round(sum(m["end"] == "hard" for m in all_moves) / len(all_moves), 4)
+                    if all_moves else None,
+                    "stepped_share": round(sum(m.get("step_f", 1) > 1 for m in all_moves) / len(all_moves), 4)
                     if all_moves else None,
                     "ease_names": dict(sorted(names.items(), key=lambda kv: -kv[1]))},
         "not_run": not_run,
@@ -1072,7 +1460,8 @@ def validate(doc):
         return ["schema is not motion/1"]
     p = []
     need = {"video": dict, "camera_moves": list, "elements": list, "stagger_groups": list, "speed_graphs": dict,
-            "value_graphs": dict, "not_run": list, "summary": dict}
+            "value_graphs": dict, "not_run": list, "summary": dict, "nonrigid_regions": dict,
+            "camera_jitter_dropped": int}
     for k, t in need.items():
         if not isinstance(doc.get(k), t):
             p.append(f"{k} missing or wrong type")
@@ -1097,6 +1486,21 @@ def validate(doc):
 
 # ---------------------------------------------------------------- CLI
 
+def _check_measure(measure):
+    """A reason the measure/1 document cannot be used, or None."""
+    if not isinstance(measure, dict) or measure.get("schema") != "measure/1" or not isinstance(
+            measure.get("cuts"), list):
+        return "not a measure/1 document with cuts"
+    for c in measure["cuts"]:
+        t = c.get("t") if isinstance(c, dict) else None
+        if isinstance(t, bool) or not isinstance(t, (int, float)) or not math.isfinite(t) or t < 0:
+            return f"a cut has no valid time t: {c!r}"
+        df = c.get("dur_f", 1)
+        if df is not None and (isinstance(df, bool) or not isinstance(df, (int, float)) or df < 0):
+            return f"a cut has a bad dur_f: {c!r}"
+    return None
+
+
 def main(argv=None):
     store.print_utf8()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1120,21 +1524,33 @@ def main(argv=None):
         except (OSError, ValueError) as e:
             print(f"error: cannot read --measure {a.measure}: {e}", file=sys.stderr)
             return 2
-        if not isinstance(measure, dict) or measure.get("schema") != "measure/1" or not isinstance(
-                measure.get("cuts"), list):
-            print(f"error: --measure is not a measure/1 document with cuts: {a.measure}", file=sys.stderr)
+        why = _check_measure(measure)
+        if why:
+            print(f"error: --measure {a.measure}: {why}", file=sys.stderr)
             return 2
+    cv2 = _cv2()
+    cv2_error = getattr(cv2, "error", None) if cv2 is not None else None
     try:
         doc = track(a.video, measure, analysis_width=a.analysis_width)
         store.write_json(Path(a.out), doc)
     except MissingTool as e:
         print(str(e), file=sys.stderr)
         return 3
-    except (RuntimeError, ValueError, OSError) as e:
+    except BadInput as e:
         print(f"error: {e}", file=sys.stderr)
-        return 1
+        return 2
+    except Exception as e:  # noqa: BLE001 - one line, never a traceback
+        if cv2_error is not None and isinstance(e, cv2_error):
+            msg = str(e).strip().splitlines()
+            print(f"error: OpenCV could not process the video: {msg[-1] if msg else 'cv2.error'}", file=sys.stderr)
+            return 2
+        if isinstance(e, (RuntimeError, ValueError, OSError)):
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        raise
     s = doc["summary"]
-    print(f"{len(doc['camera_moves'])} camera moves, {len(doc['elements'])} elements, {s['moves']} moves, "
+    print(f"{len(doc['camera_moves'])} camera moves ({doc['camera_jitter_dropped']} jitter dropped), "
+          f"{len(doc['elements'])} elements, {doc['nonrigid_regions']['count']} non-rigid regions, {s['moves']} moves, "
           f"{len(doc['stagger_groups'])} stagger groups; eases {s['ease_names'] or 'none'}; "
           f"not run: {doc['not_run'] or 'none'}")
     return 0
