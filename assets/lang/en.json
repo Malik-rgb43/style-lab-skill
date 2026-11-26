@@ -1,0 +1,108 @@
+{
+  "code": "en",
+  "script": "Latn",
+  "dir": "ltr",
+  "fonts": {
+    "headline": [
+      "Montserrat",
+      "Poppins",
+      "Oswald",
+      "Anton",
+      "Inter"
+    ],
+    "body": [
+      "Inter",
+      "Roboto",
+      "Open Sans",
+      "Noto Sans"
+    ],
+    "caption": [
+      "Inter",
+      "Montserrat",
+      "Poppins",
+      "Roboto"
+    ],
+    "numbers": [
+      "Inter",
+      "Roboto",
+      "Montserrat"
+    ],
+    "mono": [
+      "JetBrains Mono",
+      "Fira Code",
+      "Roboto Mono"
+    ],
+    "handwritten": [
+      "Caveat",
+      "Patrick Hand",
+      "Kalam"
+    ]
+  },
+  "caption": {
+    "max_words_line": 5,
+    "max_chars_line": 32,
+    "no_italics": false,
+    "emphasis": [
+      "italic",
+      "weight",
+      "colour"
+    ]
+  },
+  "speech_wps_typical": 2.7,
+  "align_model": "MMS_FA",
+  "asr_hint": "en",
+  "number_format": "1,234.56",
+  "date_format": "MM/DD/YYYY",
+  "triggers": {
+    "number_words": [
+      "zero",
+      "one",
+      "two",
+      "three",
+      "four",
+      "five",
+      "six",
+      "seven",
+      "eight",
+      "nine",
+      "ten",
+      "eleven",
+      "twelve",
+      "thirteen",
+      "fourteen",
+      "fifteen",
+      "sixteen",
+      "seventeen",
+      "eighteen",
+      "nineteen",
+      "twenty",
+      "thirty",
+      "forty",
+      "fifty",
+      "sixty",
+      "seventy",
+      "eighty",
+      "ninety",
+      "hundred",
+      "thousand",
+      "million"
+    ],
+    "months": [
+      "january",
+      "february",
+      "march",
+      "april",
+      "may",
+      "june",
+      "july",
+      "august",
+      "september",
+      "october",
+      "november",
+      "december"
+    ],
+    "question_marks": [
+      "?"
+    ]
+  }
+}

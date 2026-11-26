@@ -1,0 +1,131 @@
+{
+  "code": "he",
+  "script": "Hebr",
+  "dir": "rtl",
+  "fonts": {
+    "headline": [
+      "Karantina",
+      "Secular One",
+      "Rubik",
+      "Heebo",
+      "Assistant",
+      "Frank Ruhl Libre"
+    ],
+    "body": [
+      "Heebo",
+      "Assistant",
+      "Rubik",
+      "Noto Sans Hebrew",
+      "Noto Serif Hebrew",
+      "Frank Ruhl Libre"
+    ],
+    "caption": [
+      "Heebo",
+      "Assistant",
+      "Rubik",
+      "Noto Sans Hebrew"
+    ],
+    "numbers": [
+      "Heebo",
+      "Rubik",
+      "Assistant",
+      "Noto Sans Hebrew"
+    ],
+    "mono": [
+      "JetBrains Mono",
+      "Fira Code",
+      "Noto Sans Mono"
+    ],
+    "handwritten": [
+      "Gveret Levin"
+    ]
+  },
+  "caption": {
+    "max_words_line": 4,
+    "max_chars_line": 24,
+    "no_italics": true,
+    "emphasis": [
+      "weight",
+      "colour"
+    ]
+  },
+  "speech_wps_typical": 2.6,
+  "align_model": "imvladikon/wav2vec2-large-xlsr-53-hebrew",
+  "asr_hint": "he",
+  "number_format": "1,234.56",
+  "date_format": "DD.MM.YYYY",
+  "triggers": {
+    "number_words": [
+      "אפס",
+      "אחד",
+      "אחת",
+      "שניים",
+      "שתיים",
+      "שנים",
+      "שתים",
+      "שלוש",
+      "שלושה",
+      "ארבע",
+      "ארבעה",
+      "חמש",
+      "חמישה",
+      "שש",
+      "שישה",
+      "שבע",
+      "שבעה",
+      "שמונה",
+      "תשע",
+      "תשעה",
+      "עשר",
+      "עשרה",
+      "אחד עשר",
+      "אחת עשרה",
+      "שנים עשר",
+      "שתים עשרה",
+      "שלושה עשר",
+      "שלוש עשרה",
+      "ארבעה עשר",
+      "ארבע עשרה",
+      "חמישה עשר",
+      "חמש עשרה",
+      "שישה עשר",
+      "שש עשרה",
+      "שבעה עשר",
+      "שבע עשרה",
+      "שמונה עשר",
+      "שמונה עשרה",
+      "תשעה עשר",
+      "תשע עשרה",
+      "עשרים",
+      "שלושים",
+      "ארבעים",
+      "חמישים",
+      "שישים",
+      "שבעים",
+      "שמונים",
+      "תשעים",
+      "מאה",
+      "מאתיים",
+      "אלף",
+      "אלפיים",
+      "מיליון"
+    ],
+    "months": [
+      "ינואר",
+      "פברואר",
+      "מרץ",
+      "אפריל",
+      "מאי",
+      "יוני",
+      "יולי",
+      "אוגוסט",
+      "ספטמבר",
+      "אוקטובר",
+      "נובמבר",
+      "דצמבר"
+    ],
+    "question_marks": [
+      "?"
+    ]
+  }
+}
