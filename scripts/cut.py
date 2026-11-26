@@ -92,6 +92,7 @@ QUIET_DB = 10.0        # quiet = local room-tone floor + 10 dB
 BALANCE_TOL_DB = 0.5   # channels further apart than this are balanced
 DEAD_CHANNEL_DB = 20.0  # a channel this far below the other is replaced, not boosted
 SENTENCE_END = (".", "?", "!", ":")
+DIGITAL_SILENCE_DB = -90.0  # a slice below this is digital silence, never used as room tone
 
 
 class MissingTool(Exception):
@@ -105,6 +106,8 @@ def resolve_opts(preset=None, overrides=None):
     o = dict(DEFAULTS)
     o.update(PRESETS[preset or "lesson"])
     o.update({k: v for k, v in (overrides or {}).items() if v is not None})
+    if o.get("end_air_ms") == 0:  # --end-air-ms 0 switches the end air off (also under --preset reels)
+        o["end_air_ms"] = None
     return o
 
 
@@ -137,7 +140,8 @@ def slice_db(mono):
 def probe_video(src):
     """(width, height, duration_ms or None) of the first video stream."""
     r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                        "stream=width,height,duration:format=duration", "-of", "json", str(src)],
+                        "stream=width,height,duration:stream_tags=DURATION:format=duration", "-of", "json",
+                        str(src)],
                        capture_output=True, text=True, encoding="utf-8")
     if r.returncode != 0:
         raise RuntimeError("ffprobe could not read the source: " + (r.stderr.strip().splitlines() or ["?"])[-1])
@@ -146,12 +150,25 @@ def probe_video(src):
     if not streams:
         raise RuntimeError("the source has no video stream")
     s = streams[0]
-    dur = s.get("duration") or (doc.get("format") or {}).get("duration")
-    try:
-        dur_ms = float(dur) * 1000 if dur not in (None, "N/A") else None
-    except ValueError:
-        dur_ms = None
+    dur_ms = _seconds(s.get("duration"))
+    if dur_ms is None:  # Matroska/WebM keep the stream duration in a tag, HH:MM:SS.fraction
+        dur_ms = _seconds((s.get("tags") or {}).get("DURATION"))
+    if dur_ms is None:
+        dur_ms = _seconds((doc.get("format") or {}).get("duration"))
     return int(s["width"]), int(s["height"]), dur_ms
+
+
+def _seconds(v):
+    """ffprobe duration ("12.34" or "00:00:12.340000000") -> ms; None when absent."""
+    if v in (None, "", "N/A"):
+        return None
+    try:
+        if ":" in str(v):
+            h, m, sec = str(v).split(":")
+            return (int(h) * 3600 + int(m) * 60 + float(sec)) * 1000
+        return float(v) * 1000
+    except ValueError:
+        return None
 
 
 def channel_balance(audio, db=None):
@@ -203,16 +220,22 @@ def apply_balance(audio, bal):
 class Picker:
     """Frame-boundary energy and quietest-frame search on 10 ms slice levels."""
 
-    def __init__(self, db, fps, protected=()):
+    def __init__(self, db, fps, protected=(), dur_ms=None):
         self.db, self.fms = db, 1000.0 / fps
         self.gfloor = float(np.percentile(db, 10)) if len(db) else -96.0
         self.protected = list(protected)
+        dur_ms = len(db) * 10 if dur_ms is None else min(dur_ms, len(db) * 10)
+        self.end_k = int(dur_ms // 10)                    # slices from here on are past the end
+        self.fmax = math.floor(dur_ms / self.fms + 1e-9)  # last frame boundary inside the source
 
     def e(self, f):
-        """energy at frame boundary f: loudest 10 ms slice within +-30 ms (the crossfade plus margin), dB."""
+        """energy at frame boundary f: loudest 10 ms slice within +-30 ms (the crossfade plus margin), dB.
+        Slices past the end of the source count as loud (0 dB): there is nothing there to cut into."""
         k = int((f * self.fms) // 10)
-        lo, hi = max(0, k - 3), min(len(self.db), k + 3)
-        return float(self.db[lo:hi].max()) if hi > lo else -96.0
+        lo, hi = max(0, k - 3), k + 3
+        vals = self.db[lo:min(hi, self.end_k)]
+        m = float(vals.max()) if len(vals) else -96.0
+        return max(m, 0.0) if hi > self.end_k else m
 
     def allowed(self, f):
         """a frame boundary strictly inside a flagged word's protected span is never a cut point."""
@@ -220,20 +243,22 @@ class Picker:
         return not any(a < t < b for a, b in self.protected)
 
     def pick(self, lo_ms, hi_ms, target_ms):
-        f0, f1 = math.ceil(lo_ms / self.fms), math.floor(hi_ms / self.fms)
+        f0, f1 = math.ceil(lo_ms / self.fms), min(math.floor(hi_ms / self.fms), self.fmax)
         cand = [f for f in range(max(0, f0), f1 + 1) if self.allowed(f)]
         if not cand:
             return None
         return min(cand, key=lambda f: (round(self.e(f), 0), abs(f * self.fms - target_ms)))
 
     def pick_outward(self, edge_ms, direction, reach_ms=5000):
-        """last resort: quietest allowed frame in growing windows past edge_ms (direction +1 / -1)."""
-        for span in range(200, reach_ms + 1, 200):
-            lo, hi = (edge_ms, edge_ms + span) if direction > 0 else (edge_ms - span, edge_ms)
-            f = self.pick(lo, hi, edge_ms)
-            if f is not None:
-                return f
-        return max(0, round(edge_ms / self.fms))
+        """last resort: quietest allowed frame in growing windows past edge_ms (direction +1 / -1), then
+        the other way (an edge past the end of the source can only move back); always inside the source."""
+        for d in (direction, -direction):
+            for span in range(200, reach_ms + 1, 200):
+                lo, hi = (edge_ms, edge_ms + span) if d > 0 else (edge_ms - span, edge_ms)
+                f = self.pick(lo, hi, edge_ms)
+                if f is not None:
+                    return f
+        return min(self.fmax, max(0, round(edge_ms / self.fms)))
 
     def quiet_thr(self, t_ms):
         """quiet threshold near t: local room-tone floor (10th percentile of +-3 s) + 10 dB."""
@@ -288,7 +313,7 @@ class _Planner:
         self.cut = {i: _cut_view(self.byi[i]) for i in self.order}
         protected = [(c["start_ms"], c["end_ms"]) for i, c in self.cut.items()
                      if self.byi[i].get("flag") in PROTECT_FLAGS]
-        self.P = Picker(db, fps, protected)
+        self.P = Picker(db, fps, protected, dur_ms)
         self.dur_ms = dur_ms
         self.voiced_log, self.kept_long = [], []
 
@@ -313,8 +338,8 @@ class _Planner:
         o, P, fms = self.o, self.P, self.fms
         thr = P.quiet_thr((wa["end_ms"] + wb["start_ms"]) / 2)
         f0 = math.ceil((wa["end_ms"] + o.inside_ms) / fms)
-        f1 = math.floor((wb["start_ms"] - o.inside_ms) / fms)
-        Q = [f for f in range(max(0, f0), f1 + 1) if P.e(f) < thr and P.allowed(f)]
+        f1 = min(math.floor((wb["start_ms"] - o.inside_ms) / fms), P.fmax)
+        Q =[f for f in range(max(0, f0), f1 + 1) if P.e(f) < thr and P.allowed(f)]
         if not Q:
             return None
         k = o.pause_keep_ms
@@ -353,12 +378,15 @@ class _Planner:
 
     def out_point(self, w, nxt, keep_ms, final=False):
         o, P = self.o, self.P
+        lim = (nxt["start_ms"] - 40) if nxt else self.dur_ms
+        if final and o.end_air_ms is not None:
+            air = o.end_air_ms
+            f = P.pick(w["end_ms"] + air - 20, min(w["end_ms"] + air + 40, lim), w["end_ms"] + air)
+            if f is not None:
+                return f, False
+            # no room for the end air (the next word or the source end is closer): normal tail rule
         lo = w["end_ms"] + o.inside_ms
         hi = w["end_ms"] + keep_ms + 80
-        if final and o.end_air_ms is not None:
-            keep_ms = o.end_air_ms
-            lo, hi = w["end_ms"] + keep_ms - 20, w["end_ms"] + keep_ms + 40
-        lim = (nxt["start_ms"] - 40) if nxt else self.dur_ms
         f = P.pick(lo, min(hi, lim), w["end_ms"] + keep_ms)
         if f is not None:
             return f, False
@@ -470,11 +498,17 @@ class _Planner:
         """quietest steady window of need_ms near t_ms (+-120 s): room tone of the same recording."""
         db = self.db
         k0, n = int(t_ms // 10), need_ms // 10
-        best = None
+        best = fallback = None
         for k in range(max(0, k0 - 12000), max(1, min(len(db) - n, k0 + 12000)), 10):
-            sc = float(np.percentile(db[k: k + n], 98))
+            win = db[k: k + n]
+            sc = float(np.percentile(win, 98))
+            if fallback is None or sc < fallback[0]:
+                fallback = (sc, k)
+            if len(win) and float(win.min()) < DIGITAL_SILENCE_DB:
+                continue  # digital silence (an edit gap, a muted stretch) is not room tone
             if best is None or sc < best[0]:
                 best = (sc, k)
+        best = best or fallback  # only digital silence near: take it rather than fail
         return best[1] * 10, min(best[1] * 10 + need_ms, len(db) * 10), round(best[0], 1)
 
     def insert_placeholders(self, pieces):
@@ -750,6 +784,8 @@ def render(source, plan, out_stem, opts=None, audio=None, meta=None):
     stem = stem[:-4] if stem.endswith(".mp4") else stem
     if audio is None:
         audio = load_audio(source)
+    if "channel_balance" not in plan:  # plan_pieces is pure: measure the balance here if the caller did not
+        plan.update(channel_balance(audio))
     write_plan(plan, stem, meta)
     bal = {k: plan[k] for k in ("channel_balance", "gains") if k in plan}
     outa = build_audio(apply_balance(audio, bal), plan)
@@ -772,11 +808,16 @@ def render(source, plan, out_stem, opts=None, audio=None, meta=None):
         cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(source), "-i", wav, _graph_flag(), fg,
                "-map", "[v]", "-map", "1:a", "-c:v", "libx264", "-preset", "fast", "-crf", str(opts["crf"]),
                "-pix_fmt", "yuv420p", "-r", str(fps), "-g", str(fps), "-c:a", "aac", "-b:a", "192k",
-               "-frames:v", str(plan["frames"]), "-movflags", "+faststart", stem + ".mp4"]
+               "-frames:v", str(plan["frames"]), "-movflags", "+faststart", stem + ".tmp.mp4"]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
+            try:
+                os.remove(stem + ".tmp.mp4")
+            except OSError:
+                pass
             msg = r.stderr.strip().splitlines()
             raise RuntimeError("ffmpeg render failed: " + (msg[-1] if msg else "unknown error"))
+        os.replace(stem + ".tmp.mp4", stem + ".mp4")
 
 
 # ---------------------------------------------------------------- CLI

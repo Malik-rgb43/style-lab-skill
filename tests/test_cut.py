@@ -331,3 +331,92 @@ def test_missing_ffmpeg_exits_3_one_line(tmp_path, home, monkeypatch):
     lines = [x for x in r.stderr.splitlines() if x.strip()]
     assert len(lines) == 1 and "ffmpeg" in lines[0]
     assert not list(tmp_path.glob("x*"))
+
+
+# ---------------------------------------------------------------- review fixes
+
+def test_last_word_past_the_video_end_is_clamped_and_listed():
+    spans = [(500, 900), (1000, 1400), (1800, 2600)]
+    doc = mm.words_doc(spans)
+    db = _db(spans, 3000)
+    plan = cut.plan_pieces(doc["words"], {"keep": [[0, 2]]}, db, 25, cut.resolve_opts("lesson"), dur_ms=2300)
+    last = plan["pieces"][-1]
+    assert last["src_out_ms"] <= 2300, last
+    assert any(s["piece"] == last["id"] and s["edge"] == "out" for s in plan["soft_joins"])
+    # the reviewer's probe: a last word starting inside but ending past the end never yields a frame past it
+    spans = [(500, 900), (1000, 1400), (2200, 2600)]
+    plan = cut.plan_pieces(mm.words_doc(spans)["words"], {"keep": [[0, 2]]}, _db(spans, 3000), 25,
+                           cut.resolve_opts("lesson"), dur_ms=2300)
+    assert all(p["src_out_ms"] <= 2300 for p in plan["pieces"])
+
+
+def test_render_with_video_shorter_than_audio_stays_in_sync(tmp_path, home):
+    spans = [(500, 900), (1000, 1400), (1800, 2600)]
+    full = mm.make_clip(tmp_path / "full.mkv", spans, 3000)
+    src = tmp_path / "short.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(full), "-filter_complex", "[0:v]trim=end=2.3[v]",
+                    "-map", "[v]", "-map", "0:a", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "copy", str(src)],
+                   check=True)
+    words = mm.write_json(tmp_path / "w.json", mm.words_doc(spans))
+    kp = mm.write_json(tmp_path / "k.json", {"keep": [[0, 2]]})
+    stem = tmp_path / "short_cut"
+    r = run_cli("cut.py", src, words, kp, "--out", stem)
+    assert r.returncode == 0, r.stderr
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    assert cuts["pieces"][-1]["src_out_ms"] <= 2300
+    assert cuts["soft_joins"]
+    _av_ok(f"{stem}.mp4", 25, cuts["frames"])
+
+
+def test_render_api_balances_channels_and_replaces_atomically(tmp_path, home):
+    src, _, _ = _setup(tmp_path, left_db=6.0)
+    audio = cut.load_audio(src)
+    db = cut.slice_db(audio.mean(axis=1))
+    o = cut.resolve_opts("lesson")
+    plan = cut.plan_pieces(mm.words_doc(SPANS)["words"], KEEP, db, 25, o)
+    assert "channel_balance" not in plan
+    stem = tmp_path / "api"
+    cut.render(src, plan, stem, o)
+    a = _audio(f"{stem}.mp4")
+    rms = np.sqrt((a.astype(np.float64) ** 2).mean(axis=0))
+    assert abs(20 * np.log10(rms[0] / rms[1])) < 0.5
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    assert abs(cuts["channel_balance_db"] - 6.0) < 0.3 and cuts["channel_balance"] == "gain"
+    assert not Path(f"{stem}.tmp.mp4").exists()
+    # a failed render leaves neither the output nor its temp file
+    bad = tmp_path / "bad"
+    plan2 = cut.plan_pieces(mm.words_doc(SPANS)["words"], KEEP, db, 25, o)
+    with pytest.raises(RuntimeError):
+        cut.render(tmp_path / "missing.mkv", plan2, bad, o, audio=audio)
+    assert not Path(f"{bad}.mp4").exists() and not Path(f"{bad}.tmp.mp4").exists()
+
+
+def test_end_air_without_room_falls_back_to_the_normal_tail():
+    spans = [(500, 900), (1000, 1400), (1900, 2300)]
+    plan = cut.plan_pieces(mm.words_doc(spans)["words"], {"keep": [[0, 1]]}, _db(spans, 3000), 30,
+                           cut.resolve_opts("reels"))
+    last = plan["pieces"][-1]
+    assert not last.get("tight")
+    assert 1400 + 60 <= last["src_out_ms"] <= 1400 + 80 + 80, last
+    assert plan["soft_joins"] == []
+
+
+def test_end_air_zero_means_off():
+    o = cut.resolve_opts("reels", {"end_air_ms": 0})
+    assert o["end_air_ms"] is None and o["fps"] == 30
+    with_air = _plan(preset="reels")
+    without = _plan(preset="reels", end_air_ms=0)
+    assert with_air["pieces"][-1]["src_out_ms"] >= 5500 + 980
+    assert without["pieces"][-1]["src_out_ms"] <= 5500 + 80 + 80
+
+
+def test_room_tone_never_comes_from_digital_silence():
+    spans = SPANS
+    db = _db(spans, 13000)
+    db[950:] = -180.0  # 9.5 s on: digital silence (quieter than any room tone)
+    keep = {"keep": [[0, 3], [5, 6]], "placeholders": [{"id": "p", "after_word": 3, "dur_s": 1.0}]}
+    plan = cut.plan_pieces(mm.words_doc(spans)["words"], keep, db, 25, cut.resolve_opts("lesson"))
+    rec = next(p for p in plan["pieces"] if p.get("placeholder") == "p")
+    t0, t1 = rec["src_in_ms"], rec["src_out_ms"]
+    assert db[int(t0 // 10): int(t1 // 10)].min() > cut.DIGITAL_SILENCE_DB, (t0, t1)
+    assert 5500 <= t0 and t1 <= 9500
