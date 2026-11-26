@@ -33,6 +33,9 @@ LARGE_TEXT = 3.0   # accent as large headline words on the background
 ONE_ACCENT_DE = 20.0   # one_accent: accent vs brand CIEDE2000 at least this
 ONE_ACCENT_HUE = 40.0  # one_accent: non-accent roles (C >= 0.02) within this many degrees of the brand hue
 NEUTRAL_BRAND_C = 0.02  # brands under this OKLCH chroma are neutral: accent hue 250, hue noise ignored
+CHECK_BARS = {"text_on_background": MIN_TEXT, "text_on_surface": MIN_TEXT, "muted_on_background": MIN_TEXT,
+              "brand_on_background": SHAPE_MIN, "caption_text": MIN_TEXT, "cta_text": MIN_TEXT,
+              "text_on_highlight": MIN_TEXT, "accent_large_text": LARGE_TEXT, "accent_vs_brand_cvd": MIN_CVD}
 
 # ---- Final role table (tuned on the owner's teal set; Task 7 copies it into references/palette.md).
 # Ramp step -> (OKLCH L, chroma as a factor of the brand chroma). Hue = brand hue; steps darker than 500
@@ -389,22 +392,23 @@ def _check(p, H, brand_C):
     def worst(fn):
         return min(fn(r, lab) for r, lab in pairs)
 
-    c = {
+    raw = {
         "text_on_background": worst(lambda r, lab: contrast(r["text"], r["background"])),
         "text_on_surface": worst(lambda r, lab: contrast(r["text"], r["surface"])),
         "muted_on_background": worst(lambda r, lab: contrast(r["muted"], r["background"])),
+        "brand_on_background": worst(lambda r, lab: contrast(r["brand"], r["background"])),
         "caption_text": worst(lambda r, lab: contrast(lab["caption"], r["caption_pill"])),
         "cta_text": worst(lambda r, lab: contrast(lab["cta"], r["cta"])),
         "text_on_highlight": worst(lambda r, lab: contrast(lab["highlight"], r["highlight"])),
         "accent_large_text": worst(lambda r, lab: contrast(lab["accent_text"], r["background"])),
         "accent_vs_brand_cvd": worst(lambda r, lab: cvd_delta(r["accent"], r["brand"])),
     }
-    c = {k: round(v, 2) for k, v in c.items()}
-    c["one_accent"] = all(_one_accent(r, H, brand_C) for r, _ in pairs)
-    c["pass"] = bool(
-        min(c[k] for k in ("text_on_background", "text_on_surface", "muted_on_background", "caption_text",
-                           "cta_text", "text_on_highlight")) >= MIN_TEXT
-        and c["accent_large_text"] >= LARGE_TEXT and c["accent_vs_brand_cvd"] >= MIN_CVD and c["one_accent"])
+    one = all(_one_accent(r, H, brand_C) for r, _ in pairs)
+    # bars are compared on the raw values; rounding is for the stored / printed numbers only
+    ok = one and all(raw[k] >= bar for k, bar in CHECK_BARS.items())
+    c = {k: round(v, 2) for k, v in raw.items()}
+    c["one_accent"] = one
+    c["pass"] = bool(ok)
     return c
 
 

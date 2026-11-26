@@ -8,7 +8,8 @@ from conftest import run_cli
 
 ROLE_KEYS = {"background", "surface", "text", "muted", "brand", "brand_deep", "tint", "accent", "highlight",
              "caption_pill", "cta"}
-CHECK_KEYS = {"text_on_background", "text_on_surface", "muted_on_background", "caption_text", "cta_text",
+CHECK_KEYS = {"text_on_background", "text_on_surface", "muted_on_background", "brand_on_background",
+              "caption_text", "cta_text",
               "text_on_highlight", "accent_large_text", "accent_vs_brand_cvd", "one_accent", "pass"}
 FIXTURES = ["#008754", "#7C5CFF", "#E11D48", "#111111", "#FFD400"]
 
@@ -206,3 +207,31 @@ def test_clients_palette_command(home):
     assert run_cli("clients.py", "add", "--name", "No Colour").returncode == 0
     r = run_cli("clients.py", "palette", "no-colour")
     assert r.returncode == 1 and "brand colour" in r.stderr
+
+
+def test_pass_uses_raw_values_not_rounded(monkeypatch):
+    p = palette.proposals("#008754")[2]
+    L, C, H = palette.hex_to_oklch(p["brand"])
+    assert palette._check(p, H, C)["pass"] is True
+    light = p["roles"]["light"]
+    real = palette.contrast
+
+    def fake(a, b):
+        if {a, b} == {light["text"], light["background"]}:
+            return 4.496  # rounds to 4.5 but misses the bar
+        return real(a, b)
+
+    monkeypatch.setattr(palette, "contrast", fake)
+    c = palette._check(p, H, C)
+    assert c["text_on_background"] == 4.5 and c["pass"] is False
+
+
+def test_brand_shape_bar_in_pass(monkeypatch):
+    p = palette.proposals("#008754")[2]
+    L, C, H = palette.hex_to_oklch(p["brand"])
+    assert palette._check(p, H, C)["brand_on_background"] >= 3.0
+    p["roles"]["light"]["brand"] = "#E8F0EA"  # a failed nudge: brand nearly invisible on the background
+    c = palette._check(p, H, C)
+    assert c["brand_on_background"] < 3.0 and c["pass"] is False
+    others = {k: bar for k, bar in palette.CHECK_BARS.items() if k != "brand_on_background"}
+    assert c["one_accent"] and all(c[k] >= bar for k, bar in others.items())  # only the brand bar fails
