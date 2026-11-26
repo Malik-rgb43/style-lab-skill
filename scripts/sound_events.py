@@ -6,7 +6,7 @@ through ffmpeg (stereo, 24 kHz) and writes one sound.json (schema "sound/1").
 
 Usage:
   sound_events.py <video|audio> --out <dir>/sound.json [--words w.json] [--measure m.json]
-                  [--motion mo.json] [--no-librosa]
+                  [--motion mo.json] [--no-librosa] [--allow-download]
 
 What is measured (all local, numpy only; librosa is used for the onset envelope when it imports):
   - sfx: onsets by spectral flux over 12 log-spaced bands (10 ms hops) with adaptive peak picking
@@ -36,6 +36,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,30 @@ THRESHOLDS = {
     "over_voice_sharp_db": 6.0,    # an onset inside a word is an SFX if the whole mix jumps this sharply ...
     "over_voice_sub_db": 9.0,      # ... or the sub band (below sub_hz, where speech has nothing) rises this much
     "sub_hz": 100.0,
+    "speech_pad_s": 0.12,          # speech = the word spans widened by this (ASR word edges are 0.1-0.3 s off)
+    "speech_local_s": 0.08,        # an onset in speech must rise event_min_rise_db over the median level
+                                   # of the speech in the 80 ms before it, and show a non-voice signature:
+    "nv_hi_hz": 6000.0,            #   air: >= 30 % of its excess energy in 6-12 kHz, flat there (>= 0.3),
+    "nv_hi_top_hz": 12000.0,
+    "nv_hi_share": 0.3,            #   and longer than a fricative (>= 0.25 s) ...
+    "nv_hi_flat": 0.3,
+    "nv_hi_min_dur_s": 0.25,
+    "air_hold_s": 0.06,            # an air sound's start: its 6-12 kHz rise holds this long (not a plosive)
+    "nv_low_share": 0.6,           #   ... or a thump: >= 60 % of its excess energy below low_hz, centre
+    "nv_low_centroid_hz": 250.0,   #   under 250 Hz, instant (<= 30 ms) attack (voiced speech also has 40-60 %
+    "nv_low_attack_s": 0.03,       #   below 150 Hz, but its centroid sits on the formants, 300-900 Hz) ...
+    "nv_sweep_hz_s": 800.0,        #   ... or a tonal sweep: |centroid slope| >= 800 Hz/s, tonal (peak share
+    "nv_sweep_tonal": 0.5,         #   >= 0.5), >= 0.5 s long (speech glides are slower and shorter)
+    "nv_sweep_min_dur_s": 0.5,
+    # voice-like: tonal, centred on the formants, no air; an "unknown" event like this is dropped
+    # anywhere (speech the words missed), it is never listed as an SFX
+    "voice_tonal": 0.7,            # (it also vetoes a "sweep" signature and a voice-like "glitch")
+    "voice_centroid_hz": (150.0, 1500.0),
+    "voice_hi_share": 0.1,
+    "infra_hz": 25.0,              # spectral features ignore energy below this (rumble, DC)
+    "min_low_event_s": 0.02,       # an event shorter than 20 ms centred under 500 Hz is a level ripple of
+    "min_low_event_hz": 500.0,     # a low note (a 5 ms click needs high frequencies), not an event
+    "over_voice_per_s": 0.5,       # at most this many over-voice SFX per second of speech (strongest kept)
     "beat_tol_s": 0.05,            # an onset this close to a beat or half beat may be the music
     "beat_louder_db": 6.0,         # ... it stays an SFX only if its attack is this much sharper than the beats'
     "bed_margin_db": 15.0,         # an event less than this above the sound before it is measured on the
@@ -95,10 +120,21 @@ THRESHOLDS = {
     "bpm_range": (50.0, 220.0),
     "bpm_prior_bpm": 120.0,        # log-normal tempo prior (as in librosa), centre ...
     "bpm_prior_oct": 1.0,          # ... and width in octaves
-    "bpm_min_conf": 0.3,           # weaker periodicity than this: no BPM
+    "bpm_min_conf": 0.09,          # harmonic sum of the mean windowed acf below this: no BPM (a beat-driven
+                                   # reference under narration measured 0.10, narration over a soft bed
+                                   # 0.02, synthetic speech alone <= 0.05; a clean bed 0.3-0.9)
+    "tempo_win_s": 8.0,            # tempogram: autocorrelation of 8 s windows ...
+    "tempo_step_s": 1.0,           # ... every 1 s, each normalised, then averaged
+    "tempo_low_hz": (30.0, 150.0), # kick band
+    "tempo_hat_hz": (2000.0, 8000.0),  # hat band
+    "tempo_speech_weight": 0.5,    # envelope weight inside speech (from the words)
+    "grid_min": 0.15,              # a tempo's beat grid must beat its off-beat grid by this (in env std) on
+                                   # the low band, else half or double tempo is tried
     "bpm_min_s": 4.0,              # shorter audio: no BPM
     "beat_hit_s": 0.07,            # a cut within 70 ms of a beat is on the beat
-    "music_bed_min_db": -45.0,     # median music-alone level above this: a bed plays (needed for a BPM)
+    "music_bed_min_db": -45.0,     # 25th-percentile music-alone level above this: a bed plays (needed for
+                                   # a BPM); with under 2 s of music-alone audio a found tempo is enough
+    "music_alone_min_s": 2.0,
     "phrase_gap_s": 0.35,          # words closer than this form one phrase (for ducking)
     "duck_inner_s": 0.15,          # voice frames: at least this far inside a phrase
     "duck_outer_s": 0.25,          # music-alone frames: at least this far from any phrase
@@ -122,8 +158,8 @@ RULES = {
                  ("peak_share", "<=", 0.35, 0.2), ("centroid_hz", ">=", 1500.0, 1000.0)]],
     # click: one very short, bright burst (key, mouse, UI tick).
     "click": [[("dur_s", "<=", 0.03, 0.02), ("centroid_hz", ">=", 2000.0, 1500.0), ("bursts", "<=", 1.5, 1)]],
-    # hit: instant attack with the energy in the sub/bass (impact, boom).
-    "hit": [[("attack_s", "<=", 0.03, 0.02), ("low_share", ">=", 0.4, 0.3), ("dur_s", ">=", 0.06, 0.05),
+    # hit: instant attack with the energy in the sub/bass (impact, boom); a tight thump can be 40 ms.
+    "hit": [[("attack_s", "<=", 0.03, 0.02), ("low_share", ">=", 0.4, 0.3), ("dur_s", ">=", 0.04, 0.04),
              ("dur_s", "<=", 1.5, 0.5)]],
     # pop: short, instant and mid-range (bubble, UI pop): not low like a hit, not bright like a click.
     "pop": [[("dur_s", "<=", 0.15, 0.05), ("attack_s", "<=", 0.02, 0.02), ("centroid_hz", "<=", 2500.0, 1000.0),
@@ -394,7 +430,8 @@ def features(y, sr, t0, t_end=None):
     f = {"dur_s": 0.0, "attack_s": 0.0, "attack_frac": 0.0, "peak_db": -120.0, "pre_db": -120.0,
          "level_std_db": 0.0, "level_rise_db": 0.0, "bursts": 0, "burst_rate_hz": 0.0,
          "centroid_hz": 0.0, "centroid_slope_hz_s": 0.0, "flatness": 0.0, "peak_share": 1.0,
-         "low_share": 0.0, "band_rise_db": -120.0, "bed_subtracted": False, "mix_peak_db": -120.0}
+         "low_share": 0.0, "band_rise_db": -120.0, "bed_subtracted": False, "mix_peak_db": -120.0,
+         "hi_share": 0.0, "hi_flatness": 0.0}
     if limit - t0 < ENV_HOP_S:
         return f
     if t0 >= 0.02:
@@ -480,7 +517,7 @@ def _spectral(y, sr, t0, dur, t_peak):
     b = min(len(y), int((t0 + dur) * sr) + n_fft)
     seg = y[a:b]
     out = {"centroid_hz": 0.0, "centroid_slope_hz_s": 0.0, "flatness": 0.0, "peak_share": 1.0, "low_share": 0.0,
-           "band_rise_db": -120.0}
+           "band_rise_db": -120.0, "hi_share": 0.0, "hi_flatness": 0.0}
     if len(seg) < n_fft:
         return out
     P, freqs = _power(seg, sr, n_fft, hop, center=False)
@@ -493,6 +530,7 @@ def _spectral(y, sr, t0, dur, t_peak):
         ev_m = np.zeros(len(P), bool)
         ev_m[int(np.argmin(np.abs(centres - t_peak)))] = True
     E = np.maximum(P[ev_m] - pre, 0.0).astype(np.float64)
+    E[:, freqs < T["infra_hz"]] = 0.0
     tc = centres[ev_m]
     tot = E.sum(axis=1)
     if tot.max() <= 0:
@@ -511,6 +549,13 @@ def _spectral(y, sr, t0, dur, t_peak):
     top = np.sort(E, axis=1)[:, -kb:].sum(axis=1)
     out["peak_share"] = float(top.sum() / tot.sum())  # power-weighted over the frames
     out["low_share"] = float(E[:, freqs < T["low_hz"]].sum() / E.sum())
+    hi = (freqs >= T["nv_hi_hz"]) & (freqs <= min(T["nv_hi_top_hz"], sr / 2 * 0.95))
+    if hi.sum() >= 4:
+        out["hi_share"] = float(E[:, hi].sum() / E.sum())
+        Eh = E[:, hi] + tot.max() * 1e-9
+        fh = np.exp(np.log(Eh).mean(axis=1)) / Eh.mean(axis=1)
+        wh = E[:, hi].sum(axis=1) + 1e-30
+        out["hi_flatness"] = float((fh * wh).sum() / wh.sum())
     bm = _band_matrix(freqs, sr, T["onset_bands"]).astype(np.float64)
     eb = E.mean(axis=0) @ bm
     pb = pre.astype(np.float64) @ bm
@@ -595,6 +640,19 @@ def _phrases(spans, gap):
     return out
 
 
+def speech_regions(spans, pad=None):
+    """Word spans widened by speech_pad_s and merged: where the voice may be."""
+    pad = THRESHOLDS["speech_pad_s"] if pad is None else pad
+    out = []
+    for a, b in spans or []:
+        a, b = max(0.0, a - pad), b + pad
+        if out and a <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return out
+
+
 def voice_level_db(y, sr, spans):
     """Median 10 ms level (dBFS) inside the word spans, or None."""
     if not spans:
@@ -609,12 +667,72 @@ def voice_level_db(y, sr, spans):
 
 # ---------------------------------------------------------------- SFX detection
 
-def detect_sfx(y, sr, spans=None, beats=None, voice_db=None):
+def _voice_like(feat):
+    """Tonal, centred on the formants, no air: what speech looks like to these features."""
+    T = THRESHOLDS
+    lo, hi = T["voice_centroid_hz"]
+    return feat["peak_share"] >= T["voice_tonal"] and lo <= feat["centroid_hz"] <= hi \
+        and feat["hi_share"] < T["voice_hi_share"]
+
+
+def _non_voice(feat):
+    """Which non-voice signature an event inside speech shows ("air", "thump", "sweep") or None."""
+    T = THRESHOLDS
+    if feat["hi_share"] >= T["nv_hi_share"] and feat["hi_flatness"] >= T["nv_hi_flat"] \
+            and feat["dur_s"] >= T["nv_hi_min_dur_s"]:
+        return "air"
+    if feat["low_share"] >= T["nv_low_share"] and feat["centroid_hz"] <= T["nv_low_centroid_hz"] \
+            and feat["attack_s"] <= T["nv_low_attack_s"]:
+        return "thump"
+    if abs(feat["centroid_slope_hz_s"]) >= T["nv_sweep_hz_s"] and feat["peak_share"] >= T["nv_sweep_tonal"] \
+            and feat["dur_s"] >= T["nv_sweep_min_dur_s"] and not _voice_like(feat):
+        return "sweep"
+    return None
+
+
+def _air_start(y, sr, t0, dur_s):
+    """Where the 6-12 kHz band first rises event_min_rise_db over its level in the 100 ms before
+    t0, inside [t0, t0 + dur_s]; None when it never does."""
+    T = THRESHOLDS
+    lo, hi = T["nv_hi_hz"], min(T["nv_hi_top_hz"], sr / 2 - 1)
+    if hi <= lo or dur_s <= 0:
+        return None
+    a = max(0.0, t0 - 0.1)
+    b = min(len(y) / sr, t0 + dur_s)
+    seg = _bandpass(np.asarray(y[int(a * sr):int(b * sr)], np.float64), sr, lo, hi)
+    ts, e = _env(seg, sr, 0.0, len(seg) / sr, hop_s=HOP_S)
+    if not len(e):
+        return None
+    ts = ts + a
+    pre = e[ts < t0]
+    if not len(pre):
+        return None
+    ref = float(np.median(pre)) + T["event_min_rise_db"]
+    # the rise must hold for air_hold_s, so a plosive or fricative burst at a word start (a few ms
+    # of high band) does not count as the air sound's start
+    hold = max(1, int(round(T["air_hold_s"] / HOP_S)))
+    above = (e >= ref) & (ts >= t0)
+    run = 0
+    for k, ok in enumerate(above):
+        run = run + 1 if ok else 0
+        if run >= hold:
+            return float(ts[k - hold + 1])
+    return None
+
+
+def detect_sfx(y, sr, spans=None, beats=None, voice_db=None, log=None):
     """SFX events [{t, class_guess, confidence, dur_s, level_vs_voice_db, ...}] after the voice and
-    music filters, classification and grouping."""
+    music filters, classification and grouping.
+
+    Voice filter (with word spans): an onset within voice_onset_s of a word start is the voice. An
+    onset inside speech (the spans widened by speech_pad_s) stays only if it rises event_min_rise_db
+    over the speech level around it, shows a non-voice signature (_non_voice) and gets a class; the
+    over-voice SFX are then capped at over_voice_per_s per second of speech, strongest first.
+    level_vs_voice_db is null without words (no voice level)."""
     T = THRESHOLDS
     y = _mono(y)
     cands = _candidates(y, sr)
+    speech = speech_regions(spans) if spans else []
     kept = []
     for c in cands:
         t = c["t"]
@@ -622,10 +740,7 @@ def detect_sfx(y, sr, spans=None, beats=None, voice_db=None):
         if spans:
             if any(abs(t - a) <= T["voice_onset_s"] for a, _ in spans):
                 continue
-            inside = any(a <= t <= b for a, b in spans)
-            if inside and c["sharp_bb_db"] < T["over_voice_sharp_db"] and c["sub_rise_db"] < T["over_voice_sub_db"]:
-                continue
-            c["over_voice"] = inside
+            c["over_voice"] = any(a <= t <= b for a, b in speech)
         kept.append(c)
     if beats is not None and len(beats) >= 2:
         beats = np.asarray(beats, float)
@@ -638,20 +753,74 @@ def detect_sfx(y, sr, spans=None, beats=None, voice_db=None):
         if on:
             ref = float(np.median([c["sharp_bb_db"] for c in on]))
             kept = [c for c in kept if not on_grid(c["t"]) or c["sharp_bb_db"] >= ref + T["beat_louder_db"]]
+    dur_all = len(y) / sr if sr else 0.0
     events = []
+    dropped = {"no_rise": 0, "voice_like": 0, "in_speech": 0, "over_voice_cap": 0}
     i = 0
     while i < len(kept):
         c = kept[i]
         # an onset inside this event's body without a sharp attack is part of it (riser steps,
-        # the flutter of a swell); the body is measured without the next-onset limit
-        body = features(y, sr, c["t"])["dur_s"]
-        while i + 1 < len(kept) and kept[i + 1]["t"] < c["t"] + body and                 kept[i + 1]["sharp_bb_db"] < T["inside_sharp_db"]:
+        # the flutter of a swell); the body is measured without the next-onset limit. Not inside
+        # speech: there the "body" runs on through the words and would swallow an SFX's onset
+        body = 0.0 if c["over_voice"] else features(y, sr, c["t"])["dur_s"]
+        while i + 1 < len(kept) and kept[i + 1]["t"] < c["t"] + body and \
+                kept[i + 1]["sharp_bb_db"] < T["inside_sharp_db"]:
             kept.pop(i + 1)
         nxt = kept[i + 1]["t"] if i + 1 < len(kept) else None
         ev = classify(y, sr, c["t"], nxt, voice_db)
         ev = {"t": _r(c["t"]), **ev, "peak_db": _r(ev["features"]["peak_db"], 1), "over_voice": c["over_voice"]}
+        f = ev["features"]
+        if max(f["peak_db"] - f["pre_db"], f["band_rise_db"]) < T["event_min_rise_db"]:
+            dropped["no_rise"] += 1  # does not stand out of what was sounding: not an event
+            i += 1
+            continue
+        if f["dur_s"] < T["min_low_event_s"] and f["centroid_hz"] < T["min_low_event_hz"]:
+            dropped["no_rise"] += 1  # shorter than one period of its own frequency: a level ripple
+            i += 1
+            continue
+        if ev["class_guess"] in ("unknown", "glitch") and _voice_like(f):
+            dropped["voice_like"] += 1  # tonal syllable bursts the words missed
+            i += 1
+            continue
+        if c["over_voice"]:
+            f = ev["features"]
+            ls = T["speech_local_s"]
+            # the speech level just before the onset (the window after it holds the event itself)
+            _, le = _env(y, sr, max(0.0, c["t"] - ls), max(0.0, c["t"] - 0.005), hop_s=HOP_S)
+            rise = f["mix_peak_db"] - (float(np.median(le)) if len(le) else -120.0)
+            sig = _non_voice(f)
+            ev["rise_over_speech_db"] = _r(rise, 1)
+            ev["non_voice"] = sig
+            if rise < T["event_min_rise_db"] or sig is None or ev["class_guess"] == "unknown":
+                dropped["in_speech"] += 1
+                i += 1
+                continue
+            if sig == "air":
+                # a soft-attack air sound (a whoosh) has no onset of its own inside speech: the
+                # nearest speech onset before it carries it. Its true start is where the air band
+                # (6-12 kHz) first rises event_min_rise_db over the level before the speech onset.
+                t_air = _air_start(y, sr, c["t"], f["dur_s"])
+                if t_air is not None and t_air - c["t"] > T["voice_onset_s"]:
+                    # measure and classify the sound from its own start, not the speech before it
+                    re_ev = classify(y, sr, t_air, nxt, voice_db)
+                    if re_ev["class_guess"] != "unknown":
+                        keep = {k: ev[k] for k in ("over_voice", "rise_over_speech_db", "non_voice")}
+                        ev = {"t": _r(t_air), **re_ev, "peak_db": _r(re_ev["features"]["peak_db"], 1),
+                              **keep, "anchored": "air_band"}
+                    else:
+                        ev["t"] = _r(t_air)
+                        ev["anchored"] = "air_band"
         events.append(ev)
         i += 1
+    if spans:
+        speech_s = sum(b - a for a, b in spans)
+        cap = int(math.floor(T["over_voice_per_s"] * speech_s + 1e-9))
+        ov = sorted((e for e in events if e["over_voice"]), key=lambda e: -e["rise_over_speech_db"])
+        drop = {id(e) for e in ov[cap:]}
+        dropped["over_voice_cap"] = len(drop)
+        events = [e for e in events if id(e) not in drop]
+    if log is not None:
+        log.update(dropped)
     return _group(events)
 
 
@@ -709,57 +878,147 @@ def _get_librosa():
         return None
 
 
-def onset_envelope(y, sr):
-    """(envelope at 10 ms hops, hop_s, method): librosa's onset strength when it imports, else
-    the numpy band flux."""
+def _detrend(d, k=51):
+    """Subtract a 0.5 s running mean (slow level changes such as speech phrases), half-wave."""
+    if len(d) < k:
+        return np.maximum(d - (d.mean() if len(d) else 0.0), 0.0)
+    tr = np.convolve(d, np.ones(k) / k, mode="same")
+    return np.maximum(d - tr, 0.0)
+
+
+def _flux(P, freqs, lo, hi):
+    m = (freqs >= lo) & (freqs < hi)
+    d = np.zeros(len(P))
+    if m.any() and len(P) > 1:
+        L = _db(P[:, m])
+        d[1:] = np.maximum(L[1:] - L[:-1], 0).mean(axis=1)
+    return _detrend(d)
+
+
+def tempo_envelopes(y, sr, spans=None):
+    """({name: onset envelope at 10 ms hops}, hop_s, method): the low (kick) band and the hat band
+    flux, detrended, down-weighted inside speech; plus librosa's onset strength when it imports."""
+    T = THRESHOLDS
     y = _mono(y)
-    lr = _get_librosa()
     hop = max(1, int(round(HOP_S * sr)))
+    P, freqs = _power(y, sr, _pow2(0.04 * sr), hop)
+    envs = {"low": _flux(P, freqs, *T["tempo_low_hz"]), "hat": _flux(P, freqs, *T["tempo_hat_hz"])}
+    names = ["low", "hat"]
+    lr = _get_librosa()
     if lr is not None:
         try:
-            env = lr.onset.onset_strength(y=y.astype(np.float32), sr=sr, hop_length=hop)
-            return np.asarray(env, float), hop / sr, "librosa-onset-acf"
+            e = np.asarray(lr.onset.onset_strength(y=y.astype(np.float32), sr=sr, hop_length=hop), float)
+            e = np.pad(e, (0, max(0, len(P) - len(e))))[: len(P)]
+            envs["librosa"] = _detrend(e)
+            names.append("librosa")
         except Exception:
             pass
-    nov, hop_s = novelty(y, sr)
-    return nov, hop_s, "numpy-flux-acf"
+    if spans:
+        tc = np.arange(len(P)) * hop / sr
+        w = np.ones(len(P))
+        for a, b in speech_regions(spans):
+            w[(tc >= a) & (tc <= b)] = T["tempo_speech_weight"]
+        envs = {k: v * w for k, v in envs.items()}
+    return envs, hop / sr, "tempogram:" + "+".join(names)
 
 
-def tempo(env, hop_s):
-    """(bpm|None, conf, octave_check, period_frames|None) from the envelope autocorrelation."""
+def tempogram(env, hop_s):
+    """Mean of the normalised autocorrelations of tempo_win_s Hann windows (one window when shorter)."""
     T = THRESHOLDS
     n = len(env)
+    win = min(n, int(round(T["tempo_win_s"] / hop_s)))
+    step = max(1, int(round(T["tempo_step_s"] / hop_s)))
+    if win < 4:
+        return np.zeros(max(1, win))
+    w = np.hanning(win)
+    acc, cnt = np.zeros(win), 0
+    for s0 in range(0, n - win + 1, step):
+        e = env[s0:s0 + win]
+        e = (e - e.mean()) * w
+        F = np.fft.rfft(e, 2 * win)
+        a = np.fft.irfft(F * np.conj(F))[:win]
+        if a[0] > 0:
+            acc += a / a[0]
+            cnt += 1
+    return acc / cnt if cnt else acc
+
+
+def grid_fit(env, period):
+    """How much better the beat grid of `period` frames lands on the envelope than the off-beat grid
+    half a period later (best phase), in units of the envelope's std."""
+    n = len(env)
+    sd = float(env.std())
+    if sd <= 0 or period < 2 or n < 2 * period:
+        return 0.0
+    best = -1e9
+    for ph in np.arange(0.0, period, 1.0):
+        on = np.round(np.arange(ph, n - 1, period)).astype(int)
+        off = np.round(np.arange(ph + period / 2, n - 1, period)).astype(int)
+        if len(on) and len(off):
+            best = max(best, float(env[on].mean() - env[off].mean()))
+    return best / sd
+
+
+def tempo(envs, hop_s):
+    """(bpm|None, conf, octave_check, period_frames|None) from the averaged tempogram of the
+    envelopes; half and double tempo are audited on the low band's beat grid."""
+    T = THRESHOLDS
+    if not isinstance(envs, dict):
+        envs = {"low": np.asarray(envs, float)}
+    envs = {k: v for k, v in envs.items() if len(v) and float(np.std(v)) > 0}
+    n = min((len(v) for v in envs.values()), default=0)
     lo_l = int(math.floor(60.0 / T["bpm_range"][1] / hop_s))
     hi_l = int(math.ceil(60.0 / T["bpm_range"][0] / hop_s))
-    if n * hop_s < T["bpm_min_s"] or n < 2 * hi_l + 2:
+    if not envs or n * hop_s < T["bpm_min_s"] or min(n, int(T["tempo_win_s"] / hop_s)) < hi_l + 2:
         return None, 0.0, None, None
-    e = env - env.mean()
-    if not np.any(e):
-        return None, 0.0, None, None
-    F = np.fft.rfft(e, 2 * n)
-    acf = np.fft.irfft(F * np.conj(F))[:n]
-    acf = acf / acf[0] * n / (n - np.arange(n))  # unbiased, normalised
-    lags = np.arange(lo_l, hi_l + 1)
+    tg = np.mean([tempogram(v[:n], hop_s) for v in envs.values()], axis=0)
+    lags = np.arange(lo_l, min(hi_l, len(tg) - 2) + 1)
     bpms = 60.0 / (lags * hop_s)
-    prior = np.exp(-0.5 * (np.log2(bpms / T["bpm_prior_bpm"]) / T["bpm_prior_oct"]) ** 2)
-    score = np.maximum(acf[lags], 0) * prior
-    li = int(lags[int(np.argmax(score))])
-    a, b, c = acf[li - 1], acf[li], acf[li + 1]
-    den = a - 2 * b + c
-    d = 0.5 * (a - c) / den if den < 0 else 0.0
-    period = li + max(-0.5, min(0.5, d))
-    bpm = 60.0 / (period * hop_s)
-    conf = float(max(0.0, min(1.0, b)))
 
-    def cand(p):
-        p_i = int(round(p))
-        if p_i < 1 or p_i >= n:
-            return {"bpm": _r(60.0 / (p * hop_s), 2), "acf": None}
-        return {"bpm": _r(60.0 / (p * hop_s), 2), "acf": _r(acf[p_i], 3)}
-    octave = {"picked": {"bpm": _r(bpm, 2), "acf": _r(b, 3)}, "half_bpm": cand(period * 2),
-              "double_bpm": cand(period / 2),
-              "rule": f"acf x log-normal prior ({T['bpm_prior_bpm']:.0f} BPM, {T['bpm_prior_oct']} octave), "
-                      f"range {T['bpm_range'][0]:.0f}-{T['bpm_range'][1]:.0f} BPM"}
+    def prior(b):
+        return float(np.exp(-0.5 * (math.log2(b / T["bpm_prior_bpm"]) / T["bpm_prior_oct"]) ** 2))
+    def hsum(p):
+        """Harmonic sum: mean tempogram at 1, 2 and 3 periods. A true beat repeats at every multiple;
+        a 2:3 or off-beat sub-period (a dotted rhythm, a half beat) does not."""
+        vals = [float(tg[int(round(k * p))]) for k in (1, 2, 3) if 1 <= int(round(k * p)) < len(tg)]
+        return float(np.mean(vals)) if vals else 0.0
+    prior_v = np.exp(-0.5 * (np.log2(bpms / T["bpm_prior_bpm"]) / T["bpm_prior_oct"]) ** 2)
+    score = np.maximum([hsum(l) for l in lags], 0) * prior_v
+    li = int(lags[int(np.argmax(score))])
+
+    def interp(l):
+        a, b, c = tg[l - 1], tg[l], tg[l + 1]
+        den = a - 2 * b + c
+        d = 0.5 * (a - c) / den if den < 0 else 0.0
+        return l + max(-0.5, min(0.5, d))
+
+    def tg_at(p):
+        k = int(round(p))
+        return float(tg[k]) if 1 <= k < len(tg) else None
+    low = envs.get("low", next(iter(envs.values())))[:n]
+    period = interp(li)
+    cands = {"picked": period, "half_bpm": period * 2, "double_bpm": period / 2}
+    audit = {}
+    for name, p in cands.items():
+        b = 60.0 / (p * hop_s)
+        audit[name] = {"bpm": _r(b, 2), "acf": _r(tg_at(p), 3), "hsum": _r(hsum(p), 3), "prior": _r(prior(b), 3),
+                       "grid_fit": _r(grid_fit(low, p), 3)}
+    choice = "picked"
+    if (audit["picked"]["grid_fit"] or 0) < T["grid_min"]:
+        alts = [k for k in ("half_bpm", "double_bpm")
+                if (audit[k]["grid_fit"] or 0) >= T["grid_min"] and audit[k]["acf"] is not None
+                and T["bpm_range"][0] <= audit[k]["bpm"] <= T["bpm_range"][1]]
+        if alts:
+            choice = max(alts, key=lambda k: max(audit[k]["hsum"], 0) * audit[k]["prior"])
+    if choice != "picked":
+        k = int(round(cands[choice]))
+        period = interp(k) if 1 <= k < len(tg) - 1 else cands[choice]
+    bpm = 60.0 / (period * hop_s)
+    conf = float(max(0.0, min(1.0, hsum(period))))
+    octave = {**audit, "chosen": choice, "bpm": _r(bpm, 2),
+              "rule": f"harmonic sum (1-3 periods) of the windowed acf ({T['tempo_win_s']:.0f} s) x log-normal prior ({T['bpm_prior_bpm']:.0f} BPM, "
+                      f"{T['bpm_prior_oct']} octave), range {T['bpm_range'][0]:.0f}-{T['bpm_range'][1]:.0f} BPM; "
+                      f"half/double tried when the low-band grid fit is under {T['grid_min']}"}
     if conf < T["bpm_min_conf"]:
         return None, conf, octave, None
     return bpm, conf, octave, period
@@ -778,12 +1037,16 @@ def beat_times(env, hop_s, period):
     return (np.arange(best, n, period) * hop_s).tolist()
 
 
-def _music(y, sr, spans=None, cuts=None):
+def _music(y, sr, spans=None, cuts=None, tempo_y=None):
     T = THRESHOLDS
     y = _mono(y)
-    env, hop_s, method = onset_envelope(y, sr)
-    bpm, conf, octave, period = tempo(env, hop_s)
-    beats = beat_times(env, hop_s, period) if period else []
+    tsrc = _mono(tempo_y) if tempo_y is not None else y
+    envs, hop_s, method = tempo_envelopes(tsrc, sr, None if tempo_y is not None else spans)
+    if tempo_y is not None:
+        method = "stem-" + method
+    bpm, conf, octave, period = tempo(envs, hop_s)
+    comb = sum(v / (float(v.std()) or 1.0) for v in envs.values() if len(v))
+    beats = beat_times(comb, hop_s, period) if period else []
     dur = len(y) / sr
     # music-alone frames (10 ms): away from every phrase, or everything when there are no words
     _, lv = _env(y, sr, 0.0, dur, hop_s=HOP_S)
@@ -792,10 +1055,15 @@ def _music(y, sr, spans=None, cuts=None):
     alone = np.ones(len(lv), bool)
     for a, b in phrases:
         alone &= ~((tt > a - T["duck_outer_s"]) & (tt < b + T["duck_outer_s"]))
-    bed_db = float(np.median(lv[alone])) if alone.any() else None
+    # a bed keeps sounding between the onsets, so even its quiet quarter stays up; a train of SFX
+    # over room tone does not (its 25th percentile is the room)
+    bed_db = float(np.percentile(lv[alone], 25)) if alone.any() else None
     # music = a bed that keeps sounding between the onsets; a regular train of SFX over room tone
-    # is periodic too, so without a bed its tempo is only recorded as onset_periodicity_bpm
-    present = bed_db is not None and bed_db >= T["music_bed_min_db"]
+    # is periodic too, so without a bed its tempo is only recorded as onset_periodicity_bpm. With
+    # hardly any music-alone audio (wall-to-wall narration) a found tempo is taken as music.
+    alone_s = float(alone.sum()) * HOP_S
+    present = (bed_db is not None and bed_db >= T["music_bed_min_db"]) or \
+        (alone_s < T["music_alone_min_s"] and bpm is not None)
     periodicity = bpm
     if not present:
         bpm, period, beats = None, None, []
@@ -840,10 +1108,11 @@ def _ducking(y, sr, phrases):
     return float(-np.percentile(ratio, T["duck_percentile"]))
 
 
-def music_profile(y, sr, words=None, cuts=None):
+def music_profile(y, sr, words=None, cuts=None, tempo_y=None):
     """{bpm|None, bpm_conf, energy_per_s, ducking_db, beat_cut_share|None, ...}.
-    words: a words document or [(start_s, end_s)]; cuts: [t_s]."""
-    return _music(y, sr, _spans(words), cuts)[0]
+    words: a words document or [(start_s, end_s)]; cuts: [t_s]; tempo_y: a non-vocal stem to take
+    the tempo from (else the mix, with speech down-weighted)."""
+    return _music(y, sr, _spans(words), cuts, tempo_y)[0]
 
 
 # ---------------------------------------------------------------- voice + loudness
@@ -967,18 +1236,24 @@ def coupled_share(targets, events, window=None):
 
 # ---------------------------------------------------------------- whole analysis
 
-def analyse(y, sr, words=None, cuts=None, moves=None):
-    """sound.json body (without the source block) for audio y (mono or (n, channels))."""
+def analyse(y, sr, words=None, cuts=None, moves=None, stem=None, stems="none"):
+    """sound.json body (without the source block) for audio y (mono or (n, channels)).
+
+    stem: the non-vocal stem (same rate and length), when a separator ran; SFX and tempo are then
+    measured on it, the voice and ducking on the mix. The coupling shares and offsets leave out
+    "unknown" events."""
     not_run, why = [], {}
     spans = _spans(words)
     if spans is None:
         not_run += ["voice_filter", "voice_rate", "ducking", "coupling_words"]
         why.update({k: "no --words" for k in ("voice_filter", "voice_rate", "ducking", "coupling_words")})
-    music, beats = _music(y, sr, spans, cuts)
+    music, beats = _music(y, sr, spans, cuts, stem)
     voice = voice_profile(y, sr, spans)
     vdb = voice_level_db(y, sr, spans)
-    sfx = detect_sfx(y, sr, spans, beats if music["bpm"] is not None else None, vdb)
-    ts = [e["t"] for e in sfx]
+    sfx_dropped = {}
+    sfx = detect_sfx(y if stem is None else stem, sr, spans, beats if music["bpm"] is not None else None, vdb,
+                     log=sfx_dropped)
+    ts = [e["t"] for e in sfx if e["class_guess"] != "unknown"]
     if cuts is None:
         not_run.append("coupling_cuts")
         why["coupling_cuts"] = "no --measure"
@@ -991,8 +1266,8 @@ def analyse(y, sr, words=None, cuts=None, moves=None):
                 "offsets": {"sfx_vs_cuts": sync_offsets(ts, cuts or []),
                             "sfx_vs_moves": sync_offsets(ts, moves or []),
                             "sfx_vs_words": sync_offsets(ts, [a for a, _ in spans] if spans else [])}}
-    return {"sfx": sfx, "music": music, "voice": voice, "coupling": coupling, "labels_are_guesses": True,
-            "not_run": not_run, "not_run_why": why}
+    return {"stems": stems, "sfx": sfx, "sfx_dropped": sfx_dropped, "music": music, "voice": voice, "coupling": coupling,
+            "labels_are_guesses": True, "not_run": not_run, "not_run_why": why}
 
 
 def empty_doc(spans, cuts, moves, reason):
@@ -1006,7 +1281,7 @@ def empty_doc(spans, cuts, moves, reason):
         span = spans[-1][1] - spans[0][0]
         voice["words_per_s"] = _r(len(spans) / span, 3) if span > 0 else None
     empty = stats([])
-    return {"sfx": [], "music": music, "voice": voice,
+    return {"stems": "none", "sfx": [], "music": music, "voice": voice,
             "coupling": {"window_s": THRESHOLDS["couple_window_s"], "cut_with_sfx_share": None,
                          "move_with_sfx_share": None,
                          "offsets": {"sfx_vs_cuts": empty, "sfx_vs_moves": dict(empty), "sfx_vs_words": dict(empty)}},
@@ -1020,6 +1295,67 @@ def require_ffmpeg():
         if not shutil.which(tool):
             raise MissingTool(f"error: {tool} not found on PATH; install ffmpeg "
                               "(winget install Gyan.FFmpeg / brew install ffmpeg / apt install ffmpeg)")
+
+
+DEMUCS_MODEL = "htdemucs"
+
+
+def _torch_hub_dir():
+    import os
+    if os.environ.get("TORCH_HOME"):
+        return Path(os.environ["TORCH_HOME"]) / "hub"
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "torch" / "hub"
+
+
+def demucs_status(model=DEMUCS_MODEL):
+    """("missing" | "not_cached" | "cached", detail). Never imports torch and never downloads:
+    reads the model's signatures from demucs' own remote yaml and looks for their weight files
+    in the torch hub checkpoint cache."""
+    import importlib.util
+    spec = importlib.util.find_spec("demucs")
+    if spec is None or not spec.submodule_search_locations:
+        return "missing", "demucs is not installed"
+    yml = Path(list(spec.submodule_search_locations)[0]) / "remote" / f"{model}.yaml"
+    try:
+        sigs = re.findall(r"\b([0-9a-f]{8})\b", yml.read_text(encoding="utf-8"))
+    except OSError:
+        return "not_cached", f"no {model}.yaml in the demucs package"
+    ck = _torch_hub_dir() / "checkpoints"
+    have = [g for g in sigs if ck.is_dir() and any(ck.glob(f"{g}-*.th"))]
+    if sigs and len(have) == len(sigs):
+        return "cached", str(ck)
+    return "not_cached", f"{model} weights not in the torch hub cache ({len(have)}/{len(sigs)})"
+
+
+def separate_no_vocals(y, sr, allow_download=False, model=DEMUCS_MODEL):
+    """(non-vocal stem at sr, same length | None, "demucs" | "none", reason). Runs demucs two-stem
+    separation in a subprocess, only when the weights are cached or allow_download is set."""
+    import tempfile
+    state, detail = demucs_status(model)
+    if state == "missing" or (state == "not_cached" and not allow_download):
+        return None, "none", detail
+    with tempfile.TemporaryDirectory(prefix="sound_events_") as td:
+        wav = Path(td) / "mix.wav"
+        pcm = (np.clip(np.asarray(y, np.float64), -1, 1) * 32767).astype("<i2")
+        if pcm.ndim == 1:
+            pcm = np.stack([pcm, pcm], axis=1)
+        import wave
+        with wave.open(str(wav), "wb") as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(pcm.tobytes())
+        r = subprocess.run([sys.executable, "-m", "demucs.separate", "--two-stems", "vocals", "-n", model,
+                            "-o", td, str(wav)], capture_output=True)
+        out = Path(td) / model / "mix" / "no_vocals.wav"
+        if r.returncode != 0 or not out.is_file():
+            msg = r.stderr.decode("utf-8", "replace").strip().splitlines()
+            return None, "none", "demucs failed: " + (msg[-1] if msg else "no output")
+        stem = load_audio(out, sr)
+    n = len(y)
+    stem = stem[:n] if len(stem) >= n else np.concatenate([stem, np.zeros((n - len(stem), 2), np.float32)])
+    return stem, "demucs", detail
 
 
 def sha256(path):
@@ -1053,7 +1389,8 @@ def load_audio(src, sr=AR):
     if r.returncode != 0:
         msg = r.stderr.decode("utf-8", "replace").strip().splitlines()
         raise BadInput("ffmpeg could not read the source audio: " + (msg[-1] if msg else "unknown error"))
-    return np.frombuffer(r.stdout, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
+    raw = r.stdout[: len(r.stdout) // 4 * 4]  # whole stereo int16 frames only
+    return np.frombuffer(raw, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
 
 
 def _read_json(path, what):
@@ -1097,7 +1434,7 @@ def move_onsets(doc):
     return out
 
 
-def run(src, out, words_path=None, measure_path=None, motion_path=None):
+def run(src, out, words_path=None, measure_path=None, motion_path=None, allow_download=False):
     src = Path(src)
     if not src.is_file():
         raise BadInput(f"source not found: {src}")
@@ -1119,7 +1456,11 @@ def run(src, out, words_path=None, measure_path=None, motion_path=None):
             body = empty_doc(spans, cuts, moves, "the audio stream decodes to no samples")
         else:
             dur = len(y) / AR
-            body = analyse(y, AR, spans, cuts, moves)
+            stem, stems, why_stem = separate_no_vocals(y, AR, allow_download)
+            body = analyse(y, AR, spans, cuts, moves, stem=stem, stems=stems)
+            if stem is None:
+                body["not_run"].append("stems")
+                body["not_run_why"]["stems"] = why_stem
     h1 = sha256(src)
     if h1 != h0:
         raise RuntimeError("the source changed while it was read (sha256 before and after differ)")
@@ -1140,21 +1481,29 @@ def main(argv=None):
     ap.add_argument("--measure", help="measure.json (its cuts[].t are used)")
     ap.add_argument("--motion", help="motion.json (every moves[].t0 is used)")
     ap.add_argument("--no-librosa", action="store_true", help="use the numpy onset envelope even if librosa imports")
+    ap.add_argument("--allow-download", action="store_true",
+                    help="let demucs download its model when it is not cached (otherwise no stems)")
     a = ap.parse_args(argv)
     global USE_LIBROSA
     if a.no_librosa:
         USE_LIBROSA = False
     try:
         require_ffmpeg()
-        doc = run(a.source, a.out, a.words, a.measure, a.motion)
+        doc = run(a.source, a.out, a.words, a.measure, a.motion, a.allow_download)
     except MissingTool as e:
         print(str(e), file=sys.stderr)
         return 3
     except BadInput as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except OSError as e:
+        print(f"error: cannot read or write a file: {e}", file=sys.stderr)
+        return 2
     except RuntimeError as e:
         print(f"error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:  # never a traceback
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
     kinds = {}
     for e in doc["sfx"]:

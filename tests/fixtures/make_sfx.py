@@ -39,11 +39,11 @@ def _band(x, lo, hi):
     return np.fft.irfft(X, len(x))
 
 
-def whoosh(dur=0.4, db=-18.0, seed=1):
+def whoosh(dur=0.4, db=-18.0, seed=1, lo=400, hi=5000):
     rng = np.random.default_rng(seed)
     n = int(dur * SR)
     t = np.arange(n) / n
-    x = _band(rng.standard_normal(n), 400, 5000) * np.sin(np.pi * t) ** 1.5
+    x = _band(rng.standard_normal(n), lo, hi) * np.sin(np.pi * t) ** 1.5
     return _peak_rms_scale(x, db)
 
 
@@ -95,12 +95,69 @@ def typing(dur=1.0, db=-22.0, rate_hz=9.0, seed=4):
 
 SYNTHS = {"whoosh": whoosh, "hit": hit, "click": click, "riser": riser, "typing": typing}
 
+FORMANTS = ((500.0, 90.0), (1500.0, 120.0), (2500.0, 160.0))
 
-def music_bed(dur_s, bpm, db=-30.0, *, first_beat_s=0.25, duck_spans=(), duck_db=0.0):
-    """Kick on every beat + steady pad, RMS `db` dBFS before ducking. Returns (audio, beat_times)."""
+
+def speech_words(dur_s, seed=7, start_s=0.3, end_pad_s=0.3):
+    """Random word spans [(start_ms, end_ms)]: words 0.25-0.55 s long, gaps 0.06-0.3 s."""
+    rng = np.random.default_rng(seed)
+    out, t = [], start_s
+    while True:
+        d = rng.uniform(0.25, 0.55)
+        if t + d > dur_s - end_pad_s:
+            break
+        out.append((int(round(t * 1000)), int(round((t + d) * 1000))))
+        t += d + rng.uniform(0.06, 0.3)
+    return out
+
+
+def speechlike(dur_s, spans, db=-20.0, seed=8, plosives=True):
+    """Speech-like audio on the word spans: per word 1-3 syllables of a voiced buzz (f0 100-140 Hz,
+    harmonics shaped by three formants) plus formant noise, with a 5 ms broadband plosive click at
+    each word onset. Scaled so the speech RMS (over the word spans) is `db` dBFS."""
+    rng = np.random.default_rng(seed)
+    n = int(dur_s * SR)
+    x = np.zeros(n)
+    for a_ms, b_ms in spans:
+        i0, i1 = int(a_ms * SR / 1000), int(b_ms * SR / 1000)
+        m = i1 - i0
+        t = np.arange(m) / SR
+        f0 = rng.uniform(100, 140) * (1 + 0.08 * np.sin(2 * np.pi * rng.uniform(1, 3) * t))
+        ph = 2 * np.pi * np.cumsum(f0) / SR
+        buzz = np.zeros(m)
+        for k in range(1, 36):
+            fk = k * f0.mean()
+            if fk > 4500:
+                break
+            amp = sum(np.exp(-0.5 * ((fk - F) / bw) ** 2) for F, bw in FORMANTS) + 0.02
+            buzz += amp * np.sin(k * ph)
+        noise = sum(_band(rng.standard_normal(m), F - bw, F + bw) for F, bw in FORMANTS) * 0.3
+        env = np.zeros(m)
+        k_syl = int(rng.integers(1, 4))
+        edges = np.linspace(0, m, k_syl + 1).astype(int)
+        for s0, s1 in zip(edges[:-1], edges[1:]):
+            L = s1 - s0
+            tt = np.arange(L) / max(1, L)
+            env[s0:s1] = np.minimum(1, tt / 0.12) * (1 - tt) ** 0.6 * rng.uniform(0.6, 1.0)
+        word = (buzz / max(np.abs(buzz).max(), 1e-9) + noise) * env
+        x[i0:i1] += word
+    idx = np.concatenate([np.arange(int(a * SR / 1000), int(b * SR / 1000)) for a, b in spans]) if spans else []
+    if len(idx):
+        x *= 10 ** (db / 20.0) / max(np.sqrt((x[idx] ** 2).mean()), 1e-12)
+    if plosives:
+        for a_ms, _ in spans:
+            c = click(db + 2.0, seed=int(a_ms), ms=5.0, lo=300)
+            i0 = int(a_ms * SR / 1000)
+            x[i0:i0 + len(c)] += c[: n - i0]
+    return x
+
+
+def music_bed(dur_s, bpm, db=-30.0, *, first_beat_s=0.25, duck_spans=(), duck_db=0.0, hats=False, pad=True):
+    """Kick on every beat + steady pad (+ hats on the eighths), RMS `db` dBFS before ducking.
+    Returns (audio, beat_times)."""
     n = int(dur_s * SR)
     t = np.arange(n) / SR
-    pad = sum(np.sin(2 * np.pi * f * t) for f in (220.0, 277.18, 329.63)) * 0.08
+    pad = sum(np.sin(2 * np.pi * f * t) for f in (220.0, 277.18, 329.63)) * (0.08 if pad else 0.0)
     kick = np.zeros(n)
     kn = int(0.4 * SR)
     kt = np.arange(kn) / SR
@@ -115,6 +172,16 @@ def music_bed(dur_s, bpm, db=-30.0, *, first_beat_s=0.25, duck_spans=(), duck_db
         beats.append(b)
         b += 60.0 / bpm
     bed = kick + pad
+    if hats:
+        rng = np.random.default_rng(11)
+        hn = int(0.03 * SR)
+        h = _band(rng.standard_normal(hn * 4), 6000, SR / 2)[:hn] * np.exp(-np.arange(hn) / SR / 0.008) * 0.25
+        e = first_beat_s
+        while e < dur_s:
+            i0 = int(round(e * SR))
+            m = min(hn, n - i0)
+            bed[i0:i0 + m] += h[:m]
+            e += 30.0 / bpm
     bed *= 10 ** (db / 20.0) / max(np.sqrt((bed ** 2).mean()), 1e-12)
     if duck_db and duck_spans:
         gain_db = np.zeros(n)
@@ -132,14 +199,18 @@ def music_bed(dur_s, bpm, db=-30.0, *, first_beat_s=0.25, duck_spans=(), duck_db
 
 
 def sfx_audio(dur_s, events, *, voice_spans=(), music_bpm=None, music_db=-30.0, duck_db=0.0,
-              word_db=-12.0, room_db=-60.0, seed=0):
+              word_db=-12.0, room_db=-60.0, seed=0, speech=False, music_kw=None):
     """Stereo float32 track. events: [(t_s, kind) or (t_s, kind, {synth kwargs})];
-    voice_spans: [(start_ms, end_ms)] tone words (make_media.tone_track)."""
-    base = tone_track(int(dur_s * 1000), list(voice_spans), word_db=word_db, room_db=room_db)
+    voice_spans: [(start_ms, end_ms)] tone words (make_media.tone_track), or speech-like words
+    (speechlike) when speech=True; music_kw: extra music_bed arguments (hats, pad)."""
+    base = tone_track(int(dur_s * 1000), [] if speech else list(voice_spans), word_db=word_db, room_db=room_db)
     mono = base[:, 1].astype(np.float64)
     n = len(mono)
     rng = np.random.default_rng(seed)
     mono += rng.standard_normal(n) * 10 ** (NOISE_FLOOR_DB / 20.0)
+    if speech and voice_spans:
+        sp = speechlike(dur_s, list(voice_spans), db=word_db, seed=seed + 8)
+        mono[: len(sp)] += sp[:n]
     for ev in events:
         t0, kind = ev[0], ev[1]
         kw = ev[2] if len(ev) > 2 else {}
@@ -148,7 +219,7 @@ def sfx_audio(dur_s, events, *, voice_spans=(), music_bpm=None, music_db=-30.0, 
         m = min(len(x), n - i0)
         mono[i0:i0 + m] += x[:m]
     if music_bpm:
-        bed, _ = music_bed(dur_s, music_bpm, music_db, duck_spans=voice_spans, duck_db=duck_db)
+        bed, _ = music_bed(dur_s, music_bpm, music_db, duck_spans=voice_spans, duck_db=duck_db, **(music_kw or {}))
         mono[: len(bed)] += bed[:n]
     mono = mono.astype(np.float32)
     return np.stack([mono, mono], axis=1)

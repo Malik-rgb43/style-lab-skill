@@ -83,19 +83,53 @@ def test_voice_onsets_not_sfx(no_librosa):
     words = mm.words_doc(spans)
     with_words = se.analyse(y, SR, words)["sfx"]
     assert [(round(e["t"], 1), e["class_guess"]) for e in with_words] == [(4.0, "hit")]
-    # without the words the tone words do read as onsets: the filter is what removes them
+    # without the words the tone words still read as onsets; they are dropped as voice-like
+    # (tonal, centred on the formant range, no air), so the sfx list stays the hit alone
     without = se.analyse(y, SR, None)
-    assert sum(1 for e in without["sfx"] if any(a / 1000 - 0.03 <= e["t"] <= b / 1000 for a, b in spans)) >= 3
+    assert without["sfx_dropped"]["voice_like"] >= 3
+    assert [(round(e["t"], 1), e["class_guess"]) for e in without["sfx"]] == [(4.0, "hit")]
     assert "voice_filter" in without["not_run"]
 
 
 def test_sfx_over_voice_kept(no_librosa):
-    """A sharp SFX inside a word is still an SFX (and marked over_voice)."""
+    """A thump clearly above a word is still an SFX (marked over_voice, with its signature)."""
     spans = [(500, 2500)]
-    y = mono(ms.sfx_audio(3.5, [(1.5, "hit")], voice_spans=spans))
+    y = mono(ms.sfx_audio(3.5, [(1.5, "hit", {"db": -4.0})], voice_spans=spans))
     sfx = se.analyse(y, SR, mm.words_doc(spans))["sfx"]
     assert [(round(e["t"], 1), e["class_guess"], e["over_voice"]) for e in sfx] == [(1.5, "hit", True)]
-    assert sfx[0]["level_vs_voice_db"] == pytest.approx(2.0, abs=1.5)  # hit -10 dBFS vs voice -12
+    assert sfx[0]["non_voice"] == "thump" and sfx[0]["rise_over_speech_db"] >= 6
+    assert sfx[0]["level_vs_voice_db"] == pytest.approx(8.0, abs=1.5)  # hit -4 dBFS vs voice -12
+    # the same hit at -10 dBFS (only 2 dB over the word) does not stand out of the speech: dropped
+    y2 = mono(ms.sfx_audio(3.5, [(1.5, "hit")], voice_spans=spans))
+    assert se.analyse(y2, SR, mm.words_doc(spans))["sfx"] == []
+
+
+def test_speech_plosives_not_sfx(no_librosa):
+    """Speech-like words (formant buzz + noise, a 5 ms plosive click at every word onset) and one
+    broadband whoosh over a word: the whoosh is the only SFX."""
+    spans = ms.speech_words(8.0, seed=3)
+    target = next(a for a, b in spans if a > 3000 and b - a > 400)  # a word to put the whoosh on
+    t_w = target / 1000 + 0.1
+    a = ms.sfx_audio(8.0, [(t_w, "whoosh", {"db": -8.0, "lo": 400, "hi": 12000})],
+                     voice_spans=spans, speech=True, word_db=-20, seed=3)
+    doc = se.analyse(a, SR, mm.words_doc(spans))
+    got = [(e["t"], e["class_guess"], e["over_voice"]) for e in doc["sfx"]]
+    assert len(got) == 1, (got, doc["sfx_dropped"])
+    assert abs(got[0][0] - t_w) <= 0.05 and got[0][1] == "whoosh" and got[0][2] is True
+    assert doc["sfx"][0]["non_voice"] == "air"
+    # without the whoosh: nothing (the plosives, syllables and voiced bursts are all speech)
+    b = ms.sfx_audio(8.0, [], voice_spans=spans, speech=True, word_db=-20, seed=3)
+    assert se.analyse(b, SR, mm.words_doc(spans))["sfx"] == []
+
+
+def test_over_voice_cap(no_librosa):
+    """At most 0.5 over-voice SFX per second of speech, the strongest kept."""
+    spans = [(500, 2500)]  # 2 s of speech -> 1 allowed
+    ev = [(1.0, "hit", {"db": -6.0}), (1.8, "hit", {"db": 0.0})]
+    y = mono(ms.sfx_audio(3.5, ev, voice_spans=spans))
+    doc = se.analyse(y, SR, mm.words_doc(spans))
+    assert [round(e["t"], 1) for e in doc["sfx"]] == [1.8]
+    assert doc["sfx_dropped"]["over_voice_cap"] == 1
 
 
 # ---------------------------------------------------------------- music
@@ -109,12 +143,27 @@ def test_bpm_estimate(backend, monkeypatch):
     y = mono(ms.sfx_audio(10.0, [], music_bpm=120))
     mp = se.music_profile(y, SR)
     assert 118 <= mp["bpm"] <= 122, mp  # 60 or 240 (half / double) would fail here
-    assert mp["bpm_method"].startswith("librosa" if backend == "librosa" else "numpy")
+    assert mp["bpm_method"].startswith("tempogram")
+    assert ("librosa" in mp["bpm_method"]) == (backend == "librosa")
     oc = mp["bpm_octave_check"]  # the half / double decision is recorded
     assert oc["half_bpm"]["bpm"] == pytest.approx(mp["bpm"] / 2, abs=0.1)
     assert oc["double_bpm"]["bpm"] == pytest.approx(mp["bpm"] * 2, abs=0.2)
     assert "prior" in oc["rule"]
     assert mp["present"] is True and mp["bpm_conf"] >= 0.5
+
+
+@pytest.mark.parametrize("seed", [3, 9])
+def test_bpm_under_speech(seed, no_librosa):
+    """A 128 BPM kick-and-hat bed under speech-like noise at an equal level reads 126-130."""
+    spans = ms.speech_words(20.0, seed=seed)
+    a = ms.sfx_audio(20.0, [], voice_spans=spans, speech=True, word_db=-20, seed=seed, music_bpm=128,
+                     music_db=-20, music_kw={"hats": True, "pad": False})
+    mp = se.music_profile(a, SR, mm.words_doc(spans))
+    assert mp["bpm"] is not None and 126 <= mp["bpm"] <= 130, mp["bpm_octave_check"]
+    assert mp["bpm_octave_check"]["chosen"] in ("picked", "half_bpm", "double_bpm")
+    # speech alone has no tempo
+    b = ms.sfx_audio(20.0, [], voice_spans=spans, speech=True, word_db=-20, seed=seed)
+    assert se.music_profile(b, SR, mm.words_doc(spans))["bpm"] is None
 
 
 def test_bpm_not_120_biased(no_librosa):
@@ -176,7 +225,7 @@ def test_sync_offsets_pure():
     off = se.sync_offsets([c - 2 / 25 for c in cuts], cuts)
     assert off["n"] == 4 and off["median"] == pytest.approx(-0.08, abs=0.001)
     assert se.sync_offsets([], cuts) == {"median": None, "p10": None, "p90": None, "n": 0}
-    assert se.sync_offsets([1.0], []) ["n"] == 0
+    assert se.sync_offsets([1.0], [])["n"] == 0
     assert se.coupled_share(cuts, [0.92, 2.12]) == 0.5 and se.coupled_share([], [1.0]) is None
 
 
@@ -238,6 +287,75 @@ def test_static_or_short_audio(kind, no_librosa):
     assert doc["coupling"]["move_with_sfx_share"] is None
     assert all(v["n"] == 0 for v in doc["coupling"]["offsets"].values())
     json.dumps(doc)  # serialisable: plain floats, no numpy types, no NaN
+
+
+def test_stems_never_download(monkeypatch, tmp_path):
+    """Demucs runs only when its weights are cached (or --allow-download): no subprocess otherwise."""
+    calls = []
+    monkeypatch.setattr(se.subprocess, "run", lambda *a, **k: calls.append(a) or None)
+    monkeypatch.setattr(se, "demucs_status", lambda model=se.DEMUCS_MODEL: ("not_cached", "weights not cached"))
+    stem, kind, why = se.separate_no_vocals(np.zeros((SR, 2), np.float32), SR)
+    assert (stem, kind, calls) == (None, "none", []) and "cached" in why
+    monkeypatch.setattr(se, "demucs_status", lambda model=se.DEMUCS_MODEL: ("missing", "demucs is not installed"))
+    assert se.separate_no_vocals(np.zeros((SR, 2), np.float32), SR, allow_download=True)[1] == "none"
+    assert calls == []
+
+
+def test_demucs_cache_check(monkeypatch, tmp_path):
+    import importlib.util
+    if importlib.util.find_spec("demucs") is None:
+        assert se.demucs_status()[0] == "missing"
+        return
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path / "torch"))
+    assert se.demucs_status()[0] == "not_cached"
+    ck = tmp_path / "torch" / "hub" / "checkpoints"
+    ck.mkdir(parents=True)
+    yml = Path(list(importlib.util.find_spec("demucs").submodule_search_locations)[0]) / "remote" / "htdemucs.yaml"
+    import re
+    for sig in re.findall(r"\b([0-9a-f]{8})\b", yml.read_text(encoding="utf-8")):
+        (ck / f"{sig}-00000000.th").write_bytes(b"")
+    assert se.demucs_status()[0] == "cached"
+
+
+def test_stem_is_used(no_librosa):
+    """With a non-vocal stem, SFX and tempo come from it (stems recorded), voice from the mix."""
+    spans = [(500, 2500)]
+    mix = mono(ms.sfx_audio(3.5, [(1.5, "hit", {"db": -10.0})], voice_spans=spans))
+    stem = mono(ms.sfx_audio(3.5, [(1.5, "hit", {"db": -10.0})]))
+    doc = se.analyse(mix, SR, mm.words_doc(spans), stem=stem, stems="demucs")
+    assert doc["stems"] == "demucs"
+    assert [e["class_guess"] for e in doc["sfx"]] == ["hit"]  # under the word in the mix, clear in the stem
+    assert doc["voice"]["lufs_scope"] == "words"
+
+
+def test_coupling_skips_unknown(monkeypatch, no_librosa):
+    fake = [{"t": 1.0, "class_guess": "unknown"}, {"t": 2.0, "class_guess": "hit"}]
+    monkeypatch.setattr(se, "detect_sfx", lambda *a, **k: [dict(e) for e in fake])
+    doc = se.analyse(np.zeros(5 * SR), SR, None, cuts=[1.0, 2.0])
+    assert doc["coupling"]["cut_with_sfx_share"] == 0.5
+    assert doc["coupling"]["offsets"]["sfx_vs_cuts"]["n"] == 1
+
+
+def test_clean_exits(monkeypatch, tmp_path, capsys):
+    """Write failure -> 2, any other error -> 1, one line and never a traceback; odd byte counts trimmed."""
+    src = ms.make_sfx_track(tmp_path / "a.wav", 1.0, [])
+
+    def boom(*a, **k):
+        raise ValueError("synthetic failure")
+    monkeypatch.setattr(se, "run", boom)
+    assert se.main([str(src), "--out", str(tmp_path / "s.json"), "--no-librosa"]) == 1
+    err = capsys.readouterr().err
+    assert "synthetic failure" in err and "Traceback" not in err and len(err.strip().splitlines()) == 1
+
+    def oserr(*a, **k):
+        raise PermissionError("denied")
+    monkeypatch.setattr(se, "run", oserr)
+    assert se.main([str(src), "--out", str(tmp_path / "s.json"), "--no-librosa"]) == 2
+
+    class R:
+        returncode, stdout, stderr = 0, b"\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00", b""
+    monkeypatch.setattr(se.subprocess, "run", lambda *a, **k: R())
+    assert se.load_audio("x").shape == (2, 2)
 
 
 def test_bad_input(tmp_path):
