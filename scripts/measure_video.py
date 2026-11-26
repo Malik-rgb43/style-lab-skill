@@ -15,9 +15,11 @@ What is measured (all local, free):
     of at least 6 frames of sustained moderate change whose summed distance is above 0.5 and whose
     end frames differ by more than 0.35. Jump cut (kind "jump"): a single-frame spike of the pixel
     change inside one shot (a talking-head jump), >= 5x the median change of the MOVING frames
-    around it and >= 0.03; stepped or frame-rate-converted hold frames do not count. A spike whose
-    changed pixels fit in < 15 % of the frame is a screen repaint: it goes to "ui_changes", never to
-    "cuts". NOTE: "cuts" entries of kind "jump" are EDIT POINTS, not shot boundaries (they do not
+    around it, >= 2x their 90th percentile and >= 0.03; stepped or frame-rate-converted hold frames
+    do not count. A spike whose changed pixels sit in a small (< 15 % of the frame), filled
+    (>= 60 %) box is a screen repaint (a card, toast or dialog appears, disappears or changes): it
+    goes to "ui_changes", never to "cuts", unless the content there is the same subject shifted or
+    scaled (then it is a jump). NOTE: "cuts" entries of kind "jump" are EDIT POINTS, not shot boundaries (they do not
     start a new shot); only hard and gradual cuts split shots.
   - cadence: how many frames are real new pictures (on-twos animation, 24 fps in a 30 fps file).
     Measured only where something moves, so a static clip does not read as "all repeats".
@@ -287,80 +289,142 @@ GRAD_MAX_S = 2.0  # a longer run of change is a slow move or fade, not a transit
 
 
 UI_AREA = 0.15    # a spike whose changed pixels fit in less than this share of the frame may be a repaint
-UI_FILL = 0.6     # ... if they also fill this much of their bounding box (a rectangle)
-JUMP_MARGIN = 2.0  # a jump is at least this many times the largest ordinary moving frame around it
+UI_FILL = 0.6     # ... if they also fill this much of their bounding box (after closing text strokes)
+UI_CLOSE = 2      # closing radius (px) that joins the strokes of a line of text into one block
+CONTENT_DIFF = 24  # gray levels from the surrounding background that count as content
+SAME_LOOK = 0.12   # mean gray difference (0..1) of two size-normalised crops of one subject
+SAME_SHAPE = 0.2   # share of disagreeing content-mask cells of two size-normalised crops of one subject
+MOVED_FRAC = 0.01  # a subject moved when its box centre shifts by this fraction of the frame ...
+SCALED = 1.1       # ... or its size changes by this factor
+JUMP_MARGIN = 2.0  # a jump is at least this many times the 90th percentile of the ordinary moving frames
+JUMP_WIN = 15      # reference window (+-frames) for a jump ...
+JUMP_WIN_WIDE = 30  # ... widened when a dense run of jumps leaves fewer than 4 ordinary frames in it
+JUMP_REF_MIN = 4
 
 
-def _content_bbox(region):
-    """Bounding box (x0, y0, x1, y1) of what differs from the region's border colour, or None."""
-    if region.size == 0:
+def _dilate(mask, r):
+    """Binary dilation by a (2r+1) square, without wrapping at the frame edges."""
+    out = mask.copy()
+    for d in range(1, r + 1):
+        out[:, d:] |= mask[:, :-d]
+        out[:, :-d] |= mask[:, d:]
+    tmp = out.copy()
+    for d in range(1, r + 1):
+        out[d:, :] |= tmp[:-d, :]
+        out[:-d, :] |= tmp[d:, :]
+    return out
+
+
+def _close(mask, r):
+    """Binary closing (dilate, then erode) by a (2r+1) square."""
+    return ~_dilate(~_dilate(mask, r), r) if r > 0 else mask
+
+
+def _bbox(mask):
+    """(y0, y1, x0, x1) of the True pixels, or None."""
+    ys, xs = np.where(mask)
+    if not len(ys):
         return None
-    r = region.astype(np.int16)
-    border = np.concatenate([r[0], r[-1], r[:, 0], r[:, -1]])
-    m = np.abs(r - int(np.median(border))) > 24
-    if m.sum() < 0.01 * m.size:
-        return None
-    ys, xs = np.where(m)
-    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    return int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
 
 
-def _iou(a, b):
-    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
-    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
-    inter = ix * iy
-    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / union if union else 0.0
+def _resample(a, size=16):
+    """Nearest-neighbour resample of a 2-D array to size x size (numpy only)."""
+    h, w = a.shape
+    ys = np.minimum((np.arange(size) + 0.5) * h / size, h - 1).astype(int)
+    xs = np.minimum((np.arange(size) + 0.5) * w / size, w - 1).astype(int)
+    return a[np.ix_(ys, xs)]
+
+
+def _same_subject_moved(prev, cur, box):
+    """True when the content around the changed box is ONE subject that kept its identity (same
+    shape and look once normalised to its own box) but shifted or scaled, measured in fractions of
+    the frame. False when content appeared or disappeared (nothing there before or after), was
+    repainted in place, or something different was drawn: that is a UI change, not a jump."""
+    h, w = prev.shape
+    y0, y1, x0, x1 = box
+    my, mx = max(4, (y1 - y0) // 2), max(4, (x1 - x0) // 2)
+    Y0, Y1, X0, X1 = max(0, y0 - my), min(h, y1 + my), max(0, x0 - mx), min(w, x1 + mx)
+    rp = prev[Y0:Y1, X0:X1].astype(np.int16)
+    rc = cur[Y0:Y1, X0:X1].astype(np.int16)
+    if min(rp.shape) < 3:
+        return False
+    ring = np.concatenate([rp[0], rp[-1], rp[:, 0], rp[:, -1], rc[0], rc[-1], rc[:, 0], rc[:, -1]])
+    bg = int(np.median(ring))
+    mp, mc = np.abs(rp - bg) > CONTENT_DIFF, np.abs(rc - bg) > CONTENT_DIFF
+    floor = 0.01 * mp.size
+    if mp.sum() < floor or mc.sum() < floor:
+        return False  # something appeared or disappeared
+    bp, bc = _bbox(mp), _bbox(mc)
+    hp, wp = bp[1] - bp[0], bp[3] - bp[2]
+    hc, wc = bc[1] - bc[0], bc[3] - bc[2]
+    if abs(math.log((wc / hc) / (wp / hp))) > math.log(1.25):
+        return False  # a different shape, not the same subject scaled
+    scale = math.sqrt((wc * hc) / (wp * hp))
+    dx = ((bc[2] + bc[3]) - (bp[2] + bp[3])) / 2 / w
+    dy = ((bc[0] + bc[1]) - (bp[0] + bp[1])) / 2 / h
+    if abs(math.log(scale)) < math.log(SCALED) and math.hypot(dx, dy) < MOVED_FRAC:
+        return False  # the content stayed in place: repainted
+    look = float(np.abs(_resample(rp[bp[0]:bp[1], bp[2]:bp[3]]) -
+                        _resample(rc[bc[0]:bc[1], bc[2]:bc[3]])).mean()) / 255.0
+    shape = float((_resample(mp[bp[0]:bp[1], bp[2]:bp[3]]) != _resample(mc[bc[0]:bc[1], bc[2]:bc[3]])).mean())
+    return look < SAME_LOOK and shape < SAME_SHAPE
 
 
 def _is_ui_repaint(prev, cur, mask):
-    """A local rectangular repaint: the changed pixels are < 15 % of the frame, fill >= 60 % of their
-    bounding box, and what is drawn inside is not a subject that moved or scaled (its content box is
-    the same before and after, or there is none in either)."""
-    ys, xs = np.where(mask)
-    if not len(ys):
+    """(is_ui, area). A UI change: the changed pixels sit in a box under 15 % of the frame that they
+    fill to >= 60 % (after closing, so a line of text counts as one block), so there is no
+    frame-wide shift or scale, and the content there appeared, disappeared or changed. A subject
+    that kept its identity but shifted or scaled inside that box is a jump, not a UI change."""
+    b = _bbox(mask)
+    if b is None:
         return False, 0.0
-    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    y0, y1, x0, x1 = b
     box = (y1 - y0) * (x1 - x0)
     area = box / mask.size
-    if area >= UI_AREA or len(ys) / box < UI_FILL:
+    if area >= UI_AREA:
         return False, float(area)
-    cp, cc = _content_bbox(prev[y0:y1, x0:x1]), _content_bbox(cur[y0:y1, x0:x1])
-    if cp is None and cc is None:
-        return True, float(area)
-    if cp is None or cc is None:
+    fill = float(_close(mask[y0:y1, x0:x1], UI_CLOSE).sum()) / box
+    if fill < UI_FILL:
         return False, float(area)
-    return _iou(cp, cc) >= 0.5, float(area)
+    return not _same_subject_moved(prev, cur, b), float(area)
 
 
 def _jump_cuts(pix, changed, frames, skip, fps):
     """(jumps, ui_changes): single-frame spikes of the pixel change.
 
-    The reference is the ordinary MOVING frames within +-15 frames (at least 4): not hold frames of
-    stepped or frame-rate-converted footage, not hard/gradual cuts (+-2 frames), and not other
-    candidate spikes (so two jumps ten frames apart do not hide each other). A spike must be >= 5x
-    the median of that reference, >= 0.03, >= 2x its largest frame, and alone (not the edge of
-    sustained motion). A rectangular local repaint is a ui_change; a subject that moved or scaled is a jump."""
+    The reference is the ordinary MOVING frames within +-15 frames (at least 4; widened to +-30
+    frames when a dense run of jumps leaves fewer): not hold frames of stepped or
+    frame-rate-converted footage, not hard/gradual cuts (+-2 frames), and not other candidate
+    spikes (so two jumps ten frames apart do not hide each other). A spike must be >= 5x the median
+    of that reference, >= 0.03, >= 2x its 90th percentile (gesturing footage has ordinary frames
+    of 0.03 and more, so its largest frame would hide real jumps), and alone (not the edge of
+    sustained motion). A local repaint is a ui_change; a subject that moved or scaled is a jump."""
     n = len(pix)
     near_cut = {k + d for k in skip for d in range(-2, 3)}
 
-    def window(i):
-        return [k for k in range(max(1, i - 15), min(n, i + 16))
-                if k != i and k not in near_cut and changed[k] >= REPEAT_FRAC]
+    def window(i, excl=(), r=JUMP_WIN):
+        return [k for k in range(max(1, i - r), min(n, i + r + 1))
+                if k != i and k not in near_cut and k not in excl and changed[k] >= REPEAT_FRAC]
+
+    def ref(i, excl=()):
+        idx = window(i, excl)
+        return idx if len(idx) >= JUMP_REF_MIN else window(i, excl, JUMP_WIN_WIDE)
 
     cand = set()
     for i in range(1, n):
         if pix[i] < JUMP_MIN or i in near_cut:
             continue
-        idx = window(i)
-        if len(idx) >= 4 and pix[i] >= JUMP_X * float(np.median(pix[idx])):
+        idx = ref(i)
+        if len(idx) >= JUMP_REF_MIN and pix[i] >= JUMP_X * float(np.median(pix[idx])):
             cand.add(i)
     jumps, uis = [], []
     for i in sorted(cand):
-        idx = [k for k in window(i) if k not in cand]
-        if len(idx) < 4:
+        idx = ref(i, cand)
+        if len(idx) < JUMP_REF_MIN:
             continue
         win = pix[idx]
-        if pix[i] < JUMP_X * float(np.median(win)) or pix[i] < JUMP_MARGIN * float(win.max()):
+        if pix[i] < JUMP_X * float(np.median(win)) or pix[i] < JUMP_MARGIN * float(np.percentile(win, 90)):
             continue
         nb = max(pix[i - 1] if i > 1 else 0.0, pix[i + 1] if i + 1 < n else 0.0)
         if nb > pix[i] / 3:  # a single-frame spike, not the edge of sustained motion
@@ -368,11 +432,7 @@ def _jump_cuts(pix, changed, frames, skip, fps):
         mask = np.abs(frames[i].astype(np.int16) - frames[i - 1].astype(np.int16)) > CHANGE_PX
         if i >= 2:  # drop what was already changing a frame earlier (steady motion elsewhere)
             prev = np.abs(frames[i - 1].astype(np.int16) - frames[i - 2].astype(np.int16)) > CHANGE_PX
-            dil = prev.copy()
-            for dy in range(-3, 4):
-                for dx in range(-3, 4):
-                    dil |= np.roll(np.roll(prev, dy, axis=0), dx, axis=1)
-            mask &= ~dil
+            mask &= ~_dilate(prev, 3)
         ui, area = _is_ui_repaint(frames[i - 1], frames[i], mask)
         rec = {"t": round(i / fps, 4), "kind": "ui_change" if ui else "jump", "dur_f": 1}
         if ui:

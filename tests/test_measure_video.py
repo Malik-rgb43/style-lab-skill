@@ -409,6 +409,61 @@ def test_punch_in_on_a_small_subject_is_a_jump_not_ui_change(tmp_path):
     assert [c["kind"] for c in cuts] == ["jump"] and ui == []
 
 
+def _moving_bg(n, h=180, w=320):
+    frames = np.full((n, h, w), 40, np.uint8)
+    for i in range(n):
+        x = 20 + 2 * i
+        frames[i, 10:30, x:x + 20] = 220  # something small moves steadily
+    return frames
+
+
+def test_text_appearing_in_a_small_box_is_ui_change():
+    frames = _moving_bg(60)
+    for i in range(30, 60):  # a card with two lines of text appears over a blank area
+        frames[i, 100:150, 150:250] = 200
+        for row in (110, 128):
+            for x in range(158, 240, 8):
+                frames[i, row:row + 8, x:x + 5] = 30
+    cuts, ui = mv.detect_cuts_ex(frames, 25)
+    assert cuts == []
+    assert [u["kind"] for u in ui] == ["ui_change"]
+
+
+def test_dialog_over_content_is_ui_change():
+    frames = _moving_bg(60)
+    frames[:, 90:160, 140:260] = 120  # existing content
+    for i in range(30, 60):  # a dialog with a title and a button pops over it
+        frames[i, 100:150, 150:250] = 235
+        frames[i, 106:114, 160:230] = 30
+        frames[i, 134:144, 215:245] = 90
+    cuts, ui = mv.detect_cuts_ex(frames, 25)
+    assert cuts == [] and [u["kind"] for u in ui] == ["ui_change"]
+
+
+def test_gesturing_head_jump_of_005_is_found(tmp_path):
+    # ordinary frames move a lot (a gesturing speaker); the jump is about 0.05
+    moves = [(0.0, 0.0, "scale", 2.5, 2.5, "linear"), (0.0, 3.0, "y", 0.42, 0.58, "power1.inOut"),
+             (1.5, 1.5, "x", 0.5, 0.58, "linear")]
+    p = _clip(tmp_path, dur_s=3, fps=25, moves=moves)
+    frames, fps = mv.decode_gray(p, 320)
+    cuts, _ = mv.detect_cuts_ex(frames, fps)
+    assert [c["kind"] for c in cuts] == ["jump"] and abs(cuts[0]["t"] - 1.5) <= 1 / 25 + 1e-6
+
+
+def test_dense_jump_montage(tmp_path):
+    moves = [(0.0, 0.0, "scale", 2.0, 2.0, "linear"), (0.0, 2.4, "y", 0.45, 0.55, "linear")]  # head drifts
+    xs = [0.3, 0.42, 0.34, 0.46, 0.38, 0.5, 0.4]
+    for k, x in enumerate(xs[1:], 1):  # a jump every 6 frames at 25 fps
+        t = round(k * 6 / 25, 4)
+        moves.append((t, t, "x", xs[k - 1], x, "linear"))
+    p = _clip(tmp_path, dur_s=2.4, fps=25, moves=moves)
+    frames, fps = mv.decode_gray(p, 320)
+    cuts, ui = mv.detect_cuts_ex(frames, fps)
+    found = [c for c in cuts if c["kind"] == "jump"]
+    assert len(found) >= 4 and ui == []
+    assert all(c["kind"] == "jump" for c in cuts)
+
+
 def test_on_twos_with_still_periods_is_still_on_twos(tmp_path):
     p = _clip(tmp_path, dur_s=4, fps=30, moves=[(0.0, 1.5, "x", 0.2, 0.8, "linear")], stepped=2)
     frames, fps = mv.decode_gray(p, 320)
