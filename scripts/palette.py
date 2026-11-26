@@ -67,7 +67,8 @@ ROLE_TABLE = {
 # accent rule colour; CTA fill = brand | the theme accent | the theme accent.
 # Bars, held per theme by moving L (accent: L first, then hue in 10 degree steps):
 #   text >= 7:1 on background and surface; muted >= 4.5 on background; brand role >= 3:1 on background;
-#   theme accent vs theme brand: deuteranopia dE >= 10 and dE >= 20, and >= 3:1 on background (large text);
+#   theme accent vs theme brand: deuteranopia dE >= 10 and dE >= 20 (the accent fill moves only for this);
+#   labels.accent_text = theme accent moved in L only until 3:1 on background (and still CVD >= 10);
 #   cta, highlight and caption_pill: best label (theme text, background, white or black) >= 4.5.
 # Labels are stored per theme in `labels`; checks report the worse of the two themes.
 
@@ -323,9 +324,8 @@ def _hue_gap(a, b):
     return abs((a - b + 180.0) % 360.0 - 180.0)
 
 
-def _accent_ok(c, brand, bg):
-    return (cvd_delta(c, brand) >= MIN_CVD and delta_e2000(c, brand) >= ONE_ACCENT_DE
-            and contrast(c, bg) >= LARGE_TEXT)
+def _accent_ok(c, brand):
+    return cvd_delta(c, brand) >= MIN_CVD and delta_e2000(c, brand) >= ONE_ACCENT_DE
 
 
 def _resolve(spec, ctx):
@@ -351,7 +351,8 @@ def _theme(i, ctx):
     r["muted"] = _nudge(r["muted"], lambda c: contrast(c, bg) >= MIN_TEXT) or r["muted"]
     r["brand"] = _nudge(r["brand"], lambda c: contrast(c, bg) >= SHAPE_MIN) or r["brand"]
     # the accent is checked against this theme's brand role (which may have moved), not the input colour
-    r["accent"] = _nudge_hue(r["accent"], lambda c: _accent_ok(c, r["brand"], bg)) or r["accent"]
+    # the accent fill only moves for the colour-blind / one-accent rule, never for text contrast
+    r["accent"] = _nudge_hue(r["accent"], lambda c: _accent_ok(c, r["brand"])) or r["accent"]
     if ctx["cta_is_accent"]:
         r["cta"] = r["accent"]
     hl_L = ROLE_TABLE["highlight"][i]
@@ -361,7 +362,10 @@ def _theme(i, ctx):
     for k in ("cta", "highlight", "caption_pill"):
         r[k] = _nudge(r[k], lambda c: contrast(c, best_label(c, r)) >= MIN_TEXT) or r[k]
     labels = {"caption": best_label(r["caption_pill"], r), "cta": best_label(r["cta"], r),
-              "highlight": best_label(r["highlight"], r)}
+              "highlight": best_label(r["highlight"], r),
+              # accent as headline words: the accent moved in L only as far as 3:1 on background needs
+              "accent_text": _nudge(r["accent"], lambda c: contrast(c, bg) >= LARGE_TEXT
+                                    and cvd_delta(c, r["brand"]) >= MIN_CVD) or r["accent"]}
     return r, labels
 
 
@@ -392,7 +396,7 @@ def _check(p, H, brand_C):
         "caption_text": worst(lambda r, lab: contrast(lab["caption"], r["caption_pill"])),
         "cta_text": worst(lambda r, lab: contrast(lab["cta"], r["cta"])),
         "text_on_highlight": worst(lambda r, lab: contrast(lab["highlight"], r["highlight"])),
-        "accent_large_text": worst(lambda r, lab: contrast(r["accent"], r["background"])),
+        "accent_large_text": worst(lambda r, lab: contrast(lab["accent_text"], r["background"])),
         "accent_vs_brand_cvd": worst(lambda r, lab: cvd_delta(r["accent"], r["brand"])),
     }
     c = {k: round(v, 2) for k, v in c.items()}
@@ -443,7 +447,7 @@ def format_proposals(ps):
         lines.append(f"   {'role':<15} {'light':<9} {'dark':<9}")
         for k in ROLE_KEYS:
             lines.append(f"   {k:<15} {p['roles']['light'][k]:<9} {p['roles']['dark'][k]:<9}")
-        for k in ("caption", "cta", "highlight"):
+        for k in ("caption", "cta", "highlight", "accent_text"):
             lines.append(f"   {k + ' label':<15} {p['labels']['light'][k]:<9} {p['labels']['dark'][k]:<9}")
         lines.append("   checks: " + "  ".join(f"{k} {v}" for k, v in c.items() if k != "pass"))
         lines.append("")

@@ -77,7 +77,7 @@ def test_proposals_shape():
         for theme in p["roles"].values():
             assert set(theme) == ROLE_KEYS
         for lab in p["labels"].values():
-            assert set(lab) == {"caption", "cta", "highlight"}
+            assert set(lab) == {"caption", "cta", "highlight", "accent_text"}
         assert set(p["checks"]) == CHECK_KEYS
 
 
@@ -104,12 +104,25 @@ def _verify(p):
         assert ct(lab["caption"], r["caption_pill"]) >= 4.5, where
         assert ct(lab["cta"], r["cta"]) >= 4.5, where
         assert ct(lab["highlight"], r["highlight"]) >= 4.5, where
-        assert ct(r["accent"], r["background"]) >= 3.0, where
+        assert ct(lab["accent_text"], r["background"]) >= 3.0, where
+        assert palette.cvd_delta(lab["accent_text"], r["brand"]) >= 10, where
+        La, Ca, Ha = palette.hex_to_oklch(r["accent"])
+        Lt, Ct, Ht = palette.hex_to_oklch(lab["accent_text"])
+        assert Ct < 0.03 or palette._hue_gap(Ha, Ht) < 6, where  # lightness-only move (gamut may trim chroma)
         assert palette.cvd_delta(r["accent"], r["brand"]) >= 10, where
         assert palette.delta_e2000(r["accent"], r["brand"]) >= 20, where
         for k in ("caption", "cta", "highlight"):
             assert lab[k] in (r["text"], r["background"], "#FFFFFF", "#000000"), where
         assert ct(r["text"], r["background"]) >= c["text_on_background"] - 0.01, where
+
+
+def test_teal_accent_role_stays_owner_orange():
+    p = palette.proposals("#008754")[2]
+    light = p["roles"]["light"]
+    assert palette.delta_e2000(light["accent"], "#F18044") <= 10
+    assert palette.contrast(p["labels"]["light"]["accent_text"], light["background"]) >= 3.0
+    mono = palette.proposals("#008754")[0]["roles"]["light"]["accent"]
+    assert palette.hex_to_oklch(mono)[0] > 0.75  # monochrome light accent stays a light tint
 
 
 @pytest.mark.parametrize("h", FIXTURES)
