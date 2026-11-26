@@ -22,7 +22,9 @@ Commands:
 Exit codes: 0 ok, 1 refused, 2 bad input, 3 missing tool.
 """
 import argparse
+import colorsys
 import json
+import time
 import re
 import shutil
 import subprocess
@@ -41,7 +43,11 @@ CLIP_SECONDS = 4.0
 CLIP_SHORT_SIDE = 720
 DEFAULTS_FILE = Path(__file__).resolve().parent.parent / "assets" / "brand-defaults.json"
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z0-9_\-]+)\s*\}\}")
-_HEX = re.compile(r"#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})(?![0-9a-fA-F])")
+_HEX = re.compile(r"#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{4}|[0-9a-fA-F]{3})(?![0-9a-fA-F])")
+_FUNC = re.compile(r"\b(rgba?|hsla?)\(\s*([^()]*?)\s*\)", re.I)
+NEUTRAL_HEX = {"#ffffff", "#000000"}
+BRAND_ROLES = ("brand", "brand_deep", "accent", "highlight", "tint", "cta")
+STALE_NEW_SECONDS = 3600
 
 
 class MissingTool(Exception):
@@ -68,11 +74,6 @@ def _abs(rel):
     return store.home() / rel
 
 
-def _norm_hex(h):
-    h = h.lower()
-    return "#" + "".join(c * 2 for c in h[1:]) if len(h) == 4 else h
-
-
 def load_index():
     return store.read_json(_index_path(), _empty())
 
@@ -86,34 +87,100 @@ def get(idea_id):
 
 # ---- client-safety check
 
-def _client_literals(client):
-    """(names, logo file names, hexes) that must not appear in a snippet made for this client."""
-    names = [n for n in [client.get("name"), client.get("slug"), *client.get("aliases", [])] if n]
-    logos = [Path(str(x)).name for x in client.get("logo", []) if x]
-    hexes = {_norm_hex(h) for h in client.get("brand_colors", []) if h}
+def _hex6(h):
+    h = h.lower()
+    if len(h) in (3, 4):
+        h = "".join(c * 2 for c in h)
+    return "#" + h[:6]
+
+
+def _func_hex(kind, body):
+    parts = re.split(r"[\s,/]+", body.strip())
+    nums = []
+    for p in parts:
+        m = re.fullmatch(r"(-?[\d.]+)(%|deg)?", p)
+        if not m:
+            return None
+        nums.append((float(m.group(1)), m.group(2)))
+    if len(nums) < 3:
+        return None
+    if kind.startswith("rgb"):
+        r, g, b = [max(0, min(255, round(v * 2.55) if u == "%" else round(v))) for v, u in nums[:3]]
+    else:
+        r, g, b = [round(x * 255) for x in colorsys.hls_to_rgb(
+            (nums[0][0] % 360) / 360, max(0, min(1, nums[2][0] / 100)), max(0, min(1, nums[1][0] / 100)))]
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def colors_in(text):
+    """Every colour literal in the text as lowercase #rrggbb: hex (3/4/6/8 digits), rgb(a), hsl(a)."""
+    found = {_hex6(m) for m in _HEX.findall(text)}
+    for kind, body in _FUNC.findall(text):
+        h = _func_hex(kind.lower(), body)
+        if h:
+            found.add(h)
+    return found
+
+
+def _near(a, b, tol=2):
+    """Same colour within tol per channel (hsl() round trips are not exact)."""
+    return all(abs(int(a[i:i + 2], 16) - int(b[i:i + 2], 16)) <= tol for i in (1, 3, 5))
+
+
+def _brand_hexes(client):
+    """Brand/palette colours of a client; neutrals (background, surface, text, muted) and pure white/black are never in it."""
+    vals = list(client.get("brand_colors", []))
     pal = client.get("palette") or {}
     for theme in (pal.get("roles") or {}).values():
-        hexes.update(_norm_hex(v) for v in theme.values() if isinstance(v, str) and v.startswith("#"))
-    for k in ("brand", "accent", "source_hex"):
-        if isinstance(pal.get(k), str) and pal[k].startswith("#"):
-            hexes.add(_norm_hex(pal[k]))
-    return [n.strip() for n in names if len(n.strip()) >= 2], [x for x in logos if x], hexes
+        vals += [theme.get(r) for r in BRAND_ROLES]
+    vals += [pal.get("brand"), pal.get("accent"), pal.get("source_hex")]
+    out = set()
+    for v in vals:
+        if isinstance(v, str):
+            out |= colors_in(v)
+    return out - NEUTRAL_HEX
 
 
-def check_snippet(text, client):
-    """Raise Refused when the snippet holds the client's name, alias, logo file name or a brand hex."""
-    names, logos, hexes = _client_literals(client)
-    low = text.lower()
-    for n in names:
-        if n.lower() in low:
-            raise Refused(f"the snippet contains the client name {n!r}: make it a parameter")
-    for f in logos:
-        if f.lower() in low:
-            raise Refused(f"the snippet contains the logo file name {f!r}: make it a parameter")
-    for m in _HEX.findall(text):
-        if _norm_hex(m) in hexes:
-            raise Refused(f"the snippet contains the brand colour {m}: make it a parameter "
+def _name_patterns(client):
+    pats = []
+    for n in [client.get("name"), client.get("slug"), *client.get("aliases", [])]:
+        k = re.sub(r"[\s_\-]", "", n or "").lower()
+        if len(k) < 3:
+            continue
+        body = r"[\s_\-]*".join(re.escape(c) for c in k)
+        pats.append((n, re.compile(r"(?<!\w)" + body + r"(?!\w)", re.I)))
+    return pats
+
+
+def check_snippet(texts, client):
+    """Raise Refused when any text holds the client's name, alias, logo file name or a brand colour."""
+    if isinstance(texts, str):
+        texts = [texts]
+    hexes = _brand_hexes(client)
+    logos = [Path(str(x)).name for x in client.get("logo", []) if x]
+    for text in texts:
+        low = text.lower()
+        for n, pat in _name_patterns(client):
+            if pat.search(text):
+                raise Refused(f"the snippet contains the client name {n!r}: make it a parameter")
+        for f in logos:
+            if f.lower() in low:
+                raise Refused(f"the snippet contains the logo file name {f!r}: make it a parameter")
+        hit = {c for c in colors_in(text) if any(_near(c, h) for h in hexes)}
+        if hit:
+            raise Refused(f"the snippet contains the brand colour {sorted(hit)[0]}: make it a parameter "
                           f"(a {{{{brand}}}} placeholder with role brand)")
+
+
+def check_all(texts, made_client=None):
+    """Check against the made-for client (unknown = ValueError) and every other client in the store."""
+    import clients
+    if made_client and not clients.load_client(made_client):
+        raise ValueError(f"unknown client {made_client!r}: add it with clients.py add, or leave --client out")
+    for e in clients.load_registry()["clients"]:
+        c = clients.load_client(e["slug"])
+        if c:
+            check_snippet(texts, c)
 
 
 # ---- params
@@ -146,8 +213,8 @@ def _make_clip(src, dst):
     ff = shutil.which("ffmpeg")
     if not ff:
         raise MissingTool("ffmpeg is missing: install it (winget install Gyan.FFmpeg, or brew install ffmpeg)")
-    vf = (f"scale=w='if(gt(iw,ih),-2,min({CLIP_SHORT_SIDE},iw))':"
-          f"h='if(gt(iw,ih),min({CLIP_SHORT_SIDE},ih),-2)'")
+    vf = (f"scale=w='if(gt(iw,ih),-2,trunc(min({CLIP_SHORT_SIDE},iw)/2)*2)':"
+          f"h='if(gt(iw,ih),trunc(min({CLIP_SHORT_SIDE},ih)/2)*2,-2)'")
     r = subprocess.run([ff, "-y", "-v", "error", "-i", str(src), "-t", str(CLIP_SECONDS), "-vf", vf,
                         "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)],
                        capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -162,42 +229,114 @@ def _folder(idea_id, removed=False):
 
 
 def _write_meta(idea):
-    d = _folder(idea["id"], idea.get("removed"))
+    d = _abs(idea["archive"]) if idea.get("removed") and idea.get("archive") else _folder(idea["id"])
     if d.is_dir():
         store.write_json(d / "meta.json", idea)
 
 
+def _clean_stale():
+    d = store.path("ideas")
+    if not d.is_dir():
+        return
+    for old in d.glob("_new-*"):
+        try:
+            if time.time() - old.stat().st_mtime > STALE_NEW_SECONDS:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            pass
+
+
+def _link_key(i):
+    lk = i.get("link") or {}
+    return (lk.get("style"), lk.get("entry"))
+
+
+def find_by_link(style, entry):
+    for i in load_index()["ideas"]:
+        if not i.get("removed") and i.get("link") and _link_key(i) == (style, entry):
+            return i
+    return None
+
+
+def find(made_for_style=None, client=None, source=None, kind=None):
+    """Live ideas whose made_for style/client (and source, kind) equal the given values."""
+    if client:
+        import clients
+        c = clients.load_client(client)
+        client = c["slug"] if c else client
+    out = []
+    for i in load_index()["ideas"]:
+        mf = i.get("made_for") or {}
+        if i.get("removed"):
+            continue
+        if made_for_style and (mf.get("style") or "").lower() != made_for_style.lower():
+            continue
+        if client and (mf.get("client") or "").lower() != client.lower():
+            continue
+        if (source and i["source"] != source) or (kind and i["kind"] != kind):
+            continue
+        out.append(i)
+    return out
+
+
+def set_approved(idea_id, flag=True):
+    def fn(idx):
+        for i in idx["ideas"]:
+            if i["id"] == idea_id:
+                i["approved"] = bool(flag)
+                _write_meta(i)
+                return
+        raise KeyError(idea_id)
+
+    store.update_json(_index_path(), _empty(), fn)
+
+
 def add(title, kind, beat_types, aspect, snippet_file, params, *, still=None, clip=None, made_for=None,
-        source="studio", tags=(), link=None):
+        source="studio", tags=(), link=None, approved=None):
+    """Add an idea. A link idea (style-link) is updated in place when its (style, entry) is already banked."""
     if not str(title or "").strip():
         raise ValueError("title must not be empty")
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
     if link:
         source = "style-link"
+        if not (link.get("style") and link.get("entry")):
+            raise ValueError("link needs {style, entry, path}")
     if source not in SOURCES:
         raise ValueError(f"source must be one of {', '.join(SOURCES)}")
     if source == "style-link" and not link:
         raise ValueError("a style-link idea needs link={style, entry, path}")
     made = {"style": None, "client": None, "project": None, **(made_for or {})}
     params = _check_params(params or {})
+    for label, f in (("still", still), ("clip", clip)):
+        if f and not Path(f).is_file():
+            raise ValueError(f"{label} file not found: {f}")
+    texts = [str(p["default"]) for p in params.values() if p.get("default") is not None]
 
     tmp = None
+    sp = Path(snippet_file) if snippet_file else None
     if source == "style-link":
-        paths = {"still": still, "clip": clip, "snippet": str(snippet_file) if snippet_file else None}
+        if not sp and not still:
+            raise ValueError("a style-link idea needs a snippet or a still")
+        if sp and not sp.is_file():
+            raise ValueError(f"snippet file not found: {snippet_file}")
+        if sp:
+            texts.append(sp.read_text(encoding="utf-8"))
+        paths = {"still": str(still) if still else None, "clip": str(clip) if clip else None,
+                 "snippet": str(sp) if sp else None}
     else:
-        sp = Path(snippet_file) if snippet_file else None
         if not sp or not sp.is_file():
             raise ValueError(f"snippet file not found: {snippet_file}")
-        text = sp.read_text(encoding="utf-8")
-        if made["client"]:
-            import clients
-            c = clients.load_client(made["client"])
-            if c:
-                made["client"] = c["slug"]
-                check_snippet(text, c)
+        texts.append(sp.read_text(encoding="utf-8"))
+    check_all(texts, made["client"])
+    if made["client"]:
+        import clients
+        made["client"] = clients.load_client(made["client"])["slug"]
+
+    if source != "style-link":
         ideas_dir = store.path("ideas")
         ideas_dir.mkdir(parents=True, exist_ok=True)
+        _clean_stale()
         tmp = Path(tempfile.mkdtemp(prefix="_new-", dir=str(ideas_dir)))
         try:
             shutil.copyfile(sp, tmp / "snippet.html")
@@ -212,21 +351,41 @@ def add(title, kind, beat_types, aspect, snippet_file, params, *, still=None, cl
     box = {}
 
     def fn(idx):
+        fields = {"title": title.strip(), "kind": kind, "beat_types": list(beat_types), "aspect": aspect,
+                  "params": params, "made_for": made, "link": link, "tags": list(tags)}
+        if link:
+            old = next((i for i in idx["ideas"] if not i.get("removed") and i.get("link")
+                        and _link_key(i) == (link["style"], link["entry"])), None)
+            if old:
+                old.update(fields)
+                old.update(paths)
+                if approved is not None:
+                    old["approved"] = bool(approved)
+                _folder(old["id"]).mkdir(parents=True, exist_ok=True)
+                _write_meta(old)
+                box["idea"] = old
+                return
         n = idx["next_id"]
         idx["next_id"] = n + 1
         iid = f"I{n:04d}"
         dest = _folder(iid)
-        if tmp is not None:
-            store._retry_perm(lambda: shutil.move(str(tmp), str(dest)))
-            files = {f.stem: f for f in dest.iterdir() if f.is_file()}
-            p = {k: _rel(files[k]) if k in files else None for k in ("still", "clip", "snippet")}
-        else:
-            dest.mkdir(parents=True, exist_ok=True)
-            p = paths
-        idea = {"id": iid, "title": title.strip(), "kind": kind, "beat_types": list(beat_types),
-                "aspect": aspect, **p, "params": params, "made_for": made, "source": source, "link": link,
-                "approved": False, "offered": 0, "picked": 0, "tags": list(tags), "removed": False}
-        store.write_json(dest / "meta.json", idea)
+        box["dest"] = dest
+        try:
+            if tmp is not None:
+                store._retry_perm(lambda: shutil.move(str(tmp), str(dest)))
+                files = {f.stem: f for f in dest.iterdir() if f.is_file()}
+                p = {k: _rel(files[k]) if k in files else None for k in ("still", "clip", "snippet")}
+            else:
+                dest.mkdir(parents=True, exist_ok=True)
+                p = paths
+            idea = {"id": iid, **{k: fields[k] for k in ("title", "kind", "beat_types", "aspect")}, **p,
+                    "params": params, "made_for": made, "source": source, "link": link,
+                    "approved": bool(approved), "offered": 0, "picked": 0, "by_client": {},
+                    "tags": list(tags), "removed": False}
+            store.write_json(dest / "meta.json", idea)
+        except BaseException:
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
         idx["ideas"].append(idea)
         box["idea"] = idea
 
@@ -235,11 +394,13 @@ def add(title, kind, beat_types, aspect, snippet_file, params, *, still=None, cl
     except BaseException:
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
+        if box.get("dest") is not None and not any(i["id"] == box["dest"].name for i in load_index()["ideas"]):
+            shutil.rmtree(box["dest"], ignore_errors=True)
         raise
     return box["idea"]
 
 
-def _matches(i, kind, beat_types, tags, client, style, aspect):
+def _matches(i, kind, beat_types, tags, client, style, aspect, include_generic=False):
     """Number of matched tags and beat types, or None when a filter rules the idea out."""
     if i.get("removed"):
         return None
@@ -248,7 +409,8 @@ def _matches(i, kind, beat_types, tags, client, style, aspect):
     if aspect and i.get("aspect") != aspect:
         return None
     mf = i.get("made_for") or {}
-    if client and (mf.get("client") or "").lower() != client.lower():
+    mc = (mf.get("client") or "").lower()
+    if client and mc != client.lower() and not (include_generic and not mc):
         return None
     if style and (mf.get("style") or "").lower() != style.lower():
         return None
@@ -263,9 +425,17 @@ def _matches(i, kind, beat_types, tags, client, style, aspect):
     return len(want_t & have_t) + len(want_b & have_b)
 
 
+def _rate(i, client):
+    """(picked+1)/(offered+2) from the client's own counters when it has any, else the global ones."""
+    src = (i.get("by_client") or {}).get(client) if client else None
+    src = src or i
+    return (src.get("picked", 0) + 1) / (src.get("offered", 0) + 2)
+
+
 def search(kind=None, beat_types=(), tags=(), client=None, style=None, aspect=None,
-           exclude_sigs=frozenset(), avoid_client=None, limit=10):
-    """Filters are ANDed (all tags, any beat type); ranked by pick rate (picked+1)/(offered+2), then matches."""
+           exclude_sigs=frozenset(), avoid_client=None, limit=10, include_generic=False):
+    """Filters are ANDed (all tags, any beat type); ranked by pick rate, then matches.
+    include_generic: with `client`, also return ideas made for no client."""
     if client:
         import clients
         c = clients.load_client(client)
@@ -279,23 +449,30 @@ def search(kind=None, beat_types=(), tags=(), client=None, style=None, aspect=No
             raise ValueError(str(e))
     scored = []
     for i in load_index()["ideas"]:
-        m = _matches(i, kind, beat_types, tags, client, style, aspect)
+        m = _matches(i, kind, beat_types, tags, client, style, aspect, include_generic)
         key = f"idea:{i['id']}"
         if m is None or key in exclude_sigs or key in rejected:
             continue
-        rate = (i.get("picked", 0) + 1) / (i.get("offered", 0) + 2)
-        scored.append((-rate, -m, i["id"], i))
+        scored.append((-_rate(i, client), -m, i["id"], i))
     scored.sort(key=lambda t: t[:3])
     return [t[3] for t in scored[:limit]]
 
 
-def _bump(idea_id, field):
+def _bump(idea_id, field, client=None):
+    slug = None
+    if client:
+        import clients
+        c = clients.load_client(client)
+        slug = c["slug"] if c else client
     box = {}
 
     def fn(idx):
         for i in idx["ideas"]:
             if i["id"] == idea_id:
                 i[field] = i.get(field, 0) + 1
+                if slug:
+                    bc = i.setdefault("by_client", {}).setdefault(slug, {"offered": 0, "picked": 0})
+                    bc[field] = bc.get(field, 0) + 1
                 box["n"] = i[field]
                 _write_meta(i)
                 return
@@ -305,12 +482,12 @@ def _bump(idea_id, field):
     return box["n"]
 
 
-def offered(idea_id):
-    return _bump(idea_id, "offered")
+def offered(idea_id, client=None):
+    return _bump(idea_id, "offered", client)
 
 
-def picked(idea_id):
-    return _bump(idea_id, "picked")
+def picked(idea_id, client=None):
+    return _bump(idea_id, "picked", client)
 
 
 def remove(idea_id):
@@ -332,6 +509,7 @@ def remove(idea_id):
                     for k in ("still", "clip", "snippet"):
                         if i.get(k):
                             i[k] = _rel(dest / Path(i[k]).name)
+                i["archive"] = _rel(dest)
                 i["removed"] = True
                 store.write_json(dest / "meta.json", i)
             else:
@@ -356,13 +534,21 @@ def tokens(client, theme):
         pal = client.get("palette")
         if pal and pal.get("roles"):
             roles = pal["roles"].get(theme) or next(iter(pal["roles"].values()))
-    return roles or d["roles"][theme], fonts
+    return (roles if roles is not None else d["roles"][theme]), fonts
 
 
 def render(idea_id, client=None, overrides=None, theme=None):
-    """The snippet with {{name}} replaced by override, client token or default (client: slug/name or dict)."""
+    """The snippet with {{name}} replaced by override, client token or default (client: slug/name or dict).
+    A link idea with no snippet renders as an <img> of its still."""
     idea = get(idea_id)
+    if not idea.get("snippet"):
+        if not idea.get("still"):
+            raise ValueError(f"idea {idea_id} has no snippet and no still to render")
+        still = Path(idea["still"]) if idea["source"] == "style-link" else _abs(idea["still"])
+        return f'<img src="{still.as_posix()}" alt="">\n'
     snip = Path(idea["snippet"]) if idea["source"] == "style-link" else _abs(idea["snippet"])
+    if not snip.is_file():
+        raise ValueError(f"idea {idea_id}: snippet file not found: {snip}")
     text = snip.read_text(encoding="utf-8")
     c = None
     if client:
@@ -384,8 +570,12 @@ def render(idea_id, client=None, overrides=None, theme=None):
         if v is None or v == "":
             role = p.get("role")
             if p["type"] == "color" and role:
+                if role not in roles:
+                    raise ValueError(f"client palette has no role {role!r} (param {name!r})")
                 v = roles[role]
             elif p["type"] == "font" and role:
+                if role not in fonts:
+                    raise ValueError(f"client fonts have no role {role!r} (param {name!r})")
                 v = fonts[role]
             else:
                 v = p.get("default")
@@ -439,7 +629,7 @@ def _main(argv=None):
     a = sub.add_parser("search")
     a.add_argument("--kind"); a.add_argument("--beat-type", action="append", default=[])
     a.add_argument("--tag", action="append", default=[]); a.add_argument("--client"); a.add_argument("--style")
-    a.add_argument("--aspect"); a.add_argument("--avoid-client"); a.add_argument("--limit", type=int, default=10)
+    a.add_argument("--aspect"); a.add_argument("--avoid-client"); a.add_argument("--include-generic", action="store_true"); a.add_argument("--limit", type=int, default=10)
     a.add_argument("--json", action="store_true")
     a = sub.add_parser("show"); a.add_argument("id")
     a = sub.add_parser("render")
@@ -472,7 +662,8 @@ def _main(argv=None):
             return 0
         if args.cmd == "search":
             _print(search(args.kind, args.beat_type, args.tag, args.client, args.style, args.aspect,
-                          avoid_client=args.avoid_client, limit=args.limit), args.json)
+                          avoid_client=args.avoid_client, limit=args.limit,
+                          include_generic=args.include_generic), args.json)
             return 0
         if args.cmd == "show":
             print(json.dumps(get(args.id), ensure_ascii=False, indent=2))

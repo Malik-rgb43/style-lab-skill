@@ -149,3 +149,127 @@ def test_no_network_imports():
     for mod in ("requests", "urllib.request", "http.client", "httpx", "socket", "aiohttp"):
         assert f"import {mod}" not in src
     assert sys.modules  # sanity
+
+
+# ---- fix round 1
+
+def _raises_param(tmp_path, text, params=None, **kw):
+    sn = snippet(tmp_path, text, "x.html")
+    with pytest.raises(ideas.Refused, match="parameter"):
+        ideas.add("t", "b-roll", ["hook"], "9:16", sn, params or {}, **kw)
+
+
+@pytest.mark.parametrize("lit", ["#008754", "#abc", "#008754ff", "#abcd", "rgb(0,135,84)",
+                                 "rgba(0, 135, 84, .5)", "rgb(0 135 84)", "hsl(157, 100%, 26.5%)"])
+def test_literal_forms_refused(home, tmp_path, lit):
+    add_client()
+    cp = home / "clients" / "example-shop" / "client.json"
+    d = json.loads(cp.read_text(encoding="utf-8"))
+    d["brand_colors"].append("#aabbcc")
+    cp.write_text(json.dumps(d), encoding="utf-8")
+    _raises_param(tmp_path, f'<i style="color:{lit}">x</i>', made_for={"client": "example-shop"})
+
+
+def test_literal_in_param_default_and_other_clients(home, tmp_path):
+    add_client()
+    p = {"c": {"type": "color", "default": "#008754", "client_bound": False}}
+    _raises_param(tmp_path, "{{c}}", p)  # no made-for client: every client is checked
+
+
+def test_name_normalised_and_logo(home, tmp_path):
+    add_client()
+    for t in ("<p>EXAMPLE_SHOP</p>", "<p>example shop</p>", "<p>exampleshop</p>"):
+        _raises_param(tmp_path, t)
+    c = home / "clients" / "example-shop" / "client.json"
+    d = json.loads(c.read_text(encoding="utf-8"))
+    d["logo"] = ["C:/x/Brand Logo v2.svg"]
+    d["aliases"] = ["ex"]
+    c.write_text(json.dumps(d), encoding="utf-8")
+    _raises_param(tmp_path, '<img src="assets/brand logo v2.svg">')
+    ok = snippet(tmp_path, "<p>ex</p> <p>shopping</p>", "ok.html")  # short alias and part-words are not names
+    assert ideas.add("t", "b-roll", ["hook"], "9:16", ok, {})["id"]
+
+
+def test_neutrals_not_refused(home, tmp_path):
+    add_client()
+    p = home / "clients" / "example-shop" / "client.json"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    d["palette"]["roles"]["light"]["background"] = "#ffffff"
+    d["palette"]["roles"]["dark"]["text"] = "#000000"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    sn = snippet(tmp_path, "<b style='color:#fff;background:#000'>x</b>", "n.html")
+    assert ideas.add("t", "b-roll", ["hook"], "9:16", sn, {}, made_for={"client": "example-shop"})["id"]
+
+
+def test_unknown_client_exit_2(home, tmp_path):
+    r = run_cli("ideas.py", "add", "t", "--kind", "b-roll", "--aspect", "9:16", "--snippet",
+                snippet(tmp_path), "--client", "ghost")
+    assert r.returncode == 2 and "ghost" in r.stderr
+
+
+def test_style_link_checked_validated_and_idempotent(home, tmp_path):
+    add_client()
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    bad = pack / "b.html"
+    bad.write_text("example-shop", encoding="utf-8")
+    link = {"style": "paper-3d", "entry": "e1", "path": "b.html"}
+    with pytest.raises(ideas.Refused):
+        ideas.add("l", "caption", ["hook"], "9:16", bad, {}, link=link)
+    with pytest.raises(ValueError, match="not found"):
+        ideas.add("l", "caption", ["hook"], "9:16", pack / "none.html", {}, link=link)
+    with pytest.raises(ValueError, match="not found"):
+        ideas.add("l", "caption", ["hook"], "9:16", None, {}, still=pack / "none.png", link=link)
+    good = pack / "g.html"
+    good.write_text("{{t}}", encoding="utf-8")
+    a = ideas.add("l", "caption", ["hook"], "9:16", good, {}, link=link, made_for={"style": "paper-3d"})
+    ideas.picked(a["id"], "example-shop")
+    b = ideas.add("l2", "caption", ["hook"], "9:16", good, {}, link=link, made_for={"style": "paper-3d"},
+                  approved=True)
+    assert b["id"] == a["id"] and b["title"] == "l2" and b["approved"] and b["picked"] == 1
+    assert len(ideas.load_index()["ideas"]) == 1
+    assert ideas.find_by_link("paper-3d", "e1")["id"] == a["id"] and ideas.find_by_link("paper-3d", "zz") is None
+    assert [i["id"] for i in ideas.find(made_for_style="paper-3d")] == [a["id"]]
+    ideas.set_approved(a["id"], False)
+    assert ideas.get(a["id"])["approved"] is False
+
+
+def test_link_without_snippet_renders_still(home, tmp_path):
+    still = tmp_path / "s.png"
+    still.write_bytes(b"x")
+    i = ideas.add("l", "caption", ["hook"], "9:16", None, {}, still=still, link={"style": "s", "entry": "e"})
+    assert "<img" in ideas.render(i["id"])
+    with pytest.raises(ValueError):
+        ideas.add("l", "caption", ["hook"], "9:16", None, {}, link={"style": "s", "entry": "f"})
+
+
+def test_include_generic_and_per_client_counters(home, tmp_path):
+    add_client()
+    a = mk(tmp_path, "a", client="example-shop")
+    g = mk(tmp_path, "g")
+    ids = lambda **k: {i["id"] for i in ideas.search(**k)}  # noqa: E731
+    assert ids(client="example-shop") == {a["id"]}
+    assert ids(client="example-shop", include_generic=True) == {a["id"], g["id"]}
+    ideas.offered(g["id"], "example-shop")
+    ideas.picked(g["id"], "example-shop")
+    got = ideas.get(g["id"])
+    assert got["offered"] == 1 and got["by_client"]["example-shop"] == {"offered": 1, "picked": 1}
+
+
+def test_missing_still_and_missing_role(home, tmp_path):
+    r = run_cli("ideas.py", "add", "t", "--kind", "b-roll", "--aspect", "9:16", "--snippet",
+                snippet(tmp_path), "--still", tmp_path / "nope.png")
+    assert r.returncode == 2 and "still" in r.stderr
+    i = mk(tmp_path)
+    with pytest.raises(ValueError, match="no role"):
+        ideas.render(i["id"], {"theme": "dark", "palette": {"roles": {"dark": {}}}}, {"logo": "x"})
+
+
+def test_failed_add_leaves_no_orphans(home, tmp_path, monkeypatch):
+    sn = snippet(tmp_path)
+    monkeypatch.setattr(ideas.store, "write_json", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
+    with pytest.raises(OSError):
+        ideas.add("t", "b-roll", ["hook"], "9:16", sn, {})
+    monkeypatch.undo()
+    assert not list((home / "ideas").glob("I*")) and not list((home / "ideas").glob("_new-*"))
+    assert ideas.load_index()["ideas"] == []
