@@ -100,3 +100,52 @@ def test_parallel_adds(home):
     assert all(p.wait() == 0 for p in ps)
     ids = [x["id"] for x in reg(home)["lessons"]]
     assert len(ids) == 6 and len(set(ids)) == 6
+
+
+def test_round_is_int(home):
+    assert add("--kind", "quality", "--round", "2").returncode == 0
+    assert reg(home)["lessons"][0]["evidence"][0]["round"] == 2
+    r = add("--kind", "quality", "--round", "two")
+    assert r.returncode == 2
+
+
+def test_scope_edit_survives_removed_style(home, tmp_path):
+    mkstyle(tmp_path)
+    assert add("--target", "סגנון בדיקה", layer="style").returncode == 0
+    assert run_cli("styles.py", "remove", "sgnvn-bdykh").returncode == 0
+    r = run_cli("lessons.py", "edit", "L0001", "scope=intro")
+    assert r.returncode == 0, r.stderr
+    x = reg(home)["lessons"][0]
+    assert x["scope"] == "intro" and x["target"] == "sgnvn-bdykh"
+    r = run_cli("lessons.py", "edit", "L0001", "target=sgnvn-bdykh")
+    assert r.returncode == 1 and "no style" in r.stderr
+
+
+def test_edit_kind_still_validated(home):
+    assert add("--kind", "quality").returncode == 0
+    assert run_cli("lessons.py", "edit", "L0001", "kind=taste").returncode == 0
+    assert reg(home)["lessons"][0]["kind"] == "taste"
+    assert run_cli("lessons.py", "edit", "L0001", "kind=bold").returncode == 1
+    assert add(layer="video").returncode == 0
+    assert run_cli("lessons.py", "edit", "L0002", "kind=taste").returncode == 1
+
+
+def test_edit_layer_only_candidate_or_one_off(home):
+    assert add("--kind", "quality").returncode == 0
+    assert run_cli("lessons.py", "match", "L0001", "--project", "proj-b", "--video", "v2").returncode == 0
+    assert reg(home)["lessons"][0]["status"] == "proposed"
+    r = run_cli("lessons.py", "edit", "L0001", "layer=video")
+    assert r.returncode == 1 and "candidate" in r.stderr
+    assert reg(home)["lessons"][0]["layer"] == "craft"
+    assert add(layer="video").returncode == 0
+    r = run_cli("lessons.py", "edit", "L0002", "layer=craft", "kind=taste")
+    assert r.returncode == 0, r.stderr
+    assert reg(home)["lessons"][1]["status"] == "candidate"
+
+
+def test_reject_refuses_rule(home):
+    assert add("--kind", "quality").returncode == 0
+    assert run_cli("lessons.py", "approve", "L0001").returncode == 0
+    r = run_cli("lessons.py", "reject", "L0001")
+    assert r.returncode == 1 and "use a later retire command for rules" in r.stderr
+    assert reg(home)["lessons"][0]["status"] == "rule"

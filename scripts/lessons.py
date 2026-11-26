@@ -10,16 +10,35 @@ Commands:
     lessons.py list [--status S] [--layer L] [--target T] [--json]
     lessons.py show <id>
     lessons.py edit <id> field=value [...]    (text, measurable, scope, layer, target, kind)
-    lessons.py reject <id> [--reason ..]
+    lessons.py reject <id> [--reason ..]          (not for rules or merged lessons)
+    lessons.py match <id> --project P --video V [--t S] [--round N] [--note ..] [--before ..] [--after ..]
+    lessons.py approve <id>                       (owner yes: candidate/proposed -> rule, then render)
+    lessons.py merge <src> <into>                 (moves evidence; src becomes merged)
+    lessons.py render --layer craft|style|client [--target T]
+    lessons.py settings [auto_promote=true|false]
 
 craft needs --kind and no target; style needs a style target; client needs a client target;
 video has neither (status one-off). Other layers start as candidate.
+
+A lesson becomes proposed when its evidence spans 2 distinct (project, video) pairs or 2 distinct
+rounds. The same (project, video, t, round) is never counted twice. Only `approve` (or
+settings auto_promote=true) makes a rule. Rules are rendered to:
+    craft  -> <store home>/craft-rules.learned.md            (whole file generated)
+    client -> <store home>/clients/<slug>/lessons.md         (whole file generated)
+    style  -> the pack's STYLE.md and the style skill file, only between the markers
+              <!-- style-lab:learned-rules:start --> and <!-- style-lab:learned-rules:end -->;
+              hand text outside them is never changed. Each file is backed up once per day
+              (<file>.bak-YYYYMMDD) before its first write.
 """
 import argparse
+import contextlib
 import datetime as dt
 import json
+import os
 import re
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -29,6 +48,10 @@ LAYERS = ("craft", "style", "client", "video")
 KINDS = ("quality", "taste")
 STATUSES = ("candidate", "proposed", "rule", "rejected", "merged", "one-off")
 EDITABLE = ("text", "measurable", "scope", "layer", "target", "kind")
+START = "<!-- style-lab:learned-rules:start -->"
+END = "<!-- style-lab:learned-rules:end -->"
+LEARNED_HEADING = "## Review-round rules (learned)"
+SETTINGS_DEFAULT = {"auto_promote": False}
 
 
 class _Abort(Exception):
@@ -98,6 +121,16 @@ def _resolve(layer, target, kind):
     return None, None
 
 
+def _check_kind(layer, kind):
+    """Kind rules without touching the target (used when only kind is edited)."""
+    if kind not in (None, *KINDS):
+        raise ValueError(f"kind must be one of {', '.join(KINDS)}")
+    if layer == "craft" and kind is None:
+        raise ValueError("craft lessons need kind quality|taste")
+    if layer != "craft" and kind is not None:
+        raise ValueError(f"kind applies to craft lessons only, not {layer}")
+
+
 def _rejected_match(data, text):
     n = norm(text)
     return [x["id"] for x in data["lessons"] if x["status"] == "rejected" and norm(x["text"]) == n]
@@ -111,9 +144,7 @@ def add(text, measurable, layer, target=None, kind=None, scope="", evidence=None
     def fn(data):
         slug, k = _resolve(layer, target, kind)
         warnings = [f"same text as rejected lesson {i}" for i in _rejected_match(data, text)]
-        e = {"project": ev.get("project", ""), "video": ev.get("video", ""), "t": ev.get("t"),
-             "round": ev.get("round"), "note": ev.get("note", ""), "before": ev.get("before"),
-             "after": ev.get("after"), "added": today()}
+        e = _make_evidence(ev)
         lesson = {"id": f"L{data['next_id']:04d}", "text": text, "measurable": measurable, "layer": layer,
                   "target": slug, "kind": k, "scope": scope, "evidence": [e],
                   "status": "one-off" if layer == "video" else "candidate", "merged_into": None,
@@ -142,6 +173,10 @@ def _edit(data, args):
     for k in ("text", "measurable"):
         if k in new and not new[k].strip():
             return _fail(f"{k} must not be empty")
+    if "layer" in new and x["status"] not in ("candidate", "one-off"):
+        return _fail(f"{x['id']} is {x['status']}: layer can change only on candidate or one-off lessons")
+    if "target" in new and x["status"] == "rule":
+        return _fail(f"{x['id']} is a rule: its target cannot change")
     layer = new.get("layer", x["layer"])
     target = (new["target"] or None) if "target" in new else x["target"]
     kind = (new["kind"] or None) if "kind" in new else x["kind"]
@@ -150,7 +185,11 @@ def _edit(data, args):
     if "layer" in new and "kind" not in new and layer != "craft":
         kind = None
     try:
-        x["target"], x["kind"] = _resolve(layer, target, kind)
+        if "layer" in new or "target" in new:
+            x["target"], x["kind"] = _resolve(layer, target, kind)
+        elif "kind" in new:
+            _check_kind(layer, kind)
+            x["kind"] = kind
     except ValueError as e:
         return _fail(str(e))
     x["layer"] = layer
@@ -170,10 +209,309 @@ def _reject(data, args):
     x = next((i for i in data["lessons"] if i["id"] == args.id), None)
     if not x:
         return _fail(f"no lesson {args.id!r}")
+    if x["status"] == "rule":
+        return _fail(f"{x['id']} is a rule: use a later retire command for rules")
+    if x["status"] == "merged":
+        return _fail(f"{x['id']} is merged into {x['merged_into']}; reject that lesson instead")
     x["status"] = "rejected"
     x["reason"] = args.reason or ""
     x["updated"] = today()
     print(f"rejected {x['id']}")
+
+
+# ---------- evidence, proposal, approval, merge ----------
+
+def _find(data, lesson_id):
+    return next((i for i in data["lessons"] if i["id"] == lesson_id), None)
+
+
+def _make_evidence(ev):
+    rnd = ev.get("round")
+    t = ev.get("t")
+    return {"project": ev.get("project") or "", "video": ev.get("video") or "",
+            "t": None if t in (None, "") else str(t),
+            "round": None if rnd in (None, "") else int(rnd),
+            "note": ev.get("note") or "", "before": ev.get("before"), "after": ev.get("after"),
+            "added": today()}
+
+
+def _ev_key(e):
+    """One note = one (project, video, t, round); recording it twice never counts twice."""
+    return (e.get("project"), e.get("video"), e.get("t"), e.get("round"))
+
+
+def _ready(x):
+    """2+ distinct (project, video) pairs or 2+ distinct rounds."""
+    pairs = {(e.get("project"), e.get("video")) for e in x["evidence"]}
+    rounds = {e.get("round") for e in x["evidence"] if e.get("round") is not None}
+    return len(pairs) >= 2 or len(rounds) >= 2
+
+
+def _not_live(x):
+    if x["status"] == "one-off":
+        return f"{x['id']} is a one-off (video layer): it is kept for history and never becomes a rule"
+    if x["status"] == "merged":
+        return f"{x['id']} is merged into {x['merged_into']}"
+    if x["status"] == "rejected":
+        return f"{x['id']} is rejected"
+    return None
+
+
+def settings():
+    return store.read_json(store.path("settings.json"), dict(SETTINGS_DEFAULT))
+
+
+def _record_match(lesson_id, evidence):
+    out = {}
+
+    def fn(data):
+        x = _find(data, lesson_id)
+        if not x:
+            raise ValueError(f"no lesson {lesson_id!r}")
+        msg = _not_live(x)
+        if msg:
+            raise ValueError(msg)
+        e = _make_evidence(evidence)
+        added = _ev_key(e) not in {_ev_key(i) for i in x["evidence"]}
+        if added:
+            x["evidence"].append(e)
+            x["updated"] = today()
+        if x["status"] == "candidate" and _ready(x):
+            x["status"] = "proposed"
+            x["updated"] = today()
+        out.update(x, added=added)
+
+    store.update_json(registry_path(), _empty(), fn)
+    return out
+
+
+def _auto_promote(lesson, warnings=None):
+    if lesson["status"] == "proposed" and settings().get("auto_promote"):
+        return approve(lesson["id"], warnings)
+    return None
+
+
+def match(lesson_id, evidence, warnings=None):
+    """Add evidence (deduplicated); candidate -> proposed at 2 projects/videos or 2 rounds.
+    With settings auto_promote the lesson is approved at once. Raises ValueError (or the render
+    error of an auto-promotion; the evidence is saved either way)."""
+    out = _record_match(lesson_id, evidence)
+    promoted = _auto_promote(out, warnings)
+    if promoted:
+        out.update(promoted)
+    return out
+
+
+def approve(lesson_id, warnings=None):
+    """Owner yes: candidate/proposed -> rule with the next rule_no of its (layer, target), then render.
+    If rendering fails nothing is saved (the status stays) and the error is raised."""
+    out = {}
+
+    def fn(data):
+        x = _find(data, lesson_id)
+        if not x:
+            raise ValueError(f"no lesson {lesson_id!r}")
+        msg = _not_live(x)
+        if msg:
+            raise ValueError(msg)
+        if x["status"] not in ("candidate", "proposed"):
+            raise ValueError(f"{x['id']} is already a {x['status']}")
+        nos = [i["rule_no"] for i in data["lessons"]
+               if i["layer"] == x["layer"] and i["target"] == x["target"] and i.get("rule_no")]
+        x["rule_no"] = max(nos, default=0) + 1
+        x["status"] = "rule"
+        x["promoted"] = x["updated"] = today()
+        paths = _render(x["layer"], x["target"], data, warnings)  # raises before the registry is written
+        out.update(x, paths=[str(q) for q in paths])
+
+    store.update_json(registry_path(), _empty(), fn)
+    return out
+
+
+def merge(src_id, into_id, warnings=None):
+    """Move src's evidence into into_id (deduplicated); src becomes merged. Raises ValueError."""
+    out = {}
+
+    def fn(data):
+        if src_id == into_id:
+            raise ValueError("a lesson cannot be merged into itself")
+        a, b = _find(data, src_id), _find(data, into_id)
+        for lid, x in ((src_id, a), (into_id, b)):
+            if not x:
+                raise ValueError(f"no lesson {lid!r}")
+        if a["status"] in ("one-off", "rule", "merged"):
+            raise ValueError(f"{src_id} is {a['status']}: it cannot be merged")
+        if b["status"] in ("one-off", "rejected", "merged"):
+            raise ValueError(f"{into_id} is {b['status']}: nothing can be merged into it")
+        keys = {_ev_key(e) for e in b["evidence"]}
+        for e in a["evidence"]:
+            if _ev_key(e) not in keys:
+                b["evidence"].append(e)
+                keys.add(_ev_key(e))
+        a["evidence"] = []
+        a["status"], a["merged_into"] = "merged", into_id
+        if b["status"] == "candidate" and _ready(b):
+            b["status"] = "proposed"
+        a["updated"] = b["updated"] = today()
+        out.update(b)
+
+    store.update_json(registry_path(), _empty(), fn)
+    promoted = _auto_promote(out, warnings)
+    if promoted:
+        out.update(promoted)
+    return out
+
+
+# ---------- rendering ----------
+
+def _clean(text):
+    """One line, and never a marker look-alike."""
+    return " ".join(str(text or "").split()).replace("<!--", "&lt;!--")
+
+
+def rule_line(x):
+    scope = _clean(x.get("scope")).rstrip(". ") or "everywhere"
+    line = (f"{x['rule_no']}. {_clean(x['measurable'])} — {scope}. "
+            f"(evidence: {len(x['evidence'])}, since {x['promoted']}, {x['id']})")
+    if x["layer"] == "craft" and x.get("kind"):
+        line += f" [{x['kind']}]"
+    if x.get("exception_of"):
+        line += f" (exception to {x['exception_of']}: {_clean(x.get('reason'))})"
+    return line
+
+
+def _rule_lines(data, layer, target):
+    rules = [x for x in data["lessons"]
+             if x["status"] == "rule" and x["layer"] == layer and x["target"] == target]
+    return [rule_line(x) for x in sorted(rules, key=lambda x: x["rule_no"])]
+
+
+def _block(lines, nl):
+    return nl.join([START.encode(), *(ln.encode("utf-8") for ln in lines), END.encode()])
+
+
+_HEADING = re.compile(rb"(?mi)^(?:\xef\xbb\xbf)?#{1,6}[ \t][^\n]*review-round rules[^\n]*$")
+
+
+def splice(data: bytes, lines, where="file") -> bytes:
+    """Put the rule block into data; every byte outside the block stays as it is.
+    Existing markers: replace between them. Else insert right after the first heading containing
+    "Review-round rules", else append a learned-rules section. Damaged markers raise ValueError."""
+    nl = b"\r\n" if b"\r\n" in data else b"\n"
+    block = _block(lines, nl)
+    s_b, e_b = START.encode(), END.encode()
+    ns, ne = data.count(s_b), data.count(e_b)
+    if ns or ne:
+        if ns != 1 or ne != 1 or data.index(e_b) < data.index(s_b):
+            raise ValueError(f"learned-rules markers in {where} are damaged (need one start marker, then one "
+                             f"end marker); fix them by hand, nothing was written")
+        i, j = data.index(s_b), data.index(e_b) + len(e_b)
+        return data[:i] + block + data[j:]
+    m = _HEADING.search(data)
+    if m:
+        pos = m.end()
+        if data[pos:pos + 1] == b"\n":
+            return data[:pos + 1] + block + nl + data[pos + 1:]
+        return data[:pos] + nl + block + nl + data[pos:]  # heading is the last line, no newline
+    lead = b"" if not data or data.endswith(b"\n") else nl
+    sep = nl if data else b""
+    return data + lead + sep + LEARNED_HEADING.encode() + nl + nl + block + nl
+
+
+def _backup_once(p):
+    bak = p.with_name(f"{p.name}.bak-{dt.date.today():%Y%m%d}")
+    if p.exists() and not bak.exists():
+        shutil.copy2(p, bak)
+
+
+def _write_bytes(p, data):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        store._retry_perm(lambda: os.replace(tmp, p))
+    finally:
+        if os.path.exists(tmp):
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+
+
+def _commit(plan):
+    """plan = [(path, old bytes or None, new bytes)]. Back up and write each changed file; if a
+    later write fails, put the earlier ones back so nothing is half-written."""
+    done = []
+    try:
+        for p, old, new in plan:
+            if old == new:
+                continue
+            _backup_once(p)
+            _write_bytes(p, new)
+            done.append((p, old))
+    except BaseException:
+        for p, old in reversed(done):
+            with contextlib.suppress(OSError):
+                if old is None:
+                    os.unlink(p)
+                else:
+                    _write_bytes(p, old)
+        raise
+
+
+def _generated(title, lines):
+    body = [f"# {title}", "", "Generated by lessons.py from the lessons registry; edits here are overwritten.",
+            "", START, *lines, END, ""]
+    return "\n".join(body).encode("utf-8")
+
+
+def _read(p):
+    return p.read_bytes() if p.exists() else None
+
+
+def _render(layer, target, data, warnings=None):
+    """Plan every file first, then write. Returns the paths."""
+    lines = _rule_lines(data, layer, target)
+    if layer == "craft":
+        p = store.path("craft-rules.learned.md")
+        _commit([(p, _read(p), _generated("Learned craft rules", lines))])
+        return [p]
+    if layer == "client":
+        if not target:
+            raise ValueError("client rules need a client target")
+        p = store.path("clients", target, "lessons.md")
+        _commit([(p, _read(p), _generated(f"Learned rules for client {target}", lines))])
+        return [p]
+    if layer != "style":
+        raise ValueError(f"{layer} lessons are never rendered")
+    import styles
+    s = styles.find(styles.load_registry(), target or "")
+    if not s:
+        raise ValueError(f"style {target!r} is not in the styles registry")
+    style_md = Path(s["pack"]) / "STYLE.md"
+    if not style_md.is_file():
+        raise FileNotFoundError(f"STYLE.md not found: {style_md} (pack missing or drive not connected); "
+                                f"nothing was written")
+    old = style_md.read_bytes()
+    plan = [(style_md, old, splice(old, lines, style_md))]
+    skill = Path(s["skill"]) if s.get("skill") else None
+    if skill and skill.is_file():
+        sk = skill.read_bytes()
+        plan.append((skill, sk, splice(sk, lines, skill)))
+    else:
+        msg = f"warning: style skill file not found, not updated: {skill or '(none registered)'}"
+        if warnings is None:
+            print(msg, file=sys.stderr)
+        else:
+            warnings.append(msg)
+    _commit(plan)
+    return [p for p, _, _ in plan]
+
+
+def render(layer, target=None, warnings=None) -> Path:
+    """Rewrite the rule list of one layer/target from the registry. Returns the main file."""
+    with store.lock(registry_path()):
+        data = store.read_json(registry_path(), _empty(), _locked=True)
+        return _render(layer, target, data, warnings)[0]
 
 
 def _locked(fn, args):
@@ -224,6 +562,103 @@ def cmd_show(args):
     return 0
 
 
+RENDER_ERRORS = (ValueError, OSError)
+
+
+def _flush(warnings):
+    for w in warnings:
+        print(w, file=sys.stderr)
+
+
+def cmd_match(args):
+    ev = {"project": args.project, "video": args.video, "t": args.t, "round": args.round,
+          "note": args.note, "before": args.before, "after": args.after}
+    try:
+        x = _record_match(args.id, ev)
+    except ValueError as e:
+        return _fail(str(e))
+    if not x["added"]:
+        print(f"{x['id']}: this note is already recorded (same project, video, t, round); not counted again")
+    print(f"{x['id']}: evidence {len(x['evidence'])}, status {x['status']}")
+    warnings = []
+    try:
+        promoted = _auto_promote(x, warnings)
+    except RENDER_ERRORS as e:
+        _flush(warnings)
+        return _fail(f"evidence saved; auto-promote failed, {x['id']} stays proposed: {e}")
+    _flush(warnings)
+    if promoted:
+        print(f"auto-promoted {x['id']} to rule {promoted['rule_no']}; wrote {', '.join(promoted['paths'])}")
+    return 0
+
+
+def cmd_approve(args):
+    warnings = []
+    try:
+        x = approve(args.id, warnings)
+    except RENDER_ERRORS as e:
+        _flush(warnings)
+        return _fail(str(e))
+    _flush(warnings)
+    where = f"{x['layer']} {x['target']}" if x["target"] else x["layer"]
+    print(f"approved {x['id']}: {where} rule {x['rule_no']}; wrote {', '.join(x['paths'])}")
+    return 0
+
+
+def cmd_merge(args):
+    warnings = []
+    try:
+        x = merge(args.src, args.into, warnings)
+    except RENDER_ERRORS as e:
+        _flush(warnings)
+        return _fail(str(e))
+    _flush(warnings)
+    print(f"merged {args.src} into {x['id']}: evidence {len(x['evidence'])}, status {x['status']}")
+    return 0
+
+
+def cmd_render(args):
+    target = args.target
+    try:
+        if args.layer == "craft":
+            if target:
+                raise ValueError("craft rules have no target")
+        elif args.layer == "style":
+            import styles
+            s = styles.find(styles.load_registry(), target or "")
+            if not s:
+                raise ValueError(f"no style {target!r}" if target else "style rules need --target <style>")
+            target = s["slug"]
+        else:
+            import clients
+            c = clients.load_client(target or "")
+            if not c:
+                raise ValueError(f"no client {target!r}" if target else "client rules need --target <client>")
+            target = c["slug"]
+        p = render(args.layer, target)
+    except RENDER_ERRORS as e:
+        return _fail(str(e))
+    print(f"wrote {p}")
+    return 0
+
+
+def cmd_settings(args):
+    if not args.pairs:
+        print(json.dumps(settings(), ensure_ascii=False, indent=2))
+        return 0
+    new = {}
+    for pair in args.pairs:
+        k, _, v = pair.partition("=")
+        if k not in SETTINGS_DEFAULT:
+            return _fail(f"unknown setting {k!r}; known: {', '.join(SETTINGS_DEFAULT)}")
+        if v.lower() not in ("true", "false"):
+            return _fail(f"{k} must be true or false, got {v!r}")
+        new[k] = v.lower() == "true"
+    store.update_json(store.path("settings.json"), dict(SETTINGS_DEFAULT), lambda d: d.update(new))
+    print(", ".join(f"{k}={str(v).lower()}" for k, v in new.items()))
+    return 0
+
+
 def main(argv=None):
     return store.exit_on_lock_timeout(_main, argv)
 
@@ -236,13 +671,22 @@ def _main(argv=None):
     a.add_argument("--layer", required=True, choices=LAYERS); a.add_argument("--target")
     a.add_argument("--kind", choices=KINDS); a.add_argument("--scope", default="")
     a.add_argument("--project", required=True); a.add_argument("--video", required=True)
-    a.add_argument("--t"); a.add_argument("--round"); a.add_argument("--before"); a.add_argument("--after")
+    a.add_argument("--t"); a.add_argument("--round", type=int); a.add_argument("--before"); a.add_argument("--after")
     a = sub.add_parser("list")
     a.add_argument("--status", choices=STATUSES); a.add_argument("--layer", choices=LAYERS)
     a.add_argument("--target"); a.add_argument("--json", action="store_true")
     a = sub.add_parser("show"); a.add_argument("id")
     a = sub.add_parser("edit"); a.add_argument("id"); a.add_argument("pairs", nargs="+")
     a = sub.add_parser("reject"); a.add_argument("id"); a.add_argument("--reason")
+    a = sub.add_parser("match"); a.add_argument("id")
+    a.add_argument("--project", required=True); a.add_argument("--video", required=True)
+    a.add_argument("--t"); a.add_argument("--round", type=int); a.add_argument("--note")
+    a.add_argument("--before"); a.add_argument("--after")
+    a = sub.add_parser("approve"); a.add_argument("id")
+    a = sub.add_parser("merge"); a.add_argument("src"); a.add_argument("into")
+    a = sub.add_parser("render"); a.add_argument("--layer", required=True, choices=("craft", "style", "client"))
+    a.add_argument("--target")
+    a = sub.add_parser("settings"); a.add_argument("pairs", nargs="*")
     args = p.parse_args(argv)
 
     store.print_utf8()
@@ -252,6 +696,10 @@ def _main(argv=None):
         return cmd_list(args)
     if args.cmd == "show":
         return cmd_show(args)
+    simple = {"match": cmd_match, "approve": cmd_approve, "merge": cmd_merge, "render": cmd_render,
+              "settings": cmd_settings}
+    if args.cmd in simple:
+        return simple[args.cmd](args)
     return _locked(_edit if args.cmd == "edit" else _reject, args)
 
 
