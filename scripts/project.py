@@ -11,7 +11,7 @@ Commands:
     project.py close <dir> --final <mp4>
     project.py list [--json]
     project.py blocked <dir> --step plan|frames|motion --beat N [--json]
-    project.py next-set <dir> --step plan|frames|motion --beat N [--owner-ok-more]
+    project.py next-set <dir> --step plan|frames|motion --beat N [--owner-ok-more --owner-words "<owner words>"]
 
 Signatures: sig = "<step>:" + sha1(norm(parts joined by "|"))[:12]. blocked = signatures a new option set for
 that beat and step must not contain: already shown in this project, rejected by the client at that step, and (plan
@@ -25,7 +25,9 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import sys
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,8 +48,21 @@ class _Bad(Exception):
     pass
 
 
+_FOLD = re.compile(r"[-_\u2010-\u2015\u05be\u05f4\"]+")
+
+
+def _part(p):
+    if isinstance(p, bool):
+        return "1" if p else "0"
+    if isinstance(p, float):
+        return f"{p:.2f}"
+    t = unicodedata.normalize("NFC", str(p))
+    t = _FOLD.sub(" ", t)
+    return lessons.norm(t).replace("|", "\\|")
+
+
 def sig(step, *parts):
-    text = "|".join(lessons.norm(str(p)) for p in parts)
+    text = "|".join(_part(p) for p in parts)
     return f"{step}:" + hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
@@ -119,7 +134,8 @@ def init(d, title, clip, style, client=None):
         projs = reg.setdefault("projects", [])
         for e in projs:
             if os.path.normcase(e.get("path", "")) == key:
-                e.update({"title": title, "style": st["slug"], "client": cslug, "updated": _now()})
+                e.update({"title": title, "style": st["slug"], "client": cslug or e.get("client"),
+                          "updated": _now()})
                 out.update(e)
                 return
         pid = store.slugify(title, {e["id"] for e in projs})
@@ -129,6 +145,8 @@ def init(d, title, clip, style, client=None):
         projs.append(e)
         out.update(e)
     store.update_json(_registry_path(), {"version": 1, "projects": []}, go)
+
+    cslug = out.get("client")
 
     def fill(plan):
         if not plan.get("client"):
@@ -188,19 +206,27 @@ def record_shown(d, step, beat, set_no, options):
                 pass  # an idea that is not in the bank must not lose the shown record
 
 
-def next_set(d, step, beat, owner_ok_more=False):
-    out = {}
+def _bad_words(w):
+    return (not isinstance(w, str) or not w.strip()
+            or any(unicodedata.category(c) == "Cf" for c in w))
 
-    def go(data):
-        sets = data.setdefault("sets", {})
-        k = f"{step}:{int(beat)}"
-        n = int(sets.get(k, 0)) + 1
-        if n > MAX_SETS and not owner_ok_more:
-            raise BudgetExceeded(f"הגענו ל־3 סטים נוספים לביט {int(beat)}; לשאול את הבעלים")
-        sets[k] = n
-        out["n"] = n
-    store.update_json(_shown_path(d), _SHOWN_DEFAULT, go)
-    return out["n"]
+
+def next_set(d, step, beat, owner_ok_more=False, owner_words=None):
+    """Next set number for (step, beat). Does not burn the budget: only record_shown counts a set."""
+    if owner_ok_more and _bad_words(owner_words):
+        raise _Bad("--owner-ok-more needs --owner-words with the owner's own message (non-blank, "
+                   "no invisible marks)")
+    beat = int(beat)
+    n = int(store.read_json(_shown_path(d), _SHOWN_DEFAULT).get("sets", {}).get(f"{step}:{beat}", 0)) + 1
+    if n > MAX_SETS:
+        if not owner_ok_more:
+            raise BudgetExceeded(f"הגענו ל־3 סטים נוספים לביט {beat}; לשאול את הבעלים")
+
+        def go(data):
+            data.setdefault("owner_ok_more", []).append(
+                {"beat": beat, "step": step, "words": owner_words.strip(), "at": _now()})
+        store.update_json(_shown_path(d), _SHOWN_DEFAULT, go)
+    return n
 
 
 def _opt_sigs(plan, picked_id):
@@ -217,14 +243,20 @@ def _opt_sigs(plan, picked_id):
 
 
 def _plan_picks(d):
-    """{beat string: option id} of the plan picks in <d>/picks.json (any decided_by)."""
+    """{beat string: (option id, stored sig or None)} of the plan picks in <d>/picks.json (any decided_by)."""
     picks = store.read_json(Path(d) / "picks.json", {})
     plan = picks.get("plan") if isinstance(picks, dict) else None
     out = {}
     for b, v in (plan or {}).items():
         if isinstance(v, dict) and v.get("picked"):
-            out[str(b)] = v["picked"]
+            out[str(b)] = (v["picked"], v.get("sig"))
     return out
+
+
+def _pick_sigs(plan, pick):
+    """The pick's own stored sig first; plan.json's option only when the pick has none."""
+    pid, sg = pick
+    return {sg} if sg else _opt_sigs(plan, pid)
 
 
 def blocked(d, step, beat):
@@ -241,16 +273,16 @@ def blocked(d, step, beat):
     out |= taste.used_sigs(client, step)["rejected"]
     if step == "plan":
         me = store.read_json(Path(d) / "plan.json", {})
-        for b, pid in _plan_picks(d).items():
+        for b, pk in _plan_picks(d).items():
             if b != str(beat):
-                out |= _opt_sigs(me, pid)
+                out |= _pick_sigs(me, pk)
         if client:
             for e in _registry().get("projects", []):
                 if e.get("client") != client or os.path.normcase(e.get("path", "")) == _key(d):
                     continue
                 other = store.read_json(Path(e["path"]) / "plan.json", {})
-                for pid in _plan_picks(e["path"]).values():
-                    out |= _opt_sigs(other, pid)
+                for pk in _plan_picks(e["path"]).values():
+                    out |= _pick_sigs(other, pk)
     return out
 
 
@@ -276,8 +308,15 @@ def _main(argv=None):
             a.add_argument("--json", action="store_true")
         else:
             a.add_argument("--owner-ok-more", action="store_true")
+            a.add_argument("--owner-words")
     args = p.parse_args(argv)
     store.print_utf8()
+    if args.cmd not in ("init", "list"):
+        try:
+            load(args.dir)
+        except KeyError as e:
+            print(e.args[0], file=sys.stderr)
+            return 2
     try:
         if args.cmd == "init":
             e = init(args.dir, args.title, args.clip, args.style, args.client)
@@ -309,15 +348,12 @@ def _main(argv=None):
             else:
                 print("\n".join(b))
         else:
-            print(next_set(args.dir, args.step, args.beat, args.owner_ok_more))
+            print(next_set(args.dir, args.step, args.beat, args.owner_ok_more, args.owner_words))
     except BudgetExceeded as e:
         print(str(e), file=sys.stderr)
         return 1
     except (_Bad, taste._Bad) as e:
         print(str(e), file=sys.stderr)
-        return 2
-    except KeyError as e:
-        print(str(e.args[0]), file=sys.stderr)
         return 2
     return 0
 

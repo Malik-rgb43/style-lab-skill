@@ -85,17 +85,55 @@ def test_own_project_taste_not_blocking(home, tmp_path):
     assert "plan:mine" not in project.blocked(cur, "plan", 3)
 
 
+def fill_sets(d, step, beat, n):
+    for k in range(1, n + 1):
+        project.record_shown(d, step, beat, k, [{"id": f"B{beat}-{k}", "sig": f"{step}:s{k}"}])
+
+
 def test_budget_three_extra_sets(home, tmp_path):
     setup_env(home)
     d = mk(tmp_path, "cur")
-    assert [project.next_set(d, "plan", 3) for _ in range(4)] == [1, 2, 3, 4]
+    assert project.next_set(d, "plan", 3) == 1 and project.next_set(d, "plan", 3) == 1  # not burned
+    fill_sets(d, "plan", 3, 4)
+    assert project.next_set(d, "plan", 4) == 1
     with pytest.raises(project.BudgetExceeded):
         project.next_set(d, "plan", 3)
-    assert project.next_set(d, "plan", 3, owner_ok_more=True) == 5
-    assert project.next_set(d, "plan", 4) == 1 and project.next_set(d, "frames", 3) == 1
+    with pytest.raises(project._Bad):
+        project.next_set(d, "plan", 3, owner_ok_more=True)
+    with pytest.raises(project._Bad):
+        project.next_set(d, "plan", 3, owner_ok_more=True, owner_words="‏ ")
+    assert project.next_set(d, "plan", 3, owner_ok_more=True, owner_words="כן, עוד סט") == 5
+    log_ = json.loads((d / "shown.json").read_text(encoding="utf-8"))["owner_ok_more"]
+    assert log_[0]["beat"] == 3 and log_[0]["step"] == "plan" and log_[0]["words"] == "כן, עוד סט" and log_[0]["at"]
     r = run_cli("project.py", "next-set", d, "--step", "plan", "--beat", 3)
     assert r.returncode == 1 and "לשאול את הבעלים" in r.stderr
-    assert run_cli("project.py", "next-set", d, "--step", "plan", "--beat", 3, "--owner-ok-more").returncode == 0
+    assert run_cli("project.py", "next-set", d, "--step", "plan", "--beat", 3, "--owner-ok-more").returncode == 2
+    assert run_cli("project.py", "next-set", d, "--step", "plan", "--beat", 3, "--owner-ok-more",
+                   "--owner-words", "כן").returncode == 0
+
+
+def test_sig_float_and_punctuation():
+    assert project.sig("motion", "x", 0.15000000000000002) == project.sig("motion", "x", 0.15)
+    assert project.sig("plan", "a", "קופסת־מתנה") == project.sig("plan", "a", "קופסת מתנה")
+    assert project.sig("plan", "a-b", "c_d") == project.sig("plan", "a b", "c d")
+    assert project.sig("plan", True, 3) == project.sig("plan", "1", "3")
+    assert project.sig("plan", "a|b", "c") != project.sig("plan", "a", "b|c")
+
+
+def test_pick_keeps_sig_without_plan_option(home, tmp_path):
+    setup_env(home)
+    cur = mk(tmp_path, "cur")
+    write(cur, "plan.json", {"beats": []})
+    write(cur, "picks.json", {"version": 1, "plan": {"5": {"picked": "B05-p2", "sig": "plan:kept",
+                                                             "decided_by": "owner"}}})
+    assert "plan:kept" in project.blocked(cur, "plan", 3)
+
+
+def test_reinit_keeps_client(home, tmp_path):
+    setup_env(home)
+    d = mk(tmp_path, "cur")
+    project.init(d, "launch", "clip.mp4", "paper-3d")
+    assert project.load(d)["client"] == "example-shop"
 
 
 def test_record_shown_advances_counter(home, tmp_path):
@@ -105,21 +143,6 @@ def test_record_shown_advances_counter(home, tmp_path):
     assert project.next_set(d, "frames", 2) == 4
     items = json.loads((d / "shown.json").read_text(encoding="utf-8"))["items"]
     assert items[0]["id"] == "B02-f3-a" and items[0]["beat"] == 2 and items[0]["set"] == 3
-
-
-def test_taste_sigs_roundtrip(home):
-    setup_env(home)
-    taste.log("example-shop", None, "plan", "B1", ["B2"], "p1", sigs={"picked": "plan:a", "rejected": ["plan:b"]})
-    taste.log("example-shop", None, "plan", "B3", [], "p2")  # old line, no sigs
-    taste.log("example-shop", None, "frames", "F1", [], "p1", sigs={"picked": "frames:z", "rejected": []})
-    u = taste.used_sigs("example-shop", "plan")
-    assert u == {"picked": {"plan:a"}, "rejected": {"plan:b"}}
-    assert taste.used_sigs("example-shop", "plan", exclude_project="p1")["rejected"] == set()
-    assert taste.summary("example-shop")["entries"] == 3
-    r = run_cli("taste.py", "log", "--client", "example-shop", "--step", "motion", "--picked", "M1",
-                "--project", "p", "--sig-picked", "motion:q", "--sig-rejected", "motion:r", "--sig-rejected", "motion:s")
-    assert r.returncode == 0, r.stderr
-    assert taste.used_sigs("example-shop", "motion") == {"picked": {"motion:q"}, "rejected": {"motion:r", "motion:s"}}
 
 
 def test_hebrew_path(home, tmp_path):

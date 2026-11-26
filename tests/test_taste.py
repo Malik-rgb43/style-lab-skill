@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 
+import taste as taste_mod
 from conftest import REPO_ROOT, run_cli
 
 
@@ -92,3 +93,18 @@ def test_summary_last_must_not_be_negative(home):
 def test_feedback_list_empty(home):
     r = run_cli("lessons.py", "feedback", "list")
     assert r.returncode == 0 and "no open items" in r.stdout
+
+
+def test_taste_sigs_roundtrip(home):
+    add_client("example-shop")
+    taste_mod.log("example-shop", None, "plan", "B1", ["B2"], "p1", sigs={"picked": "plan:a", "rejected": ["plan:b"]})
+    taste_mod.log("example-shop", None, "plan", "B3", [], "p2")  # old line, no sigs
+    taste_mod.log("example-shop", None, "frames", "F1", [], "p1", sigs={"picked": "frames:z", "rejected": []})
+    u = taste_mod.used_sigs("example-shop", "plan")
+    assert u == {"picked": {"plan:a"}, "rejected": {"plan:b"}}
+    assert taste_mod.used_sigs("example-shop", "plan", exclude_project="p1")["rejected"] == set()
+    assert taste_mod.summary("example-shop")["entries"] == 3
+    r = run_cli("taste.py", "log", "--client", "example-shop", "--step", "motion", "--picked", "M1",
+                "--project", "p", "--sig-picked", "motion:q", "--sig-rejected", "motion:r", "--sig-rejected", "motion:s")
+    assert r.returncode == 0, r.stderr
+    assert taste_mod.used_sigs("example-shop", "motion") == {"picked": {"motion:q"}, "rejected": {"motion:r", "motion:s"}}
