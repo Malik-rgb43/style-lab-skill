@@ -279,6 +279,51 @@ def word_events(analysis):
     return ev, None
 
 
+def _box_bucket(box):
+    """Text position key: the box centre (box = [x, y, w, h] as fractions of the frame) in 10 % buckets."""
+    try:
+        x, y, w, h = (float(v) for v in box[:4])
+        return f"{int((x + w / 2) * 10)},{int((y + h / 2) * 10)}"
+    except (TypeError, ValueError, IndexError):
+        return "?"
+
+
+def layer_of(type_):
+    """The layer an event type belongs to: word, cut, motion, text, sound or manual."""
+    if type_.startswith("word:"):
+        return "word"
+    if type_ in ("cut", "transition"):
+        return "cut"
+    if type_.startswith("camera:") or type_ == "entrance":
+        return "motion"
+    if type_ == "big_text":
+        return "text"
+    if type_.startswith("sfx:"):
+        return "sound"
+    return "manual"
+
+
+def measured_layers(analysis, words_ok=True):
+    """Set of layers that were really measured for one video (file present and not in its not_run)."""
+    out = {"manual"}
+    m = analysis.get("measure") or {}
+    nr = m.get("not_run") if isinstance(m.get("not_run"), list) else []
+    if isinstance(m.get("cuts"), list) and "cuts" not in nr:
+        out.add("cut")
+    mo = analysis.get("motion") if isinstance(analysis.get("motion"), dict) else None
+    mnr = mo.get("not_run") if mo and isinstance(mo.get("not_run"), list) else []
+    if mo is not None and not ("camera" in mnr and "elements" in mnr):
+        out.add("motion")
+    if (isinstance(m.get("text"), dict) and "text" not in nr) or (mo is not None and "elements" not in mnr):
+        out.add("text")
+    so = analysis.get("sound") if isinstance(analysis.get("sound"), dict) else None
+    if so is not None and "sound" not in (so.get("not_run") if isinstance(so.get("not_run"), list) else []):
+        out.add("sound")
+    if words_ok and word_events(analysis)[1] is None:
+        out.add("word")
+    return out
+
+
 def events(analysis, words=True):
     """Unified, time-sorted event stream [{t, kind, type, src, attrs}] of one analysis.
 
@@ -321,7 +366,7 @@ def events(analysis, words=True):
                     key=lambda b: b["t"]):
         if (_t(b.get("h_pct")) or 0) < BIG_TEXT_PCT:
             continue
-        key = json.dumps(b.get("box"), sort_keys=True)
+        key = _box_bucket(b.get("box"))
         t = float(b["t"])
         new = key not in last or t - last[key] > 1.0
         last[key] = t
@@ -343,6 +388,8 @@ def events(analysis, words=True):
         for k, w in enumerate(word_events(analysis)[0]):
             w["src"] = f"word:{k}"
             ev.append(w)
+    for e in ev:
+        e["layer"] = layer_of(e["type"])
     return sorted(ev, key=lambda e: (e["t"], e["type"], e["src"]))
 
 

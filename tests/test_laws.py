@@ -149,3 +149,34 @@ def test_text_boxes_only_where_no_element(tmp_path):
          "motion": {"elements": [{"id": "e", "t0": 0.9, "h_pct": 12}]}}
     big = [e for e in events(a) if e["type"] == "big_text"]
     assert [e["src"].split(":")[0] for e in big] == ["el", "box"] and big[1]["t"] == 5.0
+
+
+def test_unmeasured_layer_is_skipped_not_zero(tmp_path):
+    for k in range(5):
+        snd = {"sfx": [{"t": 2.3, "class_guess": "whoosh"}]} if k < 3 else None
+        add_video(tmp_path, f"V{k}", sha="%064x" % (k + 1), cuts=(2.0,), sound=snd)
+    doc = laws.build(tmp_path)
+    law = next(l for l in doc["laws"] if l["when"] == "cut" and l["then"] == "sfx:whoosh")
+    assert law["confidence"] == 1.0 and law["support_videos"] == 3 and law["status"] == "rule-candidate"
+
+
+def test_co_occurrence_is_not_a_law():
+    c = lambda t, typ, layer: {"t": t, "type": typ, "src": f"{typ}{t}", "layer": layer}  # noqa: E731
+    streams = {v: [c(1.0, "cut", "cut"), c(1.01, "camera:scale", "motion")] for v in ("a", "b")}
+    ls, co = laws._mine(streams)
+    assert ls == [] and co == [{"a": "camera:scale", "b": "cut", "occurrences": 2, "videos": 2}]
+
+
+def test_zero_duration_uses_stream_extent():
+    streams = {v: [ev(1.0, "X"), ev(1.2, "Y")] for v in ("a", "b")}
+    ls = laws.mine(streams, spans={"a": 0, "b": -3})
+    assert ls and 0 < ls[0]["chance"] <= 1
+
+
+def test_box_merge_by_position():
+    from fingerprint import events
+    boxes = [{"t": 1.0, "box": [0.1, 0.1, 0.3, 0.1], "h_pct": 10},
+             {"t": 1.5, "box": [0.12, 0.11, 0.3, 0.1], "h_pct": 10},      # same bucket, merged
+             {"t": 1.8, "box": [0.1, 0.6, 0.3, 0.1], "h_pct": 10}]       # other place: its own event
+    big = [e for e in events({"measure": {"text": {"boxes": boxes}}}) if e["type"] == "big_text"]
+    assert [e["t"] for e in big] == [1.0, 1.8]

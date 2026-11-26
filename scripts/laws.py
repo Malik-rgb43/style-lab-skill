@@ -17,7 +17,8 @@ Only pairs supported by at least 2 videos with confidence >= 0.3 are written. Ne
 (fingerprint.dedupe). Word laws are skipped, and listed under not_run, when no training video has a
 transcript or the transcripts are in different languages; the visual and sound laws still run.
 
-Output: {schema "laws/1", trained_on, held_out, dupes, window_s, laws, not_run}.
+Output: {schema "laws/1", trained_on, held_out, dupes, window_s, laws, co_occurrences, not_run}.
+A video is skipped for a pair when the layer of X or Y was not measured in it (not a confidence of 0).
 Exit: 0 ok, 2 bad input.
 """
 import argparse
@@ -38,6 +39,7 @@ VIDEO_CONF_MIN = 0.3      # a video supports a law only if its own confidence is
 LIST_MIN_VIDEOS = 2
 LIST_MIN_CONFIDENCE = 0.3
 LIFT_CAP = 999.0
+CO_S = 0.04              # lag-0: events of different layers closer than this are one moment (1 frame)
 
 
 def _union_len(intervals, lo, hi):
@@ -66,7 +68,9 @@ def _match(xs, ys, window_s):
         while j < len(ys) and yt[j] <= x["t"] + window_s + 1e-9:
             y = ys[j]
             lag = y["t"] - x["t"]
-            ok = j not in used and y.get("src") != x.get("src") and (lag > 1e-6 or x["type"] < y["type"])
+            same_moment = lag < CO_S and y["layer"] != x["layer"]     # a co-occurrence, not a law
+            ok = (j not in used and y.get("src") != x.get("src") and not same_moment
+                  and (lag > 1e-6 or x["type"] < y["type"]))
             if ok:
                 used.add(j)
                 lags.append(max(0.0, lag))
@@ -75,8 +79,16 @@ def _match(xs, ys, window_s):
     return lags
 
 
-def mine(streams, window_s=WINDOW_S, spans=None):
-    """Laws from {video id: events}; spans {video id: duration_s} (default: the stream's own extent).
+def mine(streams, window_s=WINDOW_S, spans=None, layers=None):
+    return _mine(streams, window_s, spans, layers)[0]
+
+
+def _mine(streams, window_s=WINDOW_S, spans=None, layers=None):
+    """(laws, co_occurrences) from {video id: events}; spans {video id: duration_s} (default: the stream's
+    own extent, also when a duration is 0 or less); layers {video id: set of measured layers}: a video is
+    skipped for a pair when the layer of X or of Y was not measured in it (default: all measured).
+    co_occurrences [{a, b, occurrences, videos}] are lag-0 pairs of different layers (a cut and a camera
+    move, a manual and an automatic event within one frame): one moment, not a rule.
 
     Per video and (X, Y) pair, X and Y are matched one-to-one (_match); the video's confidence is
     matched X / all X. Law = {when, then, anchor, lag, support_videos, occurrences, followed, confidence,
@@ -89,19 +101,28 @@ def mine(streams, window_s=WINDOW_S, spans=None):
       status             "rule-candidate" with support >= 3, confidence >= 0.6 and lift >= LIFT_MIN"""
     per = {}        # (x, y) -> {vid: (n_x, n_matched, chance)}
     lags_all = {}   # (x, y) -> [lags of videos that support]  (filled below)
-    raw_lags = {}
+    raw_lags, co = {}, {}
     all_types = {e["type"] for evs in streams.values() for e in evs if e.get("type")}
     for vid, evs in streams.items():
-        evs = sorted((dict(e, src=e.get("src", f"#{k}")) for k, e in enumerate(evs)
-                      if fp._num(e.get("t")) and e.get("type")), key=lambda e: (e["t"], e["type"], e["src"]))
+        evs = sorted((dict(e, src=e.get("src", f"#{k}"), layer=e.get("layer") or fp.layer_of(e["type"]))
+                      for k, e in enumerate(evs) if fp._num(e.get("t")) and e.get("type")),
+                     key=lambda e: (e["t"], e["type"], e["src"]))
         if not evs:
             continue
-        lo = 0.0
-        hi = float(spans[vid]) if spans and fp._num(spans.get(vid)) and spans[vid] > 0 else \
-            max(evs[-1]["t"] - evs[0]["t"], window_s)
-        if not (spans and fp._num(spans.get(vid))):
+        if spans and fp._num(spans.get(vid)) and spans[vid] > 0:
+            lo, hi = 0.0, float(spans[vid])
+        else:
             lo = evs[0]["t"]
-            hi = lo + hi
+            hi = lo + max(evs[-1]["t"] - evs[0]["t"], window_s)
+        ok_layers = layers.get(vid) if layers is not None else None
+        for a_i, a in enumerate(evs):         # co-occurrences: one moment seen by two layers
+            for b in evs[a_i + 1:]:
+                if b["t"] - a["t"] >= CO_S:
+                    break
+                if a["layer"] != b["layer"] and a["src"] != b["src"] and a["type"] != b["type"] and (
+                        ok_layers is None or (a["layer"] in ok_layers and b["layer"] in ok_layers)):
+                    key = tuple(sorted((a["type"], b["type"])))
+                    co.setdefault(key, {})[vid] = co.get(key, {}).get(vid, 0) + 1
         by = {}
         for e in evs:
             by.setdefault(e["type"], []).append(e)
@@ -111,6 +132,9 @@ def mine(streams, window_s=WINDOW_S, spans=None):
         for x, xs in by.items():
             for y in all_types:
                 if x == y:
+                    continue
+                if ok_layers is not None and not (by[x][0]["layer"] in ok_layers and
+                                                  fp.layer_of(y) in ok_layers):
                     continue
                 lags = _match(xs, by.get(y, []), window_s)
                 per.setdefault((x, y), {})[vid] = (len(xs), len(lags), min(1.0, cover.get(y, 0.0)))
@@ -136,7 +160,9 @@ def mine(streams, window_s=WINDOW_S, spans=None):
                      "status": "rule-candidate" if rule else "option"})
     laws.sort(key=lambda l: (l["status"] != "rule-candidate", -l["support_videos"], -l["confidence"],
                              l["when"], l["then"]))
-    return laws
+    cos = [{"a": a, "b": b, "occurrences": sum(v.values()), "videos": len(v)}
+           for (a, b), v in sorted(co.items()) if len(v) >= LIST_MIN_VIDEOS]
+    return laws, cos
 
 
 def build(pack, train=None, exclude=None, window_s=WINDOW_S):
@@ -144,8 +170,10 @@ def build(pack, train=None, exclude=None, window_s=WINDOW_S):
     a = ctx["analyses"]
     streams = {i: fp.events(a[i], words=ctx["word_ok"]) for i in ctx["trained"]}
     spans = {i: fp._dur(a[i]) for i in ctx["trained"]}
+    layers = {i: fp.measured_layers(a[i], ctx["word_ok"]) for i in ctx["trained"]}
+    lw, co = _mine(streams, window_s, spans, layers)
     return {"schema": SCHEMA, "trained_on": ctx["trained"], "held_out": ctx["held_out"], "dupes": ctx["dupes"],
-            "window_s": window_s, "laws": mine(streams, window_s, spans), "not_run": ctx["not_run"]}
+            "window_s": window_s, "laws": lw, "co_occurrences": co, "not_run": ctx["not_run"]}
 
 
 def main(argv=None):
