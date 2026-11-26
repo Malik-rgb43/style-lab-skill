@@ -98,12 +98,30 @@ def load_analysis(d):
     sj = _read(d / "source.json", None)
     if isinstance(sj, dict) and isinstance(sj.get("source"), str):
         src = sj["source"]
-    manual = _read(d / "events.manual.json", [])
+    manual = []
+    if (d / "events.manual.json").exists():
+        manual = _read(d / "events.manual.json", None)
+        if not isinstance(manual, list):
+            raise BadInput(f"{d.name}: events.manual.json is not a list")
+        for k, e in enumerate(manual):
+            why = None
+            if not isinstance(e, dict):
+                why = "not an object"
+            elif not _num(e.get("t")):
+                why = "t must be a number"
+            elif not (isinstance(e.get("type"), str) and e["type"].strip()):
+                why = "type must be a non-empty string"
+            elif "attrs" in e and e["attrs"] is not None and not isinstance(e["attrs"], dict):
+                why = "attrs must be an object"
+            elif "label" in e and e["label"] is not None and not isinstance(e["label"], str):
+                why = "label must be a string"
+            if why:
+                raise BadInput(f"{d.name}: events.manual.json entry {k}: {why}")
     th = _read(d / "thumbs.json", None)
     return {"id": d.name, "measure": m, "motion": _read(d / "motion.json", None),
             "sound": _read(d / "sound.json", None), "words": _read(d / "words.json", None),
-            "manual": manual if isinstance(manual, list) else [],
-            "thumbs": th if isinstance(th, list) and all(isinstance(h, str) for h in th) else None,
+            "manual": manual,
+            "thumbs": th if isinstance(th, list) and all(h is None or isinstance(h, str) for h in th) else None,
             "source": src if isinstance(src, str) and src else None, "dir": str(d)}
 
 
@@ -133,10 +151,21 @@ def select(pack_ids, train=None, exclude=None):
 
 # ---------------------------------------------------------------- duplicates
 
+LOW_BITS, HIGH_BITS = 8, 56     # an aHash with fewer / more set bits is flat (blank frame), not evidence
+MIN_USABLE_THUMBS = 3
+
+
+def _bits(h):
+    try:
+        return bin(int(h, 16)).count("1")
+    except (ValueError, TypeError):
+        return None
+
+
 def _hamming_hex(a, b):
     try:
         return bin(int(a, 16) ^ int(b, 16)).count("1")
-    except ValueError:
+    except (ValueError, TypeError):
         return 64
 
 
@@ -149,7 +178,13 @@ def is_dupe(a, b):
     ta, tb = a.get("thumbs"), b.get("thumbs")
     if ta and tb:
         n = min(len(ta), len(tb))
-        if n and sum(_hamming_hex(x, y) for x, y in zip(ta[:n], tb[:n])) / n <= DUP_HAMMING:
+        ds = []
+        for x, y in zip(ta[:n], tb[:n]):
+            bx, by = _bits(x), _bits(y)
+            if bx is None or by is None or not (LOW_BITS <= bx <= HIGH_BITS and LOW_BITS <= by <= HIGH_BITS):
+                continue   # missing or low-entropy slot: never a duplicate on its own
+            ds.append(_hamming_hex(x, y))
+        if ds and len(ds) >= min(MIN_USABLE_THUMBS, n) and sum(ds) / len(ds) <= DUP_HAMMING:
             return True
     sa, sb = _sha(a), _sha(b)
     return bool(sa and sa == sb)
@@ -186,6 +221,7 @@ def thumbs_for(video_path, n=THUMBS_N):
                            capture_output=True)
         px = np.frombuffer(p.stdout, np.uint8)
         if px.size < 64:
+            out.append(None)   # keep the slot so positions stay aligned
             continue
         bits = (px[:64] > px[:64].mean()).astype(np.uint8)
         out.append(format(int("".join(map(str, bits)), 2), "016x"))
@@ -244,72 +280,93 @@ def word_events(analysis):
 
 
 def events(analysis, words=True):
-    """Unified, time-sorted event stream [{t, kind, type, attrs}] of one analysis.
+    """Unified, time-sorted event stream [{t, kind, type, src, attrs}] of one analysis.
 
     kind "word" (type word:number|date|question|name), "visual" (cut, transition, camera:<prop>, entrance,
-    big_text), "sound" (sfx:<class>) and "manual" (type as written in events.manual.json). Every field of
-    motion.json / sound.json is read defensively. Big text comes from motion elements with h_pct (or
-    size_pct_h) >= 8 and from measure.json text.boxes [{t, h_pct}]. words=False skips the word triggers."""
+    big_text), "sound" (sfx:<class>) and "manual" (type as written in events.manual.json). `src` is the
+    source id of the thing that emitted the event (an element id, a text box, a cut...): two events of the
+    same source never make a law. Every field of motion.json / sound.json is read defensively.
+    Big text has one source: motion elements with h_pct (or size_pct_h) >= 8 first, then measure.json
+    text.boxes [{t, box, h_pct}] only where no element's big text is on screen (1 s after its t0, or its
+    dur_s). Consecutive samples of one box (gaps under 1 s) are one event. words=False skips word triggers."""
     ev = []
     m = analysis.get("measure") or {}
-    for c in m.get("cuts") or []:
+    for k, c in enumerate(m.get("cuts") or []):
         t = _t(c.get("t")) if isinstance(c, dict) else None
         if t is not None:
             ev.append({"t": t, "kind": "visual", "type": "transition" if c.get("kind") == "gradual" else "cut",
-                       "attrs": {}})
-    txt = m.get("text") if isinstance(m.get("text"), dict) else {}
-    for b in txt.get("boxes") or []:
-        if isinstance(b, dict) and _t(b.get("t")) is not None and (_t(b.get("h_pct")) or 0) >= BIG_TEXT_PCT:
-            ev.append({"t": float(b["t"]), "kind": "visual", "type": "big_text", "attrs": {}})
+                       "src": f"cut:{k}", "attrs": {}})
     mo = analysis.get("motion") if isinstance(analysis.get("motion"), dict) else {}
-    for c in mo.get("camera_moves") or []:
+    for k, c in enumerate(mo.get("camera_moves") or []):
         t = _t(c.get("t0")) if isinstance(c, dict) else None
         if t is not None:
-            ev.append({"t": t, "kind": "visual", "type": f"camera:{c.get('prop') or 'move'}",
-                       "attrs": {k: c[k] for k in ("dur_f", "ease_name") if k in c}})
-    for e in mo.get("elements") or []:
+            ev.append({"t": t, "kind": "visual", "type": f"camera:{c.get('prop') or 'move'}", "src": f"cam:{k}",
+                       "attrs": {k2: c[k2] for k2 in ("dur_f", "ease_name") if k2 in c}})
+    el_big = []
+    for k, e in enumerate(mo.get("elements") or []):
         if not isinstance(e, dict):
             continue
         t = _t(e.get("t0"))
         if t is None:
             continue
-        ev.append({"t": t, "kind": "visual", "type": "entrance", "attrs": {"id": e.get("id")}})
+        src = f"el:{e.get('id') if e.get('id') is not None else k}"
+        ev.append({"t": t, "kind": "visual", "type": "entrance", "src": src, "attrs": {"id": e.get("id")}})
         h = _t(e.get("h_pct", e.get("size_pct_h")))
         if h is not None and h >= BIG_TEXT_PCT:
-            ev.append({"t": t, "kind": "visual", "type": "big_text", "attrs": {"id": e.get("id")}})
+            ev.append({"t": t, "kind": "visual", "type": "big_text", "src": src, "attrs": {"id": e.get("id")}})
+            el_big.append((t, t + (_t(e.get("dur_s")) or 1.0)))
+    txt = m.get("text") if isinstance(m.get("text"), dict) else {}
+    last = {}
+    for b in sorted((b for b in txt.get("boxes") or [] if isinstance(b, dict) and _t(b.get("t")) is not None),
+                    key=lambda b: b["t"]):
+        if (_t(b.get("h_pct")) or 0) < BIG_TEXT_PCT:
+            continue
+        key = json.dumps(b.get("box"), sort_keys=True)
+        t = float(b["t"])
+        new = key not in last or t - last[key] > 1.0
+        last[key] = t
+        if new and not any(a <= t <= z for a, z in el_big):
+            ev.append({"t": t, "kind": "visual", "type": "big_text", "src": f"box:{key}", "attrs": {}})
     so = analysis.get("sound") if isinstance(analysis.get("sound"), dict) else {}
-    for s in so.get("sfx") or []:
-        t = _t(s.get("t")) if isinstance(s, dict) else None
+    for k, sf in enumerate(so.get("sfx") or []):
+        t = _t(sf.get("t")) if isinstance(sf, dict) else None
         if t is not None:
-            ev.append({"t": t, "kind": "sound", "type": f"sfx:{s.get('class_guess') or 'unknown'}",
-                       "attrs": {k: s[k] for k in ("confidence", "level_vs_voice_db") if k in s}})
-    for e in analysis.get("manual") or []:
+            ev.append({"t": t, "kind": "sound", "type": f"sfx:{sf.get('class_guess') or 'unknown'}",
+                       "src": f"sfx:{k}",
+                       "attrs": {k2: sf[k2] for k2 in ("confidence", "level_vs_voice_db") if k2 in sf}})
+    for k, e in enumerate(analysis.get("manual") or []):
         t = _t(e.get("t")) if isinstance(e, dict) else None
         if t is not None and isinstance(e.get("type"), str):
-            ev.append({"t": t, "kind": "manual", "type": e["type"],
+            ev.append({"t": t, "kind": "manual", "type": e["type"], "src": f"man:{k}",
                        "attrs": dict(e.get("attrs") or {}, **({"label": e["label"]} if e.get("label") else {}))})
     if words:
-        ev.extend(word_events(analysis)[0])
-    return sorted(ev, key=lambda e: (e["t"], e["type"]))
+        for k, w in enumerate(word_events(analysis)[0]):
+            w["src"] = f"word:{k}"
+            ev.append(w)
+    return sorted(ev, key=lambda e: (e["t"], e["type"], e["src"]))
 
 
 def word_plan(analyses, ids):
-    """(allowed bool, reason) for word-triggered laws over these videos: needs words in at least one video
-    and one single language among the videos that have words."""
-    langs, ran = set(), 0
+    """(allowed, notes). notes are not_run entries: "word_laws (why)" when word laws cannot run at all,
+    "word_laws:<id> (why)" for a video with words that is left out (no language, no profile).
+    Needs words in at least one video and one single language among the videos that can run."""
+    langs, notes, any_words = set(), [], False
     for i in ids:
-        a = analyses[i]
-        if _words_of(a.get("words")):
-            langs.add(word_language(a) or "?")
-            ran += 1
-    if not ran:
-        return False, "no transcript in any training video"
+        if not _words_of(analyses[i].get("words")):
+            continue
+        any_words = True
+        _, why = word_events(analyses[i])
+        if why:
+            notes.append(f"word_laws:{i} ({why})")
+        else:
+            langs.add(word_language(analyses[i]))
+    if not any_words:
+        return False, ["word_laws (no transcript in any training video)"]
+    if not langs:
+        return False, ["word_laws (no video with a usable language profile)"] + notes
     if len(langs) > 1:
-        return False, "mixed languages: " + ", ".join(sorted(langs))
-    results = [word_events(analyses[i]) for i in ids if _words_of(analyses[i].get("words"))]
-    if not any(r is None for _, r in results):
-        return False, results[0][1]
-    return True, None
+        return False, ["word_laws (mixed languages: " + ", ".join(sorted(langs)) + ")"]
+    return True, notes
 
 
 # ---------------------------------------------------------------- metrics
@@ -490,9 +547,8 @@ def prepare(pack, train=None, exclude=None):
     if any(analyses[i].get("thumbs") is None for i in cand) and len(cand) > 1:
         not_run.append("dedupe_thumbs (no thumbs.json for some videos: only identical files are caught; "
                        "run fingerprint.py <pack> --thumbs)")
-    ok, why = word_plan(analyses, trained)
-    if not ok:
-        not_run.append("word_laws" + (f" ({why})" if why else ""))
+    ok, notes = word_plan(analyses, trained)
+    not_run.extend(notes)
     return {"analyses": analyses, "trained": trained, "held_out": held, "dupes": [list(d) for d in dupes],
             "not_run": not_run, "word_ok": ok}
 

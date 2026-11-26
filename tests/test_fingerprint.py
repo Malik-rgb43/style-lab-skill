@@ -178,3 +178,32 @@ def test_motion_eases_and_metrics(tmp_path):
     assert e["expoOut"]["bezier"] == [0.3, 0.9, 0.3, 1.0]
     assert e["quadOut"]["seen_in"] == 1
     assert m["metrics"]["dur_f"]["median"] == 12 and m["metrics"]["peak_at"]["n"] == 2
+
+
+def test_low_entropy_thumbs_are_not_duplicates(tmp_path):
+    add_video(tmp_path, "A", sha="a" * 64)
+    add_video(tmp_path, "B", sha="b" * 64)
+    a = fp.load_all(tmp_path)
+    a["A"]["thumbs"] = ["0000000000000000"] * 10
+    a["B"]["thumbs"] = ["0000000000000000"] * 10
+    assert fp.dedupe(["A", "B"], a)[1] == []
+    a["A"]["thumbs"] = [None, None] + ["ffff0000ffff0000"] * 8
+    a["B"]["thumbs"] = [None, "ffff0000ffff0000"] + ["ffff0000ffff0000"] * 8
+    assert fp.dedupe(["A", "B"], a)[1] == [("A", "B")]
+
+
+def test_bad_manual_events_exit_2(tmp_path):
+    d = add_video(tmp_path, "A", manual=[{"t": 1, "type": "x", "attrs": "oops"}])
+    assert fp.main([str(tmp_path)]) == 2
+    write(d / "events.manual.json", [{"t": "1", "type": "x"}])
+    assert fp.main([str(tmp_path)]) == 2
+    write(d / "events.manual.json", [{"t": 1, "type": "x", "attrs": {"a": 1}}])
+    assert fp.main([str(tmp_path)]) == 0
+
+
+def test_video_without_language_listed(tmp_path):
+    add_video(tmp_path, "A", sha="1" * 64, words=[("5", 1.0)])
+    add_video(tmp_path, "B", sha="2" * 64, words=[("5", 1.0)], lang="xx")
+    out = fp.build(tmp_path)
+    assert any(n.startswith("word_laws:B") for n in out["not_run"])
+    assert not any(n.startswith("word_laws:A") for n in out["not_run"])

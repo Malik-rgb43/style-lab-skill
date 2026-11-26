@@ -25,7 +25,9 @@ def test_law_support_and_confidence(tmp_path):
     doc = laws.build(tmp_path)
     law = next(l for l in doc["laws"] if l["when"] == "word:number" and l["then"] == "counter_card")
     assert law["support_videos"] == 7 and law["occurrences"] == 9
-    assert law["confidence"] == pytest.approx(0.7778, abs=0.001)
+    assert law["pooled_confidence"] == pytest.approx(0.7778, abs=0.001)
+    assert law["confidence"] == pytest.approx(0.8125, abs=0.001)   # macro over the 8 videos
+    assert law["lift"] >= laws.LIFT_MIN
     assert law["status"] == "rule-candidate" and law["anchor"] == "word"
     assert law["lag"]["median"] == pytest.approx(0.18, abs=0.001)
     assert law["lag"]["seen_in"] == 7
@@ -93,3 +95,57 @@ def test_held_out_not_mined_and_cli(tmp_path):
 def test_mine_empty_and_single_type():
     assert laws.mine({}) == []
     assert laws.mine({"a": [{"t": 1, "kind": "visual", "type": "cut", "attrs": {}}]}) == []
+
+
+def ev(t, typ, src=None):
+    return {"t": t, "kind": "visual", "type": typ, "src": src or f"{typ}{t}", "attrs": {}}
+
+
+def test_one_to_one_matching():
+    streams = {v: [ev(1.0, "entrance"), ev(1.2, "entrance"), ev(1.4, "entrance"), ev(1.5, "whoosh")]
+               for v in ("a", "b")}
+    law = next(l for l in laws.mine(streams) if l["when"] == "entrance" and l["then"] == "whoosh")
+    assert law["confidence"] == pytest.approx(1 / 3, abs=0.001) and law["followed"] == 2
+
+
+def test_frequent_y_is_not_a_rule(tmp_path):
+    for k in range(3):
+        add_video(tmp_path, f"V{k}", sha="%064x" % (k + 1), words=[("5", 1.0)],
+                  cuts=tuple(i * 0.5 for i in range(1, 40)))
+    law = next(l for l in laws.build(tmp_path)["laws"] if l["when"] == "word:number" and l["then"] == "cut")
+    assert law["confidence"] == 1.0 and law["lift"] < laws.LIFT_MIN and law["status"] == "option"
+
+
+def test_same_source_makes_no_law(tmp_path):
+    for k in range(3):
+        add_video(tmp_path, f"V{k}", sha="%064x" % (k + 1),
+                  motion={"elements": [{"id": "e1", "t0": 1.0, "h_pct": 12}, {"id": "e2", "t0": 4.0, "h_pct": 12}]})
+    doc = laws.build(tmp_path)
+    assert not any({l["when"], l["then"]} == {"entrance", "big_text"} and l["lag"]["median"] == 0
+                   for l in doc["laws"])
+    assert not any(l["when"] == "big_text" and l["then"] == "entrance" for l in doc["laws"])
+
+
+def test_simultaneous_events_one_direction_only():
+    streams = {v: [ev(1.0, "aaa"), ev(1.0, "bbb")] for v in ("a", "b", "c")}
+    ls = laws.mine(streams)
+    assert [(l["when"], l["then"]) for l in ls] == [("aaa", "bbb")]
+
+
+def test_per_video_support_40_vs_1_vs_1():
+    big = [e for k in range(40) for e in (ev(k * 3.0, "X"), ev(k * 3.0 + 0.2, "Y"))]
+    small = lambda: [ev(0.0, "X"), ev(0.2, "Y"), ev(5.0, "X"), ev(9.0, "X")] + [ev(30.0, "Z")]  # noqa: E731
+    ls = laws.mine({"a": big, "b": small(), "c": small()}, spans={"a": 130, "b": 30, "c": 30})
+    law = next(l for l in ls if l["when"] == "X" and l["then"] == "Y")
+    assert law["pooled_confidence"] > 0.8 and law["confidence"] < 0.6
+    assert law["status"] == "option"
+
+
+def test_text_boxes_only_where_no_element(tmp_path):
+    from fingerprint import events
+    a = {"measure": {"text": {"boxes": [{"t": 1.0, "box": [0, 0, 1, 1], "h_pct": 12},
+                                         {"t": 1.2, "box": [0, 0, 1, 1], "h_pct": 12},
+                                         {"t": 5.0, "box": [0, 0, 1, 1], "h_pct": 12}]}},
+         "motion": {"elements": [{"id": "e", "t0": 0.9, "h_pct": 12}]}}
+    big = [e for e in events(a) if e["type"] == "big_text"]
+    assert [e["src"].split(":")[0] for e in big] == ["el", "box"] and big[1]["t"] == 5.0
