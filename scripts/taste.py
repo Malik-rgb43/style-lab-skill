@@ -87,6 +87,8 @@ def _read(slug):
 
 
 def summary(client, style=None, last=50):
+    if last < 0:
+        raise _Bad(f"--last must be 0 or more (0 = all entries), got {last}")
     slug = _slug(client)
     st = _style_slug(style)
     rows = [r for r in _read(slug) if st is None or r.get("style") == st]

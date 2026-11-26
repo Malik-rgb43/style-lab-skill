@@ -81,3 +81,14 @@ def test_parallel_taste_logs(home):
     assert all(p.wait() == 0 for p in ps)
     lines = (home / "taste" / "_none.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(lines) == 40 and all(json.loads(x) for x in lines)
+
+
+def test_summary_last_must_not_be_negative(home):
+    r = run_cli("taste.py", "summary", "--last", "-1")
+    assert r.returncode == 1 and "--last" in r.stderr
+    assert run_cli("taste.py", "summary", "--last", "0").returncode == 0
+
+
+def test_feedback_list_empty(home):
+    r = run_cli("lessons.py", "feedback", "list")
+    assert r.returncode == 0 and "no open items" in r.stdout
