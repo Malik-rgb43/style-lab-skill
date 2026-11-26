@@ -71,8 +71,21 @@ def _cv2():
         return None
 
 
+def _ocr_available():
+    """True when rapidocr_onnxruntime is importable or tesseract is on PATH (cheap: builds nothing)."""
+    try:
+        import importlib.util
+        if importlib.util.find_spec("rapidocr_onnxruntime") is not None:
+            return True
+    except (ImportError, ValueError):
+        pass
+    return shutil.which("tesseract") is not None
+
+
 def _ocr_engine():
     """("rapidocr", engine) | ("tesseract", path) | None. Never downloads anything."""
+    if not _ocr_available():
+        return None
     try:
         from rapidocr_onnxruntime import RapidOCR
         return "rapidocr", RapidOCR()
@@ -84,17 +97,26 @@ def _ocr_engine():
 
 # ---------------------------------------------------------------- ffmpeg / ffprobe
 
+class InputError(RuntimeError):
+    """The input is not a readable video (the CLI exits 2)."""
+
+
 def probe(video):
-    """{width, height, fps, duration_s, has_audio} from ffprobe."""
+    """{width, height, fps, vfr, notes, duration_s, has_audio} from ffprobe. fps is avg_frame_rate
+    (r_frame_rate only when avg is missing); above 120 it is clamped to 30 with note "vfr_clamped";
+    vfr is True when avg and r differ."""
     r = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
                         "stream=codec_type,width,height,r_frame_rate,avg_frame_rate,duration:format=duration",
                         "-of", "json", str(video)], capture_output=True, text=True, encoding="utf-8")
     if r.returncode != 0:
-        raise RuntimeError("ffprobe could not read the video: " + (r.stderr.strip().splitlines() or ["?"])[-1])
-    doc = json.loads(r.stdout or "{}")
+        raise InputError("not a readable video: " + (r.stderr.strip().splitlines() or ["?"])[-1])
+    try:
+        doc = json.loads(r.stdout or "{}")
+    except ValueError:
+        raise InputError("not a readable video: ffprobe gave no data")
     vs = [s for s in doc.get("streams", []) if s.get("codec_type") == "video"]
     if not vs:
-        raise RuntimeError("the file has no video stream")
+        raise InputError("not a readable video: the file has no video stream")
     v = vs[0]
 
     def frac(s):
@@ -103,7 +125,13 @@ def probe(video):
             return float(a) / float(b) if float(b) else 0.0
         except (ValueError, ZeroDivisionError):
             return 0.0
-    fps = frac(v.get("r_frame_rate")) or frac(v.get("avg_frame_rate")) or 25.0
+    avg, rfr = frac(v.get("avg_frame_rate")), frac(v.get("r_frame_rate"))
+    fps = avg or rfr or 25.0
+    notes = []
+    vfr = bool(avg and rfr and abs(avg - rfr) > 0.01 * max(avg, rfr))
+    if fps > 120:
+        fps = 30.0
+        notes.append("vfr_clamped")
     dur = None
     for raw in (v.get("duration"), (doc.get("format") or {}).get("duration")):
         try:
@@ -111,7 +139,8 @@ def probe(video):
             break
         except (TypeError, ValueError):
             pass
-    return {"width": int(v["width"]), "height": int(v["height"]), "fps": fps, "duration_s": dur,
+    return {"width": int(v["width"]), "height": int(v["height"]), "fps": fps, "vfr": vfr, "notes": notes,
+            "duration_s": dur,
             "has_audio": any(s.get("codec_type") == "audio" for s in doc.get("streams", []))}
 
 
@@ -122,16 +151,42 @@ def _scaled_size(info, width):
 
 
 def _decode(video, info, width, pix_fmt, channels):
+    """Frames through an ffmpeg pipe read straight into one preallocated array (peak memory is the
+    array alone; it grows only if the stream holds more frames than the probe promised)."""
     w, h = _scaled_size(info, width)
-    r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(video), "-an", "-vf",
-                        f"scale={w}:{h}", "-r", f"{info['fps']:.6f}", "-pix_fmt", pix_fmt, "-f", "rawvideo", "-"],
-                       capture_output=True)
-    if r.returncode != 0:
-        msg = r.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise RuntimeError("ffmpeg could not decode the video: " + (msg[-1] if msg else "unknown error"))
-    n = len(r.stdout) // (w * h * channels)
-    arr = np.frombuffer(r.stdout, dtype=np.uint8)[: n * w * h * channels]
-    return arr.reshape((n, h, w) if channels == 1 else (n, h, w, channels))
+    shape = (h, w) if channels == 1 else (h, w, channels)
+    fsize = w * h * channels
+    guess = int(math.ceil((info.get("duration_s") or 0) * info["fps"])) + 2
+    buf = np.empty((max(guess, 16),) + shape, dtype=np.uint8)
+    n = 0
+    with tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(["ffmpeg", "-v", "error", "-nostdin", "-i", str(video), "-an", "-vf",
+                                 f"scale={w}:{h}", "-r", f"{info['fps']:.6f}", "-pix_fmt", pix_fmt,
+                                 "-f", "rawvideo", "-"], stdout=subprocess.PIPE, stderr=err)
+        try:
+            while True:
+                if n == len(buf):
+                    nb = np.empty((len(buf) + max(64, len(buf) // 8),) + shape, dtype=np.uint8)
+                    nb[:n] = buf
+                    buf = nb
+                view = memoryview(buf[n].reshape(-1))
+                got = 0
+                while got < fsize:
+                    k = proc.stdout.readinto(view[got:])
+                    if not k:
+                        break
+                    got += k
+                if got < fsize:
+                    break
+                n += 1
+        finally:
+            proc.stdout.close()
+            rc = proc.wait()
+        if rc != 0 and n == 0:
+            err.seek(0)
+            msg = err.read().decode("utf-8", "replace").strip().splitlines()
+            raise RuntimeError("ffmpeg could not decode the video: " + (msg[-1] if msg else "unknown error"))
+    return buf[:n]
 
 
 def decode_gray(video, width=320):
@@ -210,10 +265,31 @@ def detect_cuts(frames, fps):
     if n < 2:
         return []
     hist, pix, _ = frame_distances(frames)
-    return _cuts_from_distance(np.maximum(hist, pix), frames, fps)
+    return _cuts_from_distance(np.maximum(hist, pix), frames, fps, pix)
 
 
-def _cuts_from_distance(d, frames, fps):
+JUMP_MIN = 0.03   # a jump cut changes at least this much of the picture in one frame
+JUMP_X = 5.0      # ... and at least this many times the local median change (+-15 frames)
+GRAD_MAX_S = 2.0  # a longer run of change is a slow move or fade, not a transition
+
+
+def _jump_cuts(pix, skip, fps):
+    """Single-frame spikes of the pixel change (a jump cut inside one shot, e.g. a talking head)."""
+    out, n = [], len(pix)
+    for i in range(1, n):
+        if pix[i] < JUMP_MIN or any(abs(i - k) <= 2 for k in skip):
+            continue
+        win = np.concatenate([pix[max(1, i - 15):i], pix[i + 1:i + 16]])
+        if not len(win) or pix[i] < JUMP_X * float(np.median(win)):
+            continue
+        nb = max(pix[i - 1] if i > 1 else 0.0, pix[i + 1] if i + 1 < n else 0.0)
+        if nb > pix[i] / 3:  # a single-frame spike, not the edge of sustained motion
+            continue
+        out.append({"t": round(i / fps, 4), "kind": "jump", "dur_f": 1})
+    return out
+
+
+def _cuts_from_distance(d, frames, fps, pix=None):
     n = len(d)
     med, mad = _med_mad(d[1:])
     hard_thr = max(med + HARD_MAD_K * mad, HARD_MIN)
@@ -239,7 +315,7 @@ def _cuts_from_distance(d, frames, fps):
             while j + 1 < n and dd[j + 1] > moderate:
                 j += 1
             run = j - i + 1
-            if run >= GRAD_MIN_RUN and dd[i:j + 1].sum() > GRAD_SUM_MIN:
+            if GRAD_MIN_RUN <= run <= GRAD_MAX_S * fps and dd[i:j + 1].sum() > GRAD_SUM_MIN:
                 a, b = frames[i - 1], frames[j]
                 ends = max(_hist_emd(a, b), np.abs(a.astype(np.int16) - b.astype(np.int16)).mean() / 255.0)
                 if ends > GRAD_ENDS_MIN:
@@ -247,6 +323,13 @@ def _cuts_from_distance(d, frames, fps):
             i = j + 1
         else:
             i += 1
+    if pix is not None:
+        skip = list(merged)
+        for c in cuts:
+            if c["kind"] == "gradual":
+                f0 = int(round(c["t"] * fps))
+                skip.extend(range(f0, f0 + c["dur_f"] + 1))
+        cuts += _jump_cuts(pix, skip, fps)
     return sorted(cuts, key=lambda c: c["t"])
 
 
@@ -257,18 +340,18 @@ def _hist_emd(a, b):
 
 
 def cadence(frames, fps):
-    """{"repeat_fraction", "unique_fps", "on_twos"}, over the frames where something moves."""
+    """{"repeat_fraction", "unique_fps" (None when under 4 frames move), "on_twos", "moving_frames"},
+    over the frames where something moves."""
     n = len(frames)
-    out = {"repeat_fraction": 0.0, "unique_fps": round(float(fps), 2), "on_twos": False, "moving_frames": 0}
     if n < 4:
-        return out
+        return {"repeat_fraction": 0.0, "unique_fps": None, "on_twos": False, "moving_frames": 0}
     _, _, ch = frame_distances(frames)
     return _cadence_from_changed(ch, frames, fps)
 
 
 def _cadence_from_changed(ch, frames, fps):
     n = len(frames)
-    out = {"repeat_fraction": 0.0, "unique_fps": round(float(fps), 2), "on_twos": False, "moving_frames": 0}
+    out = {"repeat_fraction": 0.0, "unique_fps": None, "on_twos": False, "moving_frames": 0}
     if n < 4:
         return out
     # frame i moves when it differs from the frame two back (so a held frame between two moving ones counts)
@@ -276,13 +359,13 @@ def _cadence_from_changed(ch, frames, fps):
     for i in range(2, n):
         two[i] = (np.abs(frames[i].astype(np.int16) - frames[i - 2].astype(np.int16)) > CHANGE_PX).mean()
     moving = [i for i in range(2, n) if two[i] >= REPEAT_FRAC]
-    if len(moving) < 4:
+    out["moving_frames"] = len(moving)
+    if len(moving) < 4:  # nothing (or too little) moves: the true frame rate is unknown, not "fps"
         return out
     flags = np.array([1 if ch[i] < REPEAT_FRAC else 0 for i in moving])
     rf = float(flags.mean())
     out["repeat_fraction"] = round(rf, 4)
     out["unique_fps"] = round(float(fps) * (1 - rf), 2)
-    out["moving_frames"] = len(moving)
     # on twos: about half the frames repeat and the pattern alternates (same flag two frames apart)
     seq = np.array([1 if ch[i] < REPEAT_FRAC else 0 for i in range(2, n)])
     ok = bool((np.diff(seq) != 0).mean() > 0.9) if len(seq) > 3 and 0.4 <= rf <= 0.6 else False
@@ -354,17 +437,51 @@ def _haar():
     return None if casc.empty() else casc
 
 
+def _mediapipe_detector():
+    """Legacy mediapipe face detection (mp.solutions.face_detection) using only the model inside the
+    installed wheel, or None. Never downloads: any failure means "not available"."""
+    try:
+        import mediapipe as mp
+        fd = mp.solutions.face_detection.FaceDetection(model_selection=0, min_detection_confidence=0.5)
+    except Exception:
+        return None
+
+    def detect(gray):
+        h, w = gray.shape
+        rgb = np.repeat(gray[:, :, None], 3, axis=2)
+        res = fd.process(rgb)
+        out = []
+        for d in (res.detections or []):
+            bb = d.location_data.relative_bounding_box
+            out.append((bb.xmin * w, bb.ymin * h, bb.width * w, bb.height * h))
+        return out
+    return detect
+
+
+def _face_detector():
+    """A callable gray frame -> [(x, y, w, h) pixels]: Haar if its cascade exists, else mediapipe's
+    bundled model, else None (faces are then "not_run")."""
+    casc = _haar()
+    if casc is not None:
+        def detect(gray):
+            w = gray.shape[1]
+            return [tuple(b) for b in casc.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
+                                                             minSize=(max(24, w // 16),) * 2)]
+        return detect
+    return _mediapipe_detector()
+
+
 def face_track(frames, fps, every=3):
     """[{"t", "box": [x, y, w, h]}] (fractions of the frame) for every `every`-th gray frame that
-    shows a face (OpenCV Haar frontal cascade). Needs cv2."""
-    casc = _haar()
-    if casc is None:
-        raise ImportError("cv2 or its Haar frontal-face cascade is not available")
+    shows a face (the largest one): Haar frontal cascade, else mediapipe's bundled model."""
+    det = _face_detector()
+    if det is None:
+        raise ImportError("no face detector available (Haar cascade or mediapipe)")
     out = []
     for i in range(0, len(frames), max(1, every)):
         f = frames[i]
         h, w = f.shape
-        found = casc.detectMultiScale(f, scaleFactor=1.1, minNeighbors=5, minSize=(max(24, w // 16),) * 2)
+        found = det(f)
         if len(found):
             x, y, bw, bh = max(found, key=lambda b: b[2] * b[3])
             out.append({"t": round(i / fps, 4), "box": [round(x / w, 4), round(y / h, 4),
@@ -392,6 +509,11 @@ def text_boxes(frame):
             continue
         out.append([round(x / w, 4), round(y / h, 4), round(bwid / w, 4), round(bh / h, 4)])
     return out
+
+
+def text_box_records(frame, t):
+    """[{"t", "box": [x, y, w, h] (fractions), "h_pct": box height as % of the frame}] for one frame."""
+    return [{"t": round(float(t), 4), "box": b, "h_pct": round(b[3] * 100, 2)} for b in text_boxes(frame)]
 
 
 def _stats(vals):
@@ -431,6 +553,7 @@ def _run_ocr(engine, frames_idx, frames, fps):
 def build_shots(cuts, duration_s, rgb, fps, faces):
     # shot k runs from the end of cut k-1 (after a dissolve) to the start of cut k
     starts, ends = [0.0], []
+    cuts = [c for c in cuts if c["kind"] != "jump"]  # a jump cut stays inside its shot
     for c in cuts:
         ends.append(c["t"])
         starts.append(c["t"] + (c["dur_f"] / fps if c["kind"] == "gradual" else 0.0))
@@ -461,7 +584,10 @@ def event_rate(cuts, changed, fps, duration_s):
     for c in cuts:
         bins[min(nbin - 1, int(c["t"]))] += 1
     still = 3
+    at_cut = {int(round(c["t"] * fps)) for c in cuts}
     for i in range(1, len(changed)):
+        if i in at_cut:
+            continue  # a cut is already counted once
         if changed[i] >= REPEAT_FRAC and (i - 1 < still or all(changed[i - still:i] < REPEAT_FRAC)):
             bins[min(nbin - 1, int(i / fps))] += 1
     return bins
@@ -477,20 +603,34 @@ def longest_hold(changed, fps):
 
 # ---------------------------------------------------------------- imports
 
+def _num(v):
+    """A finite float or None (bad values are skipped, never a traceback)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
 def load_words(path):
     doc = json.loads(Path(path).read_text(encoding="utf-8"))
     ws = doc.get("words", []) if isinstance(doc, dict) else doc
+    if not isinstance(ws, list):
+        return []
     out = []
     for w in ws:
         if not isinstance(w, dict):
             continue
         if "start" in w:
-            a, b = w.get("start"), w.get("end", w.get("start"))
+            a, b = _num(w.get("start")), _num(w.get("end", w.get("start")))
         elif "start_ms" in w:
-            a, b = w["start_ms"] / 1000, w.get("end_ms", w["start_ms"]) / 1000
+            a, b = _num(w["start_ms"]), _num(w.get("end_ms", w["start_ms"]))
+            a, b = (None if a is None else a / 1000), (None if b is None else b / 1000)
         else:
             continue
-        out.append((a, b))
+        if a is None:
+            continue
+        out.append((a, a if b is None else b))
     return out
 
 
@@ -543,8 +683,8 @@ def import_analysis(adir, fps):
             imported["loudness"] = True
     t = load("transcript.json")
     if isinstance(t, dict) and isinstance(t.get("words"), list):
-        ws = [(w["start"], w.get("end", w["start"])) for w in t["words"]
-              if isinstance(w, dict) and isinstance(w.get("start"), (int, float))]
+        ws = [(_num(w["start"]), _num(w.get("end", w["start"]))) for w in t["words"]
+              if isinstance(w, dict) and _num(w.get("start")) is not None]
         if ws:
             got["words"] = ws
             imported["words"] = len(ws)
@@ -570,7 +710,7 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
     imp = import_analysis(from_analysis, fps) if from_analysis else {"imported": {}}
     cuts = imp.get("cuts")
     if cuts is None:
-        cuts = _cuts_from_distance(np.maximum(hist, pix), frames, fps) if n >= 2 else []
+        cuts = _cuts_from_distance(np.maximum(hist, pix), frames, fps, pix) if n >= 2 else []
     cad = _cadence_from_changed(changed, frames, fps) if n >= 4 else cadence(frames, fps)
 
     cv2 = _cv2()
@@ -578,7 +718,7 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
     faces_info = {"ran": False, "tracks": [], "sample_t": [t / fps for t in sample]}
     faces_summary = {"ran": False, "frames_sampled": 0, "frames_with_face": 0, "share": None,
                      "box_median": None, "headroom": _stats([])}
-    if faces == "off" or n == 0 or _haar() is None:
+    if faces == "off" or n == 0 or _face_detector() is None:
         not_run.append("faces")
     else:
         tr = face_track(frames, fps, every=3)
@@ -590,14 +730,16 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
                              headroom=_stats([b[1] for b in boxes] if tr else []))
 
     heat = np.zeros((HEATMAP, HEATMAP))
-    heights, ocr = [], "not_run"
+    heights, ocr, tboxes = [], "not_run", []
     if text == "off" or cv2 is None or n == 0:
         not_run.append("text")
     else:
         idx = sorted(set(np.linspace(0, n - 1, min(n, 40)).astype(int).tolist()))
         with_boxes = []
         for i in idx:
-            bxs = text_boxes(frames[i])
+            recs = text_box_records(frames[i], i / fps)
+            tboxes.extend(recs)
+            bxs = [r["box"] for r in recs]
             if bxs:
                 with_boxes.append(i)
             for x, y, w, h in bxs:
@@ -610,12 +752,15 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
                         oy = max(0.0, min(gy + 1, y1) - max(gy, y0))
                         heat[gy, gx] += ox * oy
         heat = heat / max(1, len(idx))
-        if text == "ocr" or (text == "auto" and with_boxes):
-            eng = _ocr_engine()
-            if eng is None:
+        if not _ocr_available():
+            if text == "ocr" or with_boxes:
                 not_run.append("ocr")
-            else:
-                ocr = _run_ocr(eng, with_boxes[:6] if with_boxes else idx[:6], frames, fps)
+        else:
+            ocr = []  # OCR could run: an empty list means it found nothing
+            if text == "ocr" or with_boxes:
+                eng = _ocr_engine()
+                if eng is not None:
+                    ocr = _run_ocr(eng, with_boxes[:6] if with_boxes else idx[:6], frames, fps)
 
     rgb = None
     try:
@@ -641,13 +786,15 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
     doc = {
         "schema": SCHEMA,
         "video": {"id": sha[:12], "sha256": sha, "duration_s": round(float(duration), 4),
-                  "fps": round(float(fps), 4), "width": info["width"], "height": info["height"]},
+                  "fps": round(float(fps), 4), "width": info["width"], "height": info["height"],
+                  "vfr": info["vfr"]},
+        "notes": info["notes"],
         "cuts": cuts,
         "shots": shots,
         "cadence": cad,
         "faces_summary": faces_summary,
         "text": {"boxes_heatmap": [[round(float(v), 4) for v in row] for row in heat],
-                 "size_pct_h": _stats(heights), "ocr": ocr},
+                 "boxes": tboxes, "size_pct_h": _stats(heights), "ocr": ocr},
         "loudness": lo,
         "words_per_s": words_per_s,
         "visual_event_rate": event_rate(cuts, changed, fps, duration) if n else [],
@@ -705,7 +852,7 @@ def validate(doc):
         if k not in doc["video"]:
             p.append(f"video.{k} missing")
     for c in doc["cuts"]:
-        if not (isinstance(c.get("t"), (int, float)) and c.get("kind") in ("hard", "gradual") and "dur_f" in c):
+        if not (isinstance(c.get("t"), (int, float)) and c.get("kind") in ("hard", "gradual", "jump") and "dur_f" in c):
             p.append(f"bad cut {c!r}")
     if not doc["shots"]:
         p.append("shots is empty (a video is at least one shot)")
@@ -720,6 +867,8 @@ def validate(doc):
     hm = t.get("boxes_heatmap")
     if not (isinstance(hm, list) and len(hm) == HEATMAP and all(isinstance(r, list) and len(r) == HEATMAP for r in hm)):
         p.append("text.boxes_heatmap is not 8x8")
+    if not isinstance(t.get("boxes"), list):
+        p.append("text.boxes missing")
     if "size_pct_h" not in t or not (t.get("ocr") == "not_run" or isinstance(t.get("ocr"), list)):
         p.append("text.size_pct_h / text.ocr missing")
     return p
@@ -756,6 +905,12 @@ def main(argv=None):
     except MissingTool as e:
         print(str(e), file=sys.stderr)
         return 3
+    except InputError as e:
+        print(f"error: {str(e).splitlines()[0]}", file=sys.stderr)
+        return 2
+    except MemoryError:
+        print("error: too long for memory: use --analysis-width 160 or less", file=sys.stderr)
+        return 1
     except (RuntimeError, ValueError, OSError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
