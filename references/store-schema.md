@@ -167,9 +167,10 @@ Written only by `scripts/lessons.py`; how it is used: `references/learning-loop.
 | created / updated / promoted | ISO dates | `promoted` = the day it became a rule |
 
 Generated rule files: `craft-rules.learned.md`, `clients/<slug>/lessons.md` (whole files) and,
-for a style, the block between `<!-- style-lab:learned-rules:start -->` and
-`<!-- style-lab:learned-rules:end -->` in its STYLE.md and style skill. Each written file gets
-a `<file>.bak-YYYYMMDD` backup once a day.
+for a style, its own block between `<!-- style-lab:learned-rules:start <slug> -->` and
+`<!-- style-lab:learned-rules:end <slug> -->` in its STYLE.md and style skill (one block per
+style, so styles sharing a pack keep separate blocks). Each written file gets a
+`<file>.bak-YYYYMMDD` backup once a day.
 
 ## settings.json
 `{"auto_promote": false}`. `lessons.py settings auto_promote=true` (only on the owner's request)

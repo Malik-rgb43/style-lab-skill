@@ -67,9 +67,12 @@ python scripts/lessons.py show <id>
   recur, and change its layer later with `edit <id> layer=...` if it does).
 - `add` warns when the same text was rejected before: do not propose it again; tell the owner.
 - Two lessons that turn out to mean the same: `lessons.py merge <src> <into>` (evidence moves,
-  `src` becomes `merged`). Fix a wrong reading with `lessons.py edit <id> measurable="..."`
-  (also `text`, `scope`, `layer`, `target`, `kind` while it is a candidate); drop a wrong
-  candidate with `lessons.py reject <id> --reason "..."` (kept, so it is not proposed again).
+  `src` becomes `merged`; a rejected `src` cannot be merged). A `match` or `merge` into a rule
+  re-renders its rule file (the evidence count), all or nothing.
+- Fix a wrong reading with `lessons.py edit <id> measurable="..."`. `text`, `measurable` and
+  `scope` can be edited on any lesson, rules too (a rule's file is re-rendered); `target` and
+  `kind` until it is a rule; `layer` only on a candidate or one-off. Drop a wrong candidate with
+  `lessons.py reject <id> --reason "..."` (kept, so it is not proposed again).
 
 ## 4. Candidate → proposed → rule
 - A new non-video lesson is a **candidate**. It becomes **proposed** when its evidence spans 2
@@ -83,8 +86,9 @@ python scripts/lessons.py show <id>
   ```
 - A **candidate** (one note so far) becomes a rule only when the owner explicitly says so
   ("make it a rule now"): `lessons.py approve <id> --one-note`.
-- **Conflicts.** `approve` first prints possibly conflicting rules (same layer and target, or a
-  lower layer, sharing a scope word) and exits 1 when there are any. Judge each: if none really
+- **Conflicts.** `approve` first prints possibly conflicting rules and exits 1 when there are
+  any. Listed: rules of a lower layer or of the same layer and target that have an empty scope
+  (everywhere), share a scope word, or have the same style or client target. Judge each: if none really
   clashes, run `approve <id> --yes-no-conflict` and say so; if one does, never pick a side
   yourself: show both to the owner and ask (reword the new lesson with `edit`, reject it, or,
   against a taste craft rule, make it a style exception). `lessons.py conflicts <id>` shows the
@@ -107,10 +111,12 @@ since it has one note). `rules` then marks the craft rule as overridden for that
 
 ## 6. Where rules are written
 `approve` (and `edit` on a rule) renders the rule list of that layer and target:
-- **style**: between `<!-- style-lab:learned-rules:start -->` and
-  `<!-- style-lab:learned-rules:end -->` in the style's STYLE.md and its style skill (the pair
-  sits in the "Review-round rules" section, `references/style-skill-template.md`). Hand-written
-  text outside the markers is never changed. Each file is backed up once a day
+- **style**: between `<!-- style-lab:learned-rules:start <slug> -->` and
+  `<!-- style-lab:learned-rules:end <slug> -->` in the style's STYLE.md and its style skill (the
+  pair sits in the "Review-round rules" section, `references/style-skill-template.md`). One
+  block per style: two styles sharing a pack (a style and its English twin) each keep their
+  own block, and a new block goes right after the last one. An empty old pair without a slug is
+  taken over. Hand-written text outside the markers is never changed. Each file is backed up once a day
   (`<file>.bak-YYYYMMDD`); the write is all or nothing (a failure restores every file and saves
   nothing); `styles.json` gets the style's `rules_count` and `version` + 1. A missing style
   skill file is a warning (STYLE.md is still written); a missing STYLE.md or damaged markers
@@ -128,7 +134,8 @@ python scripts/lessons.py rules --style <s> --client <c>        # --json for the
 ```
 It lists craft, then style, then client rules by number; a taste craft rule a style overrides
 is marked in the `overridden` column, with the exception's reason below. Apply them in the
-precedence of section 2 and cite them in the plan ("craft 3", "style rule 5", "client rule 1").
+precedence of section 2 and cite a learned rule in the plan by its lesson id ("L0007"), never
+by its number: STYLE.md files have hand-numbered rules too, so "style rule 5" is ambiguous.
 With no client: `--style <s>` alone.
 
 ## 8. Taste: log every pick, read it before recommending

@@ -171,9 +171,10 @@ First read the rules that apply: `python scripts/lessons.py rules --style <s> --
 For each beat, three designs from the style's library, placed the way the references place
 them, one marked **ההמלצה שלי**. Each option: title, category, scene type (פנים + כתוביות /
 שכבה מעל הפנים / סצנה מלאה), a concrete description, `Ref V##-A##`; each beat: why it fits
-(cite references and rule numbers) and a camera note. Design each beat with the five questions
-in `references/craft-rules.md` §1 (metaphor, the real thing working, invisible made visible, a
-reference for the move, never repeated). Recommendations read
+(cite references, hand rule numbers, learned rules by lesson id such as L0007) and a camera
+note. Design each beat with the five questions in `references/craft-rules.md` §1 (metaphor,
+the real thing working, invisible made visible, a reference for the move, never repeated).
+Recommendations read
 `taste.py summary --client <c> --style <s>`; say when taste decided one (§8). Build `plan.html`
 from `assets/plan-template.html`, publish with a 540p proxy as `clip.mp4`, stills as `thumbs/`.
 
