@@ -7,15 +7,33 @@ import doctor
 import store
 
 
-class _Done:
-    def __init__(self, out="tool 1.0\nline2", rc=0):
-        self.stdout, self.stderr, self.returncode = out, "", rc
+CALLS = []
+
+
+class FakePopen:
+    out, rc, timeout = "tool 1.0\nline2", 0, False
+
+    def __init__(self, cmd, **kw):
+        CALLS.append((list(cmd), kw))
+        self.pid, self.returncode = 1, type(self).rc
+
+    def communicate(self, timeout=None):
+        if type(self).timeout and timeout == 45:
+            type(self).timeout = False
+            raise subprocess.TimeoutExpired("npx", timeout)
+        return type(self).out, ""
+
+    def kill(self):
+        pass
 
 
 @pytest.fixture
 def everything(monkeypatch):
+    CALLS.clear()
+    FakePopen.out, FakePopen.rc, FakePopen.timeout = "tool 1.0\nline2", 0, False
+    monkeypatch.setattr(doctor.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(doctor, "_kill_tree", lambda p: None)
     monkeypatch.setattr(doctor.shutil, "which", lambda n: f"/bin/{n}")
-    monkeypatch.setattr(doctor.subprocess, "run", lambda *a, **k: _Done())
     monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda n: object())
     monkeypatch.setenv("RUNPOD_API_KEY", "x")
     monkeypatch.setenv("RUNPOD_ENDPOINT_ID", "y")
@@ -42,11 +60,44 @@ def test_missing_ffmpeg(home, everything, monkeypatch):
 
 
 def test_hyperframes_timeout(home, everything, monkeypatch):
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired("npx", 20)
-    monkeypatch.setattr(doctor.subprocess, "run", boom)
+    FakePopen.timeout = True
     doctor.main([])
-    assert caps()["local"]["hyperframes"]["ok"] is False
+    h = caps()["local"]["hyperframes"]
+    assert h["ok"] is False and h["note"] == "check timed out"
+
+
+def test_hyperframes_noninteractive(home, everything, monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "hyperframes" else f"/bin/{n}")
+    doctor.main([])
+    cmd, kw = next(c for c in CALLS if "hyperframes" in c[0])
+    assert "--yes" in cmd and kw["stdin"] == subprocess.DEVNULL
+    assert caps()["local"]["hyperframes"]["ok"] is True
+
+
+def test_hyperframes_failed_note(home, everything, monkeypatch):
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "hyperframes" else f"/bin/{n}")
+    FakePopen.rc = 3
+    h = doctor.check_hyperframes()
+    assert h["note"] == "check failed (exit 3)"
+
+
+def test_blender_found_in_program_files(home, everything, monkeypatch, tmp_path):
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "blender" else f"/bin/{n}")
+    monkeypatch.delenv("BLENDER_PATH", raising=False)
+    for v in ("4.2", "5.2"):
+        d = tmp_path / "Blender Foundation" / f"Blender {v}"
+        d.mkdir(parents=True)
+        (d / "blender.exe").write_text("x")
+    monkeypatch.setenv("ProgramFiles", str(tmp_path))
+    doctor.main([])
+    b = caps()["local"]["blender"]
+    assert b["ok"] is True and "Blender 5.2" in b["path"]
+    assert caps()["local"]["ffmpeg"]["path"] == "/bin/ffmpeg"
+
+
+def test_torch_cuda_not_probed_by_default(home, everything):
+    doctor.main([])
+    assert caps()["local"]["torch"]["cuda"] == "not probed"
 
 
 def test_env_values_never_written(home, everything, monkeypatch):

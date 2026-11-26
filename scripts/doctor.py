@@ -6,15 +6,19 @@ Environment keys are checked for presence only; values are never read into outpu
 
 Commands:
     doctor.py                                    run local checks, print the table per stage
+    doctor.py --deep                             also probe torch CUDA (slow)
     doctor.py --json                             same, print the capability map as JSON
     doctor.py session --set name=ok|missing [--note ".."]   record an MCP server / skill seen in this session
     doctor.py session --clear                    forget the recorded session block
 """
 import argparse
 import datetime as dt
+import concurrent.futures
+import glob
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,7 +47,7 @@ HINTS = {
     "ffmpeg": "winget install Gyan.FFmpeg / brew install ffmpeg",
     "ffprobe": "winget install Gyan.FFmpeg / brew install ffmpeg",
     "node": "winget install OpenJS.NodeJS.LTS / brew install node",
-    "hyperframes": "npm install -g hyperframes (needs node) / same on macOS",
+    "hyperframes": "npx hyperframes (no global install needed); needs Node 18+",
     "blender": "winget install BlenderFoundation.Blender / brew install --cask blender",
     "yt-dlp": "winget install yt-dlp.yt-dlp / brew install yt-dlp",
     "gh": "winget install GitHub.cli / brew install gh",
@@ -58,9 +62,39 @@ HINTS = {
 }
 
 
-def _run(cmd, timeout=15):
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return getattr(r, "returncode", 0), str(getattr(r, "stdout", "") or "")
+def _kill_tree(proc):
+    """Kill the process and everything it spawned (npx leaves node children holding the pipes)."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=10)
+        else:
+            os.killpg(os.getpgid(proc.pid), 9)
+    except Exception:
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _run(cmd, timeout=10):
+    """Non-interactive, bounded run: stdin closed, whole process tree killed on timeout."""
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
+          "text": True, "encoding": "utf-8", "errors": "replace"}
+    if os.name != "nt":
+        kw["start_new_session"] = True
+    proc = subprocess.Popen(cmd, **kw)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        raise
+    return proc.returncode, str(out or "")
 
 
 def _first_line(text):
@@ -68,47 +102,79 @@ def _first_line(text):
     return lines[0].strip() if lines else ""
 
 
-def check_binary(name):
+def _ver_key(path):
+    m = re.search(r"(\d+(?:\.\d+)*)", Path(path).parent.name)
+    return tuple(int(x) for x in m.group(1).split(".")) if m else ()
+
+
+def find_binary(name):
+    """PATH first; Blender also from BLENDER_PATH and the usual install folders."""
     exe = shutil.which(name)
+    if exe or name != "blender":
+        return exe
+    env = os.environ.get("BLENDER_PATH")
+    if env and os.path.isfile(env):
+        return env
+    pf = os.environ.get("ProgramFiles")
+    if pf:
+        hits = glob.glob(os.path.join(pf, "Blender Foundation", "Blender*", "blender.exe"))
+        for h in sorted(hits, key=_ver_key, reverse=True):
+            return h
+    for c in ("/Applications/Blender.app/Contents/MacOS/Blender", "/usr/bin/blender", "/snap/bin/blender"):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def check_binary(name):
+    exe = find_binary(name)
     if not exe:
-        return {"ok": False, "version": "", "hint": HINTS[name]}
+        return {"ok": False, "version": "", "path": "", "note": "not installed", "hint": HINTS[name]}
     version = ""
     flag = "-version" if name in ("ffmpeg", "ffprobe") else "--version"
     try:
-        version = _first_line(_run([exe, flag])[1])
+        version = _first_line(_run([exe, flag], timeout=10)[1])
     except (subprocess.SubprocessError, OSError):
         pass
-    return {"ok": True, "version": version, "hint": ""}
+    return {"ok": True, "version": version, "path": str(exe), "note": "", "hint": ""}
 
 
 def check_hyperframes():
-    bad = {"ok": False, "version": "", "hint": HINTS["hyperframes"]}
-    npx = shutil.which("npx")  # npx.cmd on Windows
-    if not npx:
-        return bad
+    def bad(note):
+        return {"ok": False, "version": "", "path": "", "note": note, "hint": HINTS["hyperframes"]}
+
+    exe = shutil.which("hyperframes")
+    cmd = [exe, "--version"] if exe else None
+    if cmd is None:
+        npx = shutil.which("npx")  # npx.cmd on Windows
+        if not npx:
+            return bad("not installed")
+        cmd = [npx, "--yes", "hyperframes", "--version"]
     try:
-        rc, out = _run([npx, "hyperframes", "--version"], timeout=20)
+        rc, out = _run(cmd, timeout=45)
+    except subprocess.TimeoutExpired:
+        return bad("check timed out")
     except (subprocess.SubprocessError, OSError):
-        return bad
+        return bad("not installed")
     if rc != 0:
-        return bad
-    return {"ok": True, "version": _first_line(out), "hint": ""}
+        return bad(f"check failed (exit {rc})")
+    return {"ok": True, "version": _first_line(out), "path": cmd[0], "note": "", "hint": ""}
 
 
-def check_module(name):
+def check_module(name, deep=False):
     try:
         found = importlib.util.find_spec(name) is not None
     except (ImportError, ValueError):
         found = False
     d = {"ok": found, "version": "", "hint": "" if found else HINTS[name]}
     if name == "torch" and found:
-        cuda = False
-        try:
-            out = _run([sys.executable, "-c", "import torch;print(torch.cuda.is_available())"], timeout=20)[1]
-            cuda = out.strip().endswith("True")
-        except (subprocess.SubprocessError, OSError):
-            pass
-        d["cuda"] = cuda
+        d["cuda"] = "not probed"
+        if deep:
+            try:
+                out = _run([sys.executable, "-c", "import torch;print(torch.cuda.is_available())"], timeout=60)[1]
+                d["cuda"] = out.strip().endswith("True")
+            except (subprocess.SubprocessError, OSError):
+                d["cuda"] = False
     return d
 
 
@@ -117,15 +183,19 @@ def check_env(name):
     return {"ok": ok, "version": "", "hint": "" if ok else HINTS[name]}
 
 
-def collect_local():
-    local = {"python": {"ok": True, "version": sys.version.split()[0], "hint": ""}}
-    for n in BINARIES:
-        local[n] = check_binary(n)
-    local["hyperframes"] = check_hyperframes()
+def collect_local(deep=False):
+    tasks = {n: (check_binary, n) for n in BINARIES}
+    tasks["hyperframes"] = (check_hyperframes,)
     for n in MODULES:
-        local[n] = check_module(n)
+        tasks[n] = (check_module, n, deep)
     for n in ENV_KEYS:
-        local[n] = check_env(n)
+        tasks[n] = (check_env, n)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+        futs = {k: ex.submit(*v) for k, v in tasks.items()}
+        res = {k: f.result() for k, f in futs.items()}
+    local = {"python": {"ok": True, "version": sys.version.split()[0], "path": sys.executable, "hint": ""}}
+    for n in BINARIES + ["hyperframes"] + MODULES + ENV_KEYS:
+        local[n] = res[n]
     return local
 
 
@@ -140,9 +210,9 @@ def build_stages(local):
     }
 
 
-def run_checks():
+def run_checks(deep=False):
     """Run local checks and write capabilities.json, keeping the existing session block."""
-    local = collect_local()
+    local = collect_local(deep)
     stages = build_stages(local)
     checked = dt.datetime.now().isoformat(timespec="seconds")
 
@@ -165,7 +235,8 @@ def print_table(data):
                 v = local[n].get("version", "")
                 print(f"  ✓ {n}" + (f"  {v}" if v else ""))
             else:
-                print(f"  חסר {n}  ->  {local.get(n, {}).get('hint', '')}")
+                note = local.get(n, {}).get("note")
+                print(f"  חסר {n}" + (f" ({note})" if note else "") + f"  ->  {local.get(n, {}).get('hint', '')}")
     if data.get("session"):
         print("[session]")
         for n, s in data["session"].items():
@@ -196,6 +267,7 @@ def cmd_session(args):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--deep", action="store_true", help="also probe torch CUDA (slow)")
     sub = p.add_subparsers(dest="cmd")
     s = sub.add_parser("session")
     s.add_argument("--set", action="append")
@@ -205,7 +277,7 @@ def main(argv=None):
     store.print_utf8()
     if args.cmd == "session":
         return cmd_session(args)
-    data = run_checks()
+    data = run_checks(args.deep)
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
     else:
