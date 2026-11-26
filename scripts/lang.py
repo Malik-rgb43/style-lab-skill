@@ -13,6 +13,7 @@ Exit codes: 0 ok, 2 bad input.
 """
 import argparse
 import copy
+import functools
 import os
 import re
 import sys
@@ -32,19 +33,19 @@ DEFAULT_ELEMENTS = ("reading_order", "progress_bar", "arrow", "slide_in", "list_
 # (keywords, why). Matched as substrings of the normalised element name; KEEP rows win.
 KEEP_TABLE = [
     (("clock", "watch"), "a clock turns the same way in every language"),
-    (("axis", "axes", "chart", "graph", "plot"), "chart axes keep their direction (time and values are not text)"),
+    (("axis", "axes", "chart", "charts", "graph", "plot"), "chart axes keep their direction (time and values are not text)"),
     (("logo", "brand_mark", "wordmark"), "a logo is a fixed artwork"),
     (("code", "terminal", "console", "snippet"), "code is left to right in every language"),
-    (("digit", "number", "numeral", "counter", "price"), "digits stay left to right"),
+    (("digit", "digits", "number", "numbers", "numeral", "counter", "price"), "digits stay left to right"),
     (("timecode", "timestamp", "playhead", "scrub"), "video timecode runs left to right"),
 ]
 MIRROR_TABLE = [
     (("reading_order", "text_flow", "headline", "caption", "paragraph", "title"),
      "text block follows the reading direction"),
     (("progress",), "a progress bar fills along the reading direction"),
-    (("arrow", "chevron", "pointer"), "an arrow that means forward or back follows the reading direction"),
+    (("arrow", "arrows", "chevron", "pointer"), "an arrow that means forward or back follows the reading direction"),
     (("slide_in", "slide", "wipe", "swipe", "enter_from"), "motion enters from the side the reader starts on"),
-    (("list", "stepper", "steps", "menu"), "list order follows the reading direction"),
+    (("list", "lists", "stepper", "steps", "menu"), "list order follows the reading direction"),
 ]
 SIDE_FLIP = {"left": "right", "right": "left"}
 
@@ -115,7 +116,8 @@ def scale_timing(laws, ratio):
             law["lag"] = _scale_num(lag, ratio)
         else:
             continue
-        law["lag_scaled_by"] = round(ratio, 4)
+        if abs(ratio - 1.0) > 1e-9:
+            law["lag_scaled_by"] = round(ratio, 4)
     return out
 
 
@@ -125,7 +127,8 @@ def _norm(s):
 
 
 def mirror_plan(elements, target_dir="rtl", source_dir="ltr"):
-    """[{element, mirror, why}] per element (a name, or a dict with element/kind/name/type, optional side).
+    """[{element, mirror, why}] per element (a name, or a dict with element/kind/name/type and an optional
+    side/from/direction of left or right). Names are matched as whole tokens, not substrings.
 
     Elements are mirrored only when the source and target reading directions differ."""
     plan = []
@@ -135,15 +138,15 @@ def mirror_plan(elements, target_dir="rtl", source_dir="ltr"):
             blob = " ".join(str(el.get(k, "")) for k in ("element", "kind", "name", "type"))
         else:
             name = blob = str(el)
-        n = _norm(blob)
+        tokens = _norm(blob).split("_")
         res = None
         for kws, why in KEEP_TABLE:
-            if any(k in n for k in kws):
+            if any(_has_kw(tokens, k) for k in kws):
                 res = (False, why)
                 break
         if res is None:
             for kws, why in MIRROR_TABLE:
-                if any(k in n for k in kws):
+                if any(_has_kw(tokens, k) for k in kws):
                     res = (True, why)
                     break
         if res is None:
@@ -152,10 +155,86 @@ def mirror_plan(elements, target_dir="rtl", source_dir="ltr"):
         if mirror and source_dir == target_dir:
             mirror, why = False, "source and target read the same direction"
         row = {"element": name, "mirror": mirror, "why": why}
-        if mirror and isinstance(el, dict) and el.get("side") in SIDE_FLIP:
-            row["side"] = SIDE_FLIP[el["side"]]
+        side = _side(el) if isinstance(el, dict) else None
+        if mirror and side:
+            row["side"] = SIDE_FLIP[side]
         plan.append(row)
     return plan
+
+
+def _has_kw(tokens, kw):
+    """True when the keyword's tokens appear as a contiguous run of whole tokens."""
+    k = kw.split("_")
+    return any(tokens[i:i + len(k)] == k for i in range(len(tokens) - len(k) + 1))
+
+
+def _side(el):
+    for key in ("side", "from", "direction"):
+        for t in _norm(el.get(key, "")).split("_"):
+            if t in SIDE_FLIP:
+                return t
+    return None
+
+
+# ---------------------------------------------------------------- triggers
+def _clean(w):
+    return re.sub(r"^[\W_]+|[\W_]+$", "", str(w).lower())
+
+
+def _has_digit(w):
+    return bool(re.search(r"\d", str(w)))
+
+
+def find_triggers(words, profile):
+    """Word triggers in `words` (list of str): [{i, j, kind, text}] with j exclusive (words[i:j]).
+
+    kind is "number", "month" or "question". Multi-word profile entries match as phrases, longest first.
+    One prefix letter from triggers.prefixes is stripped from the first word (he: בשלוש). Digits count as
+    numbers. Months in triggers.ambiguous (en: may, march) count only with a digit or year within 2 words."""
+    tr = profile.get("triggers", {})
+    prefixes = set(tr.get("prefixes", []))
+    ambiguous = {a.lower() for a in tr.get("ambiguous", [])}
+    qmarks = tr.get("question_marks", ["?"])
+    entries = {}
+    for kind, key in (("number", "number_words"), ("month", "months")):
+        for e in tr.get(key, []):
+            entries.setdefault(tuple(e.lower().split()), kind)
+    maxlen = max((len(k) for k in entries), default=1)
+    clean = [_clean(w) for w in words]
+    n = len(words)
+
+    def firsts(c):
+        yield c
+        if c[:1] in prefixes and len(c) > 1:
+            yield c[1:]
+
+    found, i = [], 0
+    while i < n:
+        hit = None
+        for L in range(min(maxlen, n - i), 0, -1):
+            rest = tuple(clean[i + 1:i + L])
+            for first in firsts(clean[i]):
+                kind = entries.get((first,) + rest)
+                if kind:
+                    hit = (i + L, kind, (first,) + rest)
+                    break
+            if hit:
+                break
+        if hit is None and any(_has_digit(c) for c in firsts(clean[i])):
+            hit = (i + 1, "number", None)
+        if hit and hit[1] == "month" and hit[2] and " ".join(hit[2]) in ambiguous:
+            near = list(range(max(0, i - 2), i)) + list(range(hit[0], min(n, hit[0] + 2)))
+            if not any(_has_digit(words[k]) for k in near):
+                hit = None
+        if hit:
+            found.append({"i": i, "j": hit[0], "kind": hit[1], "text": " ".join(str(w) for w in words[i:hit[0]])})
+            i = hit[0]
+        else:
+            i += 1
+    for k, w in enumerate(words):
+        if any(q in str(w) for q in qmarks):
+            found.append({"i": k, "j": k + 1, "kind": "question", "text": str(w)})
+    return sorted(found, key=lambda f: (f["i"], f["j"]))
 
 
 def emphasis_swaps(source_emphasis, profile):
@@ -192,25 +271,70 @@ def _family(font):
     return ""
 
 
-def font_metrics(file):
-    """{family, x_height_ratio, avg_advance, weight, italic_angle}, or None when it cannot be read."""
+def _face_metrics(f, file, index=0):
+    upm = f["head"].unitsPerEm or 1000
+    os2 = f["OS/2"] if "OS/2" in f else None
+    xh = getattr(os2, "sxHeight", 0) or 0
+    ch = getattr(os2, "sCapHeight", 0) or 0
+    adv = [a for a, _ in f["hmtx"].metrics.values() if a > 0]
+    weight = getattr(os2, "usWeightClass", None)
+    wrange = None
+    if "fvar" in f:
+        for ax in f["fvar"].axes:
+            if ax.axisTag == "wght":
+                weight = int(round(ax.defaultValue))
+                wrange = [int(round(ax.minValue)), int(round(ax.maxValue))]
+    return {"family": _family(f), "file": str(file), "face": index,
+            "x_height_ratio": round(xh / ch, 4) if xh and ch else None,
+            "avg_advance": round(sum(adv) / len(adv) / upm, 4) if adv else None,
+            "weight": weight, "weight_range": wrange,
+            "italic_angle": float(f["post"].italicAngle) if "post" in f else 0.0}
+
+
+@functools.lru_cache(maxsize=512)
+def _faces_cached(file):
     ttLib = _fonttools()
     if ttLib is None:
-        return None
+        return ()
     try:
-        f = ttLib.TTFont(str(file), fontNumber=0, lazy=True)
-        upm = f["head"].unitsPerEm or 1000
-        os2 = f["OS/2"] if "OS/2" in f else None
-        xh = getattr(os2, "sxHeight", 0) or 0
-        ch = getattr(os2, "sCapHeight", 0) or 0
-        adv = [a for a, _ in f["hmtx"].metrics.values() if a > 0]
-        return {"family": _family(f),
-                "x_height_ratio": round(xh / ch, 4) if xh and ch else None,
-                "avg_advance": round(sum(adv) / len(adv) / upm, 4) if adv else None,
-                "weight": getattr(os2, "usWeightClass", None),
-                "italic_angle": float(f["post"].italicAngle) if "post" in f else 0.0}
+        if file.lower().endswith(".ttc"):
+            fonts = list(ttLib.TTCollection(file, lazy=True).fonts)
+        else:
+            fonts = [ttLib.TTFont(file, lazy=True)]
     except Exception:
+        return ()
+    out = []
+    for idx, f in enumerate(fonts):
+        try:
+            out.append(_face_metrics(f, file, idx))
+        except Exception:
+            continue
+    return tuple(out)
+
+
+def font_faces(file):
+    """Metrics of every face in a font file (a .ttc holds several); [] when unreadable or no fontTools."""
+    return [dict(m) for m in _faces_cached(str(file))]
+
+
+def font_metrics(file):
+    """First face: {family, x_height_ratio, avg_advance, weight, weight_range, italic_angle}, or None.
+
+    A variable font reports its wght axis default as `weight` and [min, max] as `weight_range`."""
+    faces = font_faces(file)
+    return faces[0] if faces else None
+
+
+def weight_closeness(target, m, span=800.0):
+    """1.0 when `target` is inside the font's weight range; else closeness to the nearest end or default."""
+    if target is None:
         return None
+    rng = m.get("weight_range")
+    if rng:
+        if rng[0] <= target <= rng[1]:
+            return 1.0
+        return _closeness(target, rng[0] if target < rng[0] else rng[1], span)
+    return _closeness(target, m.get("weight"), span)
 
 
 def _scan(font_dirs):
@@ -227,7 +351,7 @@ def _closeness(a, b, span):
     return max(0.0, 1.0 - abs(a - b) / span)
 
 
-def font_candidates(role, src_font_metrics, profile, font_dirs=()):
+def font_candidates(role, src_font_metrics, profile, font_dirs=(), files=None):
     """Ranked [{family, file, score, why}] for `role`, closest to the source font first.
 
     Without fontTools the profile order is returned and `.not_run` contains "font_metrics"."""
@@ -241,16 +365,14 @@ def font_candidates(role, src_font_metrics, profile, font_dirs=()):
         return FontList(items, [] if have_ft else ["font_metrics"])
     s = src_font_metrics
     by_fam = {}
-    for path in _scan(font_dirs):
-        m = font_metrics(path)
-        if not m:
-            continue
+    for m in [m for path in (files if files is not None else _scan(font_dirs)) for m in font_faces(path)]:
+        path = m["file"]
         key = _norm(m["family"])
         for i, fam in enumerate(wanted):
             if _norm(fam) != key:
                 continue
             parts = [(_closeness(s.get("x_height_ratio"), m["x_height_ratio"], 0.4), 0.4, "x-height ratio"),
-                     (_closeness(s.get("weight"), m["weight"], 800.0), 0.3, "weight"),
+                     (weight_closeness(s.get("weight"), m), 0.3, "weight"),
                      (_closeness(s.get("avg_advance"), m["avg_advance"], 0.5), 0.2, "advance width"),
                      (_closeness(abs(s.get("italic_angle") or 0), abs(m["italic_angle"] or 0), 20.0), 0.1, "slant")]
             got = [(c, w, nm) for c, w, nm in parts if c is not None]
@@ -274,11 +396,19 @@ def adapt(pack, to_code, from_code=None, source_wps=None, target_wps=None, font_
     pack = Path(pack)
     if not pack.is_dir():
         raise ValueError(f"pack folder not found: {pack}")
-    fp = store.read_json(pack / "fingerprint.json", {}) or {}
-    from_code = from_code or fp.get("lang") or "en"
+    fp = store.read_json(pack / "fingerprint.json", {})
+    if not isinstance(fp, dict):
+        raise ValueError("fingerprint.json must be a JSON object")
+    from_code = from_code or fp.get("lang")
+    if not from_code:
+        raise ValueError("fingerprint.json has no lang; pass --from <code> (source language)")
     src, dst = load_profile(from_code), load_profile(to_code)
     raw = store.read_json(pack / "laws.json", [])
     laws = raw.get("laws", []) if isinstance(raw, dict) else raw
+    if not isinstance(laws, list):
+        raise ValueError("laws.json must hold a list of laws (or {\"laws\": [...]})")
+    if fp.get("elements") is not None and not isinstance(fp["elements"], list):
+        raise ValueError("fingerprint.json elements must be a list")
     sw = float(source_wps) if source_wps else float(src["speech_wps_typical"])
     tw = float(target_wps) if target_wps else float(dst["speech_wps_typical"])
     ratio = round(sw / tw, 4)
@@ -287,10 +417,13 @@ def adapt(pack, to_code, from_code=None, source_wps=None, target_wps=None, font_
     elements = fp.get("elements") or list(DEFAULT_ELEMENTS)
     src_metrics = fp.get("font_metrics") if isinstance(fp.get("font_metrics"), dict) else {}
     fonts, not_run = {}, []
+    files = _scan(font_dirs)  # scanned once for all roles
     for role in ROLES:
-        c = font_candidates(role, src_metrics.get(role), dst, font_dirs)
+        c = font_candidates(role, src_metrics.get(role), dst, font_dirs, files=files)
         fonts[role] = list(c)[:3]
         not_run += [x for x in c.not_run if x not in not_run]
+    if _fonttools() is not None and not src_metrics:
+        not_run.append("font_metrics_source")
     src_emph = (fp.get("caption") or {}).get("emphasis") or src["caption"].get("emphasis", [])
     out = {"from_lang": from_code, "to_lang": to_code, "timing_ratio": ratio, "laws_scaled": n_scaled,
            "laws": scaled, "mirror": mirror_plan(elements, dst["dir"], src["dir"]), "fonts": fonts,
@@ -319,7 +452,7 @@ def _main(argv=None):
     d = sub.add_parser("adapt")
     d.add_argument("pack")
     d.add_argument("--to", required=True)
-    d.add_argument("--from-lang")
+    d.add_argument("--from-lang", "--from", dest="from_lang")
     d.add_argument("--source-wps", type=float)
     d.add_argument("--target-wps", type=float)
     d.add_argument("--font-dir", action="append", default=[])
@@ -352,6 +485,9 @@ def _main(argv=None):
     except (KeyError, ValueError) as e:
         print(str(e.args[0]) if isinstance(e, KeyError) and e.args else str(e), file=sys.stderr)
         return 2
+    except OSError as e:
+        print(f"cannot write or read a file: {e}", file=sys.stderr)
+        return 3
     return 0
 
 

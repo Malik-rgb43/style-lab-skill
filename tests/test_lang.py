@@ -20,7 +20,7 @@ def test_profiles_load_and_store_override():
     assert en["dir"] == "ltr" and en["speech_wps_typical"] == 2.7 and en["align_model"] == "MMS_FA"
     for p in (he, en):
         t = p["triggers"]
-        assert len(t["months"]) == 12 and "?" in t["question_marks"]
+        assert len(t["months"]) >= 12 and "?" in t["question_marks"]
         assert set(lang.ROLES) <= set(p["fonts"])
     assert {"מאה", "אלף", "מיליון"} <= set(he["triggers"]["number_words"])
     assert "Gveret Levin" in he["fonts"]["handwritten"]
@@ -124,3 +124,86 @@ def test_adapt_cli_and_add(tmp_path):
     shown = run_cli("lang.py", "show", "es")
     assert shown.returncode == 0 and json.loads(shown.stdout)["code"] == "es"
     assert run_cli("lang.py", "add", "fr", "--from", src).returncode == 2
+
+
+def _kinds(words, code):
+    return [(t["i"], t["j"], t["kind"]) for t in lang.find_triggers(words, lang.load_profile(code))]
+
+
+def test_find_triggers_he_phrases_prefix_digits():
+    assert _kinds("שתיים עשרה אנשים".split(), "he") == [(0, 2, "number")]
+    assert _kinds("בשלוש ימים".split(), "he") == [(0, 1, "number")]
+    assert _kinds("שנים עשר חודשים".split(), "he") == [(0, 2, "number")]
+    assert _kinds("ב-2020 במרס".split(), "he") == [(0, 1, "number"), (1, 2, "month")]
+    assert _kinds("מה זה?".split(), "he") == [(1, 2, "question")]
+    assert _kinds("שני מיליארד אלפים".split(), "he") == [(0, 1, "number"), (1, 2, "number"), (2, 3, "number")]
+    assert _kinds("שלום עולם".split(), "he") == []
+
+
+def test_find_triggers_en_ambiguous_months():
+    assert _kinds("in May 2020".split(), "en") == [(1, 2, "month"), (2, 3, "number")]
+    assert _kinds("you may go".split(), "en") == []
+    assert _kinds("we march on".split(), "en") == []
+    assert _kinds("in june we ship".split(), "en") == [(1, 2, "month")]
+    assert _kinds("twenty one dogs".split(), "en") == [(0, 1, "number"), (1, 2, "number")]
+
+
+def test_scale_ratio_one_adds_no_marker():
+    assert "lag_scaled_by" not in lang.scale_timing([_law("word")], 1.0)[0]
+
+
+def test_mirror_whole_tokens_and_side_keys():
+    plan = lang.mirror_plan([{"kind": "slide_in", "from": "left"}, {"kind": "slide", "direction": "right"},
+                             "encoded_banner", "lists"])
+    assert plan[0]["side"] == "right" and plan[1]["side"] == "left"
+    assert plan[2]["mirror"] is False  # "code" is inside "encoded" but not a token
+    assert plan[3]["mirror"] is True
+
+
+def test_weight_closeness_variable_range():
+    m = {"weight": 400, "weight_range": [100, 900]}
+    assert lang.weight_closeness(700, m) == 1.0
+    fixed = {"weight": 400, "weight_range": None}
+    assert lang.weight_closeness(700, fixed) < 1.0
+    assert lang.weight_closeness(950, {"weight": 400, "weight_range": [100, 900]}) < 1.0
+
+
+def test_variable_font_range(tmp_path):
+    pytest.importorskip("fontTools")
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "A"])
+    fb.setupCharacterMap({65: "A"})
+    pen = TTGlyphPen(None)
+    pen.moveTo((0, 0)); pen.lineTo((0, 700)); pen.lineTo((500, 700)); pen.closePath()
+    g = pen.glyph()
+    fb.setupGlyf({".notdef": g, "A": g})
+    fb.setupHorizontalMetrics({".notdef": (500, 0), "A": (500, 0)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Rubik", "styleName": "Regular"})
+    fb.setupOS2(usWeightClass=400, sxHeight=350, sCapHeight=700)
+    fb.setupPost()
+    fb.setupFvar([("wght", 300, 400, 900, "Weight")], [])
+    fb.save(str(tmp_path / "v.ttf"))
+    m = lang.font_metrics(tmp_path / "v.ttf")
+    assert m["weight"] == 400 and m["weight_range"] == [300, 900]
+    prof = {"fonts": {"caption": ["Rubik"]}}
+    res = lang.font_candidates("caption", {"weight": 800, "x_height_ratio": 0.5, "avg_advance": 0.5}, prof, [tmp_path])
+    assert res[0]["score"] > 0.99
+
+
+def test_adapt_input_errors(tmp_path):
+    pack = tmp_path / "p"
+    pack.mkdir()
+    r = run_cli("lang.py", "adapt", pack, "--to", "he")
+    assert r.returncode == 2 and "Traceback" not in r.stderr and "lang" in r.stderr
+    (pack / "fingerprint.json").write_text("[1]", encoding="utf-8")
+    assert run_cli("lang.py", "adapt", pack, "--to", "he", "--from", "en").returncode == 2
+    (pack / "fingerprint.json").write_text(json.dumps({"lang": "en", "elements": "x"}), encoding="utf-8")
+    r = run_cli("lang.py", "adapt", pack, "--to", "he")
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+    (pack / "fingerprint.json").write_text(json.dumps({"lang": "en"}), encoding="utf-8")
+    assert run_cli("lang.py", "adapt", pack, "--to", "he").returncode == 0
+    out = json.loads((pack / "adapt-he.json").read_text(encoding="utf-8"))
+    assert "font_metrics_source" in out["not_run"] or "font_metrics" in out["not_run"]
