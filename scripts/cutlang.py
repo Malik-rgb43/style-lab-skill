@@ -6,6 +6,7 @@
 Library:
     norm_for_align(word, lang, vocab=None) -> str   text the aligner model can score ('' if nothing left)
     norm_for_compare(word, lang) -> str             same mapping without a vocabulary (check pass)
+    fold_latin(text) -> str                          special Latin letters folded, accents dropped
     lexicon(lang) -> dict                            built-in merged with the user file (user wins)
     add_word(lang, word, spelling)
 
@@ -137,6 +138,11 @@ def _strip_marks(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
+def fold_latin(text: str) -> str:
+    """Fold special Latin letters (ß, ø, æ, ł, ...) and drop combining marks (NFKD); callers lowercase."""
+    return _strip_marks(text.translate(_FOLD))
+
+
 def _he(word, vocab):
     lex = lexicon("he")
     s = NIQQUD.sub("", word).lower()
@@ -161,7 +167,7 @@ def _latin(word, lang):
     key = word.strip(_EDGE).lower()
     if key in lex:
         word = lex[key]
-    s = _strip_marks(word.translate(_FOLD)).lower().replace("\u2019", "'")
+    s = fold_latin(word).lower().replace("\u2019", "'")
     out = []
     for p in re.findall(r"[a-z']+|\d+", s):
         if p.isdigit():

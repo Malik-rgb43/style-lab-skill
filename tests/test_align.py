@@ -107,6 +107,108 @@ def test_refine_unaligned_word_keeps_asr_times():
     assert (w["start_ms"], w["end_ms"]) == (900, 1600)
 
 
+def test_refine_tiny_gap_no_overlap():
+    # 3 ms CTC gap after a 22 ms word, energy everywhere: the slice floor must not cross the midpoint
+    db = _curve(400, [(0, 400)])
+    words = [_ctc_word(0, 1000, 1022), _ctc_word(1, 1025, 1300)]
+    align.refine_edges(words, db, floor_db=-50.0)
+    assert words[1]["start_ms"] >= words[0]["end_ms"]
+    for w in words:
+        assert w["start_ms"] < w["end_ms"]
+
+
+def test_refine_random_never_overlaps():
+    rng = np.random.default_rng(7)
+    for _ in range(500):
+        t, ws = int(rng.integers(0, 300)), []
+        for i in range(int(rng.integers(2, 8))):
+            cs = t + int(rng.integers(0, 120))
+            ce = cs + int(rng.integers(20, 400))
+            ws.append(_ctc_word(i, cs, ce))
+            t = ce + int(rng.integers(0, 200))
+        db = np.where(rng.random(t // 10 + 100) > 0.3, -20.0, -70.0)
+        align.refine_edges(ws, db, floor_db=None if rng.random() < 0.5 else -50.0)
+        for a, b in zip(ws, ws[1:]):
+            assert a["end_ms"] <= b["start_ms"]
+        assert all(w["start_ms"] < w["end_ms"] for w in ws)
+
+
+# ---------- align() driver (backend stubbed) ----------
+
+def _stub_backend(monkeypatch, timings):
+    monkeypatch.setattr(align, "preflight", lambda *a, **k: None)
+    monkeypatch.setattr(align, "load_audio", lambda src: np.zeros(16000 * 3, dtype=np.float32))
+
+    def fake(words, audio, chunks, allow_download, log):
+        for w in words:
+            if w["i"] in timings:
+                w["ctc_start_ms"], w["ctc_end_ms"], w["score"] = timings[w["i"]]
+        return "stub"
+    monkeypatch.setattr(align, "_align_he", fake)
+
+
+def test_low_score_word_keeps_flag_and_asr_span(monkeypatch):
+    _stub_backend(monkeypatch, {0: (520, 900, 0.05), 1: (1500, 1900, 0.8)})
+    doc = {"language": "he", "words": [
+        {"i": 0, "w": "שלום", "start_ms": 400, "end_ms": 1100, "p": 0.9},
+        {"i": 1, "w": "עולם", "start_ms": 1400, "end_ms": 2000, "p": 0.9}]}
+    out = align.align("clip.wav", doc, "he", threads=None)
+    w0, w1 = out["words"]
+    assert w0["flag"] == "low_score"
+    assert (w0["asr_start_ms"], w0["asr_end_ms"]) == (400, 1100)
+    assert (w0["ctc_start_ms"], w0["ctc_end_ms"]) == (520, 900)
+    assert w0["start_ms"] <= 520 and w0["end_ms"] >= 900  # refined CTC times, not ASR
+    assert "flag" not in w1
+    assert doc["words"][0]["start_ms"] == 400  # input doc untouched
+
+
+def test_hint_for_unaligned_latin_words(monkeypatch):
+    _stub_backend(monkeypatch, {0: (520, 900, 0.8)})
+    doc = {"language": "he", "words": [
+        {"i": 0, "w": "שלום", "start_ms": 400, "end_ms": 1100, "p": 0.9},
+        {"i": 1, "w": "Zorblax", "start_ms": 1400, "end_ms": 2000, "p": 0.9}]}
+    lines = []
+    out = align.align("clip.wav", doc, "he", log=lines.append)
+    assert out["words"][1]["flag"] == "unaligned"
+    hints = [x for x in lines if x.startswith("hint:")]
+    assert len(hints) == 1 and "1 word" in hints[0] and "cutlang.py lexicon add" in hints[0]
+
+
+def test_tmp_removed_when_write_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(align, "align", lambda *a, **k: {"words": [], "align_stats": {}})
+
+    def boom(*a, **k):
+        raise ValueError("boom")
+    monkeypatch.setattr(align.json, "dump", boom)
+    src, words, out = _tiny_inputs(tmp_path)
+    with pytest.raises(ValueError):
+        align.main([str(src), str(words), "--out", str(out)])
+    assert not out.exists() and not Path(str(out) + ".tmp").exists()
+
+
+# ---------- CTC core on a synthetic emission ----------
+
+@pytest.mark.skipif(importlib.util.find_spec("torch") is None or importlib.util.find_spec("torchaudio") is None,
+                    reason="needs torch + torchaudio")
+def test_align_windows_synthetic_emission():
+    import torch
+    vocab = {"-": 0, "a": 1, "b": 2}
+    T = 50  # 1 s of audio -> 20 ms per frame
+    logits = torch.full((1, T, 3), -10.0)
+    logits[0, :, 0] = 10.0
+    for f in (10, 11, 12):
+        logits[0, f] = torch.tensor([-10.0, 10.0, -10.0])
+    for f in (13, 14, 30, 31):
+        logits[0, f] = torch.tensor([-10.0, -10.0, 10.0])
+    words = [{"i": 0, "w": "ab", "norm": "ab", "asr_start_ms": 150, "asr_end_ms": 350},
+             {"i": 1, "w": "b", "norm": "b", "asr_start_ms": 550, "asr_end_ms": 700}]
+    align._align_windows(words, np.zeros(16000, dtype=np.float32), [(0, 1, 0, 1000)],
+                         lambda seg: logits, vocab, 0, None, lambda m: None)
+    assert (words[0]["ctc_start_ms"], words[0]["ctc_end_ms"]) == (200, 300)
+    assert (words[1]["ctc_start_ms"], words[1]["ctc_end_ms"]) == (600, 640)
+    assert words[0]["score"] > 0.9 and "flag" not in words[0]
+
+
 # ---------- normalisation per backend ----------
 
 def test_word_norm_flags_non_latin_script():

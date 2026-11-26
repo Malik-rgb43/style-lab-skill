@@ -24,6 +24,10 @@ Output: same shape as words.json; each word gets start_ms/end_ms (refined), asr_
 asr_end_ms (original), ctc_start_ms/ctc_end_ms (raw CTC), score (0..1, mean token probability)
 and an optional flag (unaligned, unaligned_script, stretched, low_score). An "align_stats" block
 reports how far the edges moved. --from-word/--to-word keep only that range in the output.
+A low-score word (score < 0.15) still gets its refined CTC times, flagged "low_score"; its
+asr_start_ms/asr_end_ms stay in the output so the cut step can weigh both spans.
+Unaligned words with Latin letters in a Hebrew file get a one-line hint to add their spelling
+with `cutlang.py lexicon add`.
 
 Exit: 0 done, 1 error (bad input, ffmpeg failed), 2 usage, 3 missing package or model.
 """
@@ -137,7 +141,7 @@ def _non_latin_letter(c, lang):
         return False
     if lang == "he" and "א" <= c <= "ת":
         return False
-    base = cutlang._strip_marks(c.translate(cutlang._FOLD)).lower()
+    base = cutlang.fold_latin(c).lower()
     return not all("a" <= b <= "z" for b in base)
 
 
@@ -261,7 +265,6 @@ def _align_windows(words, audio, chunks, emit, vocab, blank, space, log):
 
 
 def _align_he(words, audio, chunks, allow_download, log):
-    import torch
     from huggingface_hub import hf_hub_download
     from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForCTC
 
@@ -320,15 +323,15 @@ def _align_mms(words, audio, chunks, lang, allow_download, log):
 
 # ---------------------------------------------------------------- energy refinement
 
-def refine_edges(words, slice_db: np.ndarray, floor_db: float = None) -> None:
-    """Move each aligned word's edges onto the audio energy (10 ms slices of `slice_db`).
+def refine_edges(words, db_slices: np.ndarray, floor_db: float = None) -> None:
+    """Move each aligned word's edges onto the audio energy (10 ms slices of `db_slices`).
 
     start = energy onset walking back from the CTC start (up to 120 ms), end = where the energy
     falls to the floor walking forward from the CTC end (up to 300 ms). Neither edge passes the
     midpoint of the gap to the neighbour word, so refined words never overlap. `floor_db` None
     = local floor (10th percentile of +-600 ms around the word + 8 dB). Words without CTC times
     keep their ASR times."""
-    db = slice_db
+    db = db_slices
     last = len(db) - 1
     dur_ms = len(db) * 10
 
@@ -355,7 +358,7 @@ def refine_edges(words, slice_db: np.ndarray, floor_db: float = None) -> None:
         lim = max(-(-lo_ms // 10), c0 - BACK_SLICES, 0)
         while k - 1 >= lim and db[k - 1] > floor:
             k -= 1
-        start = min(k * 10, cs)
+        start = max(min(k * 10, cs), lo_ms)  # slice floor must not cross the gap midpoint
         # offset: walk forward from c1 while above the floor
         k = c1
         lim = min(hi_ms // 10, c1 + FWD_SLICES, last + 1)
@@ -417,8 +420,8 @@ def align(source, words_doc, lang, chunk_s=30, margin_s=0.6, allow_download=Fals
         audio = load_audio(source)
         dur_ms = int(len(audio) / SR * 1000)
         db = slice_db(audio)
-        import torch
         if threads:
+            import torch
             torch.set_num_threads(threads)
         chunks = make_chunks(words, chunk_s, margin_s, dur_ms)
         log(f"{len(words)} words, {len(chunks)} windows, audio {dur_ms / 1000:.1f}s")
@@ -429,6 +432,11 @@ def align(source, words_doc, lang, chunk_s=30, margin_s=0.6, allow_download=Fals
         for w in words:
             if w["norm"] and "ctc_start_ms" not in w and not w.get("flag"):
                 w["flag"] = "unaligned"
+    if lang == "he":
+        latin = sum(1 for w in words if "ctc_start_ms" not in w and re.search(r"[A-Za-z]", w["w"]))
+        if latin:
+            log(f"hint: {latin} word(s) with Latin letters kept ASR times; add their Hebrew spelling "
+                f"with: cutlang.py lexicon add --lang he --word <word> --spelling <spelling>")
     refine_edges(words, db)
     for w in words:
         if "ctc_start_ms" in w and w.get("score", 1) < LOW_SCORE:
@@ -492,9 +500,16 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 1
     tmp = a.out + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, a.out)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, a.out)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
     print(json.dumps(out["align_stats"], ensure_ascii=False))
     print(f"done -> {a.out}")
     return 0

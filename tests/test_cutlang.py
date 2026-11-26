@@ -91,3 +91,8 @@ def test_lexicon_lookup_strips_edge_punctuation(home):
 def test_cli_rejects_bad_lang(home):
     r = run_cli("cutlang.py", "lexicon", "list", "--lang", "../x")
     assert r.returncode == 1
+
+
+def test_fold_latin_public():
+    import cutlang
+    assert cutlang.fold_latin("Straße Łódź Café").lower() == "strasse lodz cafe"
