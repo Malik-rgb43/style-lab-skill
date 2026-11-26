@@ -91,3 +91,28 @@ def test_list_has_clients_column(home):
     r = run_cli("styles.py", "list")
     assert r.returncode == 0
     assert all(line.split("\t")[4].startswith("clients:") for line in r.stdout.strip().splitlines())
+
+
+def test_write_on_v1_creates_backup(home):
+    seed(home)
+    r = run_cli("styles.py", "set", "gabi-organic", "aspect=16:9")
+    assert r.returncode == 0, r.stderr
+    baks = list(home.glob("styles.json.bak-*"))
+    assert len(baks) == 1
+    assert baks[0].read_bytes() == FIX.read_bytes()
+    d = json.loads((home / "styles.json").read_text(encoding="utf-8"))
+    assert d["version"] == 2 and d["styles"][0]["aspect"] == "16:9"
+
+
+def test_clients_lookup_failure_does_not_crash(home, monkeypatch, capsys):
+    import types
+    import styles
+    seed(home)
+
+    def boom(slug):
+        raise ValueError("corrupt")
+    monkeypatch.setitem(sys.modules, "clients", types.SimpleNamespace(linked_clients=boom))
+    monkeypatch.setattr(sys, "argv", ["styles.py", "list"])
+    assert styles.main() == 0
+    out = capsys.readouterr()
+    assert "gabi-organic" in out.out and "warning" in out.err

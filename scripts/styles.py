@@ -50,6 +50,15 @@ def registry_path():
     return Path(arg) if arg else store.path("styles.json")
 
 
+def _backup_once(path):
+    """Copy path to <name>.bak-YYYYMMDD unless today's backup exists. Returns the backup path or None."""
+    bak = path.with_name(f"{path.name}.bak-{dt.date.today():%Y%m%d}")
+    if bak.exists():
+        return None
+    shutil.copy2(path, bak)
+    return bak
+
+
 def migrate(data):
     """v1 -> v2 in place. Returns (data, changed)."""
     changed = False
@@ -91,9 +100,15 @@ def find(data, key):
 def clients_for(slug):
     try:
         import clients
-    except ModuleNotFoundError:
+    except ModuleNotFoundError as e:
+        if e.name != "clients":
+            raise
         return []
-    return clients.linked_clients(slug)
+    try:
+        return clients.linked_clients(slug)
+    except Exception as e:  # e.g. corrupt clients.json: show no clients, do not crash
+        print(f"warning: could not read clients for {slug}: {e}", file=sys.stderr)
+        return []
 
 
 def _client_names(slug):
@@ -239,9 +254,8 @@ def cmd_migrate(args):
         state["changed"] = changed
         if not changed:
             raise _Abort(0)
-        bak = path.with_name(f"{path.name}.bak-{dt.date.today():%Y%m%d}")
-        if not bak.exists():
-            shutil.copy2(path, bak)
+        bak = _backup_once(path)
+        if bak:
             state["bak"] = bak
 
     try:
@@ -286,7 +300,8 @@ def main():
     if args.cmd in WRITERS:
 
         def fn(data):
-            migrate(data)  # any write leaves a v2 registry
+            if migrate(data)[1] and registry_path().exists():  # any write leaves a v2 registry
+                _backup_once(registry_path())
             rc = WRITERS[args.cmd](data, args)
             if rc is not None:  # failed: abort before anything is written
                 raise _Abort(rc)
