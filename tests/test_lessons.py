@@ -342,3 +342,27 @@ def test_approve_revalidates_exception_target(home, tmp_path):
                               lambda d: next(x for x in d["lessons"] if x["id"] == t).update(kind="taste", status="rejected"))
     r = run_cli("lessons.py", "approve", e, "--one-note")
     assert r.returncode == 1 and reg(home)["lessons"][-1]["status"] == "candidate"
+
+
+def test_empty_scope_rule_conflicts_everywhere(home, tmp_path):
+    mkstyle_md(tmp_path)
+    c = mkrule("craft", "c everywhere", "--kind", "taste", scope="")
+    s = mkrule("style", "s", "--target", "test-style", scope="ending", approve=False)
+    assert c in run_cli("lessons.py", "conflicts", s).stdout
+    k = mkrule("craft", "k", "--kind", "quality", scope="captions", approve=False)
+    assert c in run_cli("lessons.py", "conflicts", k).stdout
+
+
+def test_same_target_rule_conflicts_without_shared_word(home, tmp_path):
+    mkstyle_md(tmp_path)
+    (tmp_path / "other").mkdir()
+    mkstyle_md(tmp_path / "other", name="Other Style")
+    s1 = mkrule("style", "s1", "--target", "test-style", scope="opening")
+    o1 = mkrule("style", "o1", "--target", "other-style", scope="closing")
+    c1 = mkrule("craft", "c1", "--kind", "taste", scope="titles")
+    s2 = mkrule("style", "s2", "--target", "test-style", scope="closing", approve=False)
+    r = run_cli("lessons.py", "conflicts", s2)
+    assert s1 in r.stdout and o1 not in r.stdout and c1 not in r.stdout
+    # craft lessons have no target: craft rules still need a shared word (or an empty scope)
+    c2 = mkrule("craft", "c2", "--kind", "taste", scope="endings", approve=False)
+    assert "no possible conflicts" in run_cli("lessons.py", "conflicts", c2).stdout

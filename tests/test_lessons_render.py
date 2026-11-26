@@ -3,8 +3,10 @@ import json
 
 from conftest import run_cli
 
-START = "<!-- style-lab:learned-rules:start -->"
-END = "<!-- style-lab:learned-rules:end -->"
+START = "<!-- style-lab:learned-rules:start test-style -->"
+END = "<!-- style-lab:learned-rules:end test-style -->"
+LEGACY_START = "<!-- style-lab:learned-rules:start -->"
+LEGACY_END = "<!-- style-lab:learned-rules:end -->"
 HAND = (
     "# Test style\r\n"
     "\r\n"
@@ -63,9 +65,11 @@ def reg_last_id():
     return json.loads(r.stdout)[-1]["id"]
 
 
-def strip_block(data: bytes) -> bytes:
-    s = data.index(START.encode())
-    e = data.index(END.encode()) + len(END)
+def strip_block(data: bytes, slug="test-style") -> bytes:
+    start = f"<!-- style-lab:learned-rules:start {slug} -->".encode()
+    end = f"<!-- style-lab:learned-rules:end {slug} -->".encode()
+    s = data.index(start)
+    e = data.index(end) + len(end)
     nl = b"\r\n" if b"\r\n" in data else b"\n"
     assert data[e:e + len(nl)] == nl
     return data[:s] + data[e + len(nl):]
@@ -365,3 +369,171 @@ def test_edit_rule_rerender_all_or_nothing(home, tmp_path):
     r = run_cli("lessons.py", "edit", lid, "scope=intro")
     assert r.returncode == 1 and str(style_md) in r.stderr
     assert lesson(home)["scope"] == "captions"
+
+
+# ---------- final review fixes ----------
+
+def test_shared_pack_keeps_both_blocks(home, tmp_path):
+    style_md, _ = mkstyle(tmp_path)
+    skill_en = tmp_path / "skill-en" / "SKILL.md"
+    skill_en.parent.mkdir()
+    skill_en.write_bytes(b"# EN skill\n")
+    r = run_cli("styles.py", "add", "--name", "Test Style EN", "--pack", style_md.parent, "--skill", skill_en)
+    assert r.returncode == 0, r.stderr
+    before = style_md.read_bytes()
+    a = proposed_style_lesson()
+    assert run_cli("lessons.py", "approve", a).returncode == 0
+    after_a = style_md.read_bytes()
+    add("--target", "test-style-en", "--scope", "intro", layer="style", text="en titles",
+        measurable="title at y 20%")
+    b = reg_last_id()
+    r = run_cli("lessons.py", "approve", b, "--one-note")
+    assert r.returncode == 0, r.stderr
+    text = style_md.read_bytes()
+    start_en = b"<!-- style-lab:learned-rules:start test-style-en -->"
+    end_en = b"<!-- style-lab:learned-rules:end test-style-en -->"
+    assert text.count(START.encode()) == 1 and text.count(start_en) == 1 and text.count(end_en) == 1
+    # A's block is intact and byte-identical; B's block sits right after it
+    a_block = after_a[after_a.index(START.encode()):after_a.index(END.encode()) + len(END)]
+    assert a_block in text and b"caption baseline at y >= 90%" in a_block
+    assert text.index(END.encode()) < text.index(start_en)
+    assert b"1. title at y 20%" in text[text.index(start_en):]
+    # hand text byte-identical once both blocks are taken out
+    assert strip_block(strip_block(text, "test-style-en")) == before
+    # re-rendering A touches only A's block
+    c = proposed_style_lesson(text="zoom is slow", measurable="push-in lasts >= 1.5 s")
+    assert run_cli("lessons.py", "approve", c, "--yes-no-conflict").returncode == 0
+    text2 = style_md.read_bytes()
+    en_block = text[text.index(start_en):text.index(end_en) + len(end_en)]
+    assert en_block in text2 and b"2. push-in lasts" in text2
+    assert strip_block(strip_block(text2, "test-style-en")) == before
+    assert b"1. title at y 20%" in skill_en.read_bytes() and b"caption baseline" not in skill_en.read_bytes()
+
+
+def test_legacy_empty_pair_is_adopted(home, tmp_path):
+    body = f"# S\n\n## Review-round rules\n{LEGACY_START}\n{LEGACY_END}\n\n## Other\n"
+    style_md, _ = mkstyle(tmp_path, body=body)
+    lid = proposed_style_lesson()
+    assert run_cli("lessons.py", "approve", lid).returncode == 0
+    text = style_md.read_text(encoding="utf-8")
+    assert LEGACY_START not in text and START in text
+    assert text.startswith("# S\n\n## Review-round rules\n" + START)
+    assert text.endswith(END + "\n\n## Other\n")
+
+
+def test_legacy_pair_with_rules_refused(home, tmp_path):
+    body = f"# S\n\n{LEGACY_START}\n1. old rule\n{LEGACY_END}\n"
+    style_md, _ = mkstyle(tmp_path, body=body)
+    lid = proposed_style_lesson()
+    r = run_cli("lessons.py", "approve", lid)
+    assert r.returncode == 1 and "nothing was written" in r.stderr
+    assert style_md.read_text(encoding="utf-8") == body and lesson(home)["status"] == "proposed"
+
+
+def test_block_holding_another_marker_refused(home, tmp_path):
+    other = "<!-- style-lab:learned-rules:start other -->"
+    style_md, _ = mkstyle(tmp_path, body=f"# S\n\n{START}\n{other}\n{END}\n")
+    before = style_md.read_bytes()
+    lid = proposed_style_lesson()
+    r = run_cli("lessons.py", "approve", lid)
+    assert r.returncode == 1 and "marker" in r.stderr
+    assert style_md.read_bytes() == before
+
+
+def test_match_into_rule_rerenders(home, tmp_path):
+    style_md, _ = mkstyle(tmp_path)
+    lid = proposed_style_lesson()
+    assert run_cli("lessons.py", "approve", lid).returncode == 0
+    assert "(evidence: 2," in style_md.read_text(encoding="utf-8")
+    r = match(lid, project="proj-c")
+    assert r.returncode == 0, r.stderr
+    assert "(evidence: 3," in style_md.read_text(encoding="utf-8")
+    # all or nothing: a render that fails saves no evidence
+    broken = style_md.read_bytes() + f"\n{START}\n".encode()
+    style_md.write_bytes(broken)
+    r = match(lid, project="proj-d")
+    assert r.returncode == 1 and "marker" in r.stderr
+    assert len(lesson(home)["evidence"]) == 3 and style_md.read_bytes() == broken
+
+
+def test_merge_into_rule_rerenders(home):
+    add("--kind", "quality")
+    assert run_cli("lessons.py", "approve", "L0001", "--one-note").returncode == 0
+    add("--kind", "quality", text="cuts feel robotic", project="proj-b")
+    r = run_cli("lessons.py", "merge", "L0002", "L0001")
+    assert r.returncode == 0, r.stderr
+    assert "(evidence: 2," in (home / "craft-rules.learned.md").read_text(encoding="utf-8")
+    assert [x["status"] for x in reg(home)["lessons"]] == ["rule", "merged"]
+
+
+def test_rule_rerender_lock_timeout_reraised(home, monkeypatch):
+    import lessons
+    import store
+    add("--kind", "quality")
+    assert run_cli("lessons.py", "approve", "L0001", "--one-note").returncode == 0
+    add("--kind", "quality", text="second", project="proj-b")
+
+    def busy(*a, **k):
+        raise store.LockTimeout(home / "styles.json.lock")
+
+    monkeypatch.setattr(lessons, "_render", busy)
+    calls = (lambda: lessons.match("L0001", {"project": "proj-z", "video": "v1"}),
+             lambda: lessons.merge("L0002", "L0001"))
+    for call in calls:
+        try:
+            call()
+            raise AssertionError("LockTimeout expected")
+        except store.LockTimeout:
+            pass
+    assert len(lesson(home)["evidence"]) == 1
+    assert [x["status"] for x in reg(home)["lessons"]] == ["rule", "candidate"]
+
+
+def test_merge_refuses_rejected_source(home):
+    add("--kind", "quality")
+    add("--kind", "quality", text="second")
+    assert run_cli("lessons.py", "reject", "L0002").returncode == 0
+    r = run_cli("lessons.py", "merge", "L0002", "L0001")
+    assert r.returncode == 1 and "rejected" in r.stderr
+    assert [x["status"] for x in reg(home)["lessons"]] == ["candidate", "rejected"]
+    assert len(lesson(home)["evidence"]) == 1
+
+
+def test_second_file_failure_rolls_back(home, tmp_path, monkeypatch):
+    import lessons
+    style_md, skill = mkstyle(tmp_path)
+    lid = proposed_style_lesson()
+    before, skill_before = style_md.read_bytes(), skill.read_bytes()
+    real = lessons._write_bytes
+
+    def failing(p, data):
+        if p.name == "SKILL.md":
+            raise PermissionError("skill is read-only")
+        return real(p, data)
+
+    monkeypatch.setattr(lessons, "_write_bytes", failing)
+    try:
+        lessons.approve(lid, [])
+        raise AssertionError("approve should fail")
+    except OSError as e:
+        assert str(e).endswith("nothing was written") and "SKILL.md" in str(e)
+    assert style_md.read_bytes() == before and skill.read_bytes() == skill_before
+    assert lesson(home)["status"] == "proposed" and lesson(home)["rule_no"] is None
+
+
+def test_symlinked_style_md_stays_symlink(home, tmp_path):
+    import os
+
+    import pytest
+    style_md, _ = mkstyle(tmp_path)
+    real = tmp_path / "real" / "STYLE.md"
+    real.parent.mkdir()
+    real.write_bytes(style_md.read_bytes())
+    style_md.unlink()
+    try:
+        os.symlink(real, style_md)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not available here")
+    lid = proposed_style_lesson()
+    assert run_cli("lessons.py", "approve", lid).returncode == 0
+    assert style_md.is_symlink() and START in real.read_text(encoding="utf-8")

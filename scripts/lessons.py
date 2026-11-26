@@ -38,8 +38,9 @@ rounds. The same (project, video, t, round) is never counted twice. Only `approv
 settings auto_promote=true) makes a rule. Rules are rendered to:
     craft  -> <store home>/craft-rules.learned.md            (whole file generated)
     client -> <store home>/clients/<slug>/lessons.md         (whole file generated)
-    style  -> the pack's STYLE.md and the style skill file, only between the markers
-              <!-- style-lab:learned-rules:start --> and <!-- style-lab:learned-rules:end -->;
+    style  -> the pack's STYLE.md and the style skill file, only between that style's markers
+              <!-- style-lab:learned-rules:start <slug> --> and <!-- style-lab:learned-rules:end <slug> -->
+              (one block per style, so two styles sharing a pack keep their own blocks);
               hand text outside them is never changed. Each file is backed up once per day
               (<file>.bak-YYYYMMDD) before its first write. The style's styles.json entry
               gets rules_count, and version + 1 whenever its rule files change.
@@ -62,7 +63,7 @@ LAYERS = ("craft", "style", "client", "video")
 KINDS = ("quality", "taste")
 STATUSES = ("candidate", "proposed", "rule", "rejected", "merged", "one-off")
 EDITABLE = ("text", "measurable", "scope", "layer", "target", "kind")
-START = "<!-- style-lab:learned-rules:start -->"
+START = "<!-- style-lab:learned-rules:start -->"  # unslugged: generated files, and the legacy pair
 END = "<!-- style-lab:learned-rules:end -->"
 LEARNED_HEADING = "## Review-round rules (learned)"
 SETTINGS_DEFAULT = {"auto_promote": False}
@@ -289,8 +290,11 @@ def settings():
     return store.read_json(store.path("settings.json"), dict(SETTINGS_DEFAULT))
 
 
-def _record_match(lesson_id, evidence):
+def _record_match(lesson_id, evidence, warnings=None):
+    """Add the evidence; a rule whose evidence grew is re-rendered before the registry is written
+    (all or nothing: a failed render saves no evidence)."""
     out = {}
+    state = {}
 
     def fn(data):
         x = _find(data, lesson_id)
@@ -307,9 +311,12 @@ def _record_match(lesson_id, evidence):
         if x["status"] == "candidate" and _ready(x):
             x["status"] = "proposed"
             x["updated"] = today()
+        if added and x["status"] == "rule":
+            _render(x["layer"], x["target"], data, warnings)  # raises before the registry is written
+            state["rendered"] = True
         out.update(x, added=added)
 
-    store.update_json(registry_path(), _empty(), fn)
+    _save_after_render(fn, state)
     return out
 
 
@@ -323,7 +330,7 @@ def match(lesson_id, evidence, warnings=None):
     """Add evidence (deduplicated); candidate -> proposed at 2 projects/videos or 2 rounds.
     With settings auto_promote the lesson is approved at once. Raises ValueError (or the render
     error of an auto-promotion; the evidence is saved either way)."""
-    out = _record_match(lesson_id, evidence)
+    out = _record_match(lesson_id, evidence, warnings)
     promoted = _auto_promote(out, warnings)
     if promoted:
         out.update(promoted)
@@ -365,7 +372,11 @@ def approve(lesson_id, warnings=None, one_note=False):
             raise ValueError(f"{x['id']} is already a {x['status']}")
         if x.get("exception_of"):
             c = _find(data, x["exception_of"])
-            if x["layer"] != "style" or not c or c["layer"] != "craft" or c["status"] != "rule"                     or c.get("kind") != "taste":
+            if (x["layer"] != "style"
+                    or not c
+                    or c["layer"] != "craft"
+                    or c["status"] != "rule"
+                    or c.get("kind") != "taste"):
                 raise ValueError(f"{x['id']} is an exception to {x['exception_of']}, which is no longer an "
                                  f"approved taste craft rule of the craft layer; it cannot be approved")
         if x["status"] == "candidate" and not one_note:
@@ -385,8 +396,10 @@ def approve(lesson_id, warnings=None, one_note=False):
 
 
 def merge(src_id, into_id, warnings=None):
-    """Move src's evidence into into_id (deduplicated); src becomes merged. Raises ValueError."""
+    """Move src's evidence into into_id (deduplicated); src becomes merged. Merging into a rule
+    re-renders its file before the registry is written (all or nothing). Raises ValueError."""
     out = {}
+    state = {}
 
     def fn(data):
         if src_id == into_id:
@@ -395,7 +408,7 @@ def merge(src_id, into_id, warnings=None):
         for lid, x in ((src_id, a), (into_id, b)):
             if not x:
                 raise ValueError(f"no lesson {lid!r}")
-        if a["status"] in ("one-off", "rule", "merged"):
+        if a["status"] in ("one-off", "rule", "merged", "rejected"):
             raise ValueError(f"{src_id} is {a['status']}: it cannot be merged")
         if b["status"] in ("one-off", "rejected", "merged"):
             raise ValueError(f"{into_id} is {b['status']}: nothing can be merged into it")
@@ -409,9 +422,12 @@ def merge(src_id, into_id, warnings=None):
         if b["status"] == "candidate" and _ready(b):
             b["status"] = "proposed"
         a["updated"] = b["updated"] = today()
+        if b["status"] == "rule":
+            _render(b["layer"], b["target"], data, warnings)  # raises before the registry is written
+            state["rendered"] = True
         out.update(b)
 
-    store.update_json(registry_path(), _empty(), fn)
+    _save_after_render(fn, state)
     promoted = _auto_promote(out, warnings)
     if promoted:
         out.update(promoted)
@@ -485,9 +501,11 @@ def _words(text):
 
 
 def conflicts(lesson_id):
-    """Rules that might clash with this lesson, for Claude to judge. Structural only: a rule in the
-    same layer (same target) or a lower layer (craft < style < client) that shares a scope word of
-    4+ letters, or another exception to the same craft rule. Raises ValueError."""
+    """Rules that might clash with this lesson, for Claude to judge. Structural only. Considered:
+    rules of a lower layer (craft < style < client) and rules of the same layer and target. Of
+    those, one is listed when it has an empty scope (= everywhere), shares a scope word of 4+
+    letters, has the same style or client target, or is another exception to the same craft rule.
+    An exception's own craft rule is never listed. Raises ValueError."""
     data = load()
     x = _find(data, lesson_id)
     if not x:
@@ -504,7 +522,9 @@ def conflicts(lesson_id):
         if x.get("exception_of") == r["id"]:
             continue  # an exception's own target is not a conflict
         same_exc = bool(x.get("exception_of")) and x.get("exception_of") == r.get("exception_of")
-        if (mine & _words(r["scope"])) or same_exc:
+        everywhere = not (r["scope"] or "").strip()
+        same_target = rr == rank and r["target"] is not None and r["target"] == x["target"]
+        if everywhere or same_target or same_exc or (mine & _words(r["scope"])):
             out.append({"id": r["id"], "layer": r["layer"], "measurable": r["measurable"],
                         "scope": r["scope"]})
     return out
@@ -534,27 +554,61 @@ def _rule_lines(data, layer, target):
     return [rule_line(x) for x in sorted(rules, key=lambda x: x["rule_no"])]
 
 
-def _block(lines, nl):
-    return nl.join([START.encode(), *(ln.encode("utf-8") for ln in lines), END.encode()])
+def markers(slug):
+    """The start and end marker of one style's learned-rules block."""
+    return (f"<!-- style-lab:learned-rules:start {slug} -->", f"<!-- style-lab:learned-rules:end {slug} -->")
+
+
+def _block(lines, nl, start=START, end=END):
+    return nl.join([start.encode(), *(ln.encode("utf-8") for ln in lines), end.encode()])
 
 
 _HEADING = re.compile(rb"(?mi)^(?:\xef\xbb\xbf)?#{1,6}[ \t][^\n]*review-round rules[^\n]*$")
+_ANY_MARKER = re.compile(rb"<!-- style-lab:learned-rules:(?:start|end)(?: [a-z0-9][a-z0-9-]*)? -->")
+_ANY_END = re.compile(rb"<!-- style-lab:learned-rules:end(?: [a-z0-9][a-z0-9-]*)? -->")
 
 
-def splice(data: bytes, lines, where="file") -> bytes:
-    """Put the rule block into data; every byte outside the block stays as it is.
-    Existing markers: replace between them. Else insert right after the first heading containing
-    "Review-round rules", else append a learned-rules section. Damaged markers raise ValueError."""
-    nl = b"\r\n" if b"\r\n" in data else b"\n"
-    block = _block(lines, nl)
-    s_b, e_b = START.encode(), END.encode()
+def _pair(data, start, end, where, whose):
+    """(i, j) span of the one well-formed start..end pair, or None when neither marker is there.
+    A lone or repeated marker, an end before the start, or another learned-rules marker between
+    them raises ValueError."""
+    s_b, e_b = start.encode(), end.encode()
     ns, ne = data.count(s_b), data.count(e_b)
-    if ns or ne:
-        if ns != 1 or ne != 1 or data.index(e_b) < data.index(s_b):
-            raise ValueError(f"learned-rules markers in {where} are damaged (need one start marker, then one "
-                             f"end marker); fix them by hand, nothing was written")
-        i, j = data.index(s_b), data.index(e_b) + len(e_b)
+    if not ns and not ne:
+        return None
+    if (ns != 1 or ne != 1 or data.index(e_b) < data.index(s_b)
+            or _ANY_MARKER.search(data, data.index(s_b) + len(s_b), data.index(e_b))):
+        raise ValueError(f"learned-rules markers {whose} in {where} are damaged (need one start marker, "
+                         f"then one end marker, and no other learned-rules marker between them); fix them "
+                         f"by hand, nothing was written")
+    return data.index(s_b), data.index(e_b) + len(e_b)
+
+
+def splice(data: bytes, lines, slug, where="file") -> bytes:
+    """Put this style's rule block into data; every byte outside the block stays as it is, and so
+    does every other style's block (two styles can share one pack).
+    This style's markers present: replace between them. Else an empty old unslugged pair is taken
+    over. Else insert right after the last learned-rules block of any style, else right after the
+    first heading containing "Review-round rules", else append a learned-rules section.
+    Damaged markers of this style, or an old unslugged pair that still holds rules, raise ValueError."""
+    nl = b"\r\n" if b"\r\n" in data else b"\n"
+    start, end = markers(slug)
+    block = _block(lines, nl, start, end)
+    span = _pair(data, start, end, where, f"of style {slug}")
+    if span:
+        return data[:span[0]] + block + data[span[1]:]
+    legacy = _pair(data, START, END, where, "without a style slug")
+    if legacy:
+        i, j = legacy
+        if data[i + len(START):j - len(END)].strip():
+            raise ValueError(f"{where} has an old learned-rules block without a style slug that still holds "
+                             f"rules; delete that block by hand (each style's rules come back on its next "
+                             f"`lessons.py render`), nothing was written")
         return data[:i] + block + data[j:]
+    ends = list(_ANY_END.finditer(data))
+    if ends:
+        j = ends[-1].end()
+        return data[:j] + nl + block + data[j:]
     m = _HEADING.search(data)
     if m:
         pos = m.end()
@@ -594,18 +648,26 @@ def _commit(plan, after=None):
         for p, old, new in plan:
             if old == new:
                 continue
-            _backup_once(p)
-            _write_bytes(p, new)
+            try:
+                _backup_once(p)
+                _write_bytes(p.resolve(), new)  # through a symlink: the link stays a link
+            except OSError as e:
+                raise OSError(f"could not write {p} ({e}); nothing was written") from e
             done.append((p, old))
         if after:
-            after(bool(done))
+            try:
+                after(bool(done))
+            except store.LockTimeout:
+                raise
+            except OSError as e:
+                raise OSError(f"updating the styles registry failed ({e}); nothing was written") from e
     except BaseException:
         for p, old in reversed(done):
             with contextlib.suppress(OSError):
                 if old is None:
                     os.unlink(p)
                 else:
-                    _write_bytes(p, old)
+                    _write_bytes(p.resolve(), old)
         raise
 
 
@@ -643,11 +705,11 @@ def _render(layer, target, data, warnings=None):
         raise FileNotFoundError(f"STYLE.md not found: {style_md} (pack missing or drive not connected); "
                                 f"nothing was written")
     old = style_md.read_bytes()
-    plan = [(style_md, old, splice(old, lines, style_md))]
+    plan = [(style_md, old, splice(old, lines, s["slug"], style_md))]
     skill = Path(s["skill"]) if s.get("skill") else None
     if skill and skill.is_file():
         sk = skill.read_bytes()
-        plan.append((skill, sk, splice(sk, lines, skill)))
+        plan.append((skill, sk, splice(sk, lines, s["slug"], skill)))
     else:
         msg = f"warning: style skill file not found, not updated: {skill or '(none registered)'}"
         if warnings is None:
@@ -753,14 +815,19 @@ def _flush(warnings):
 def cmd_match(args):
     ev = {"project": args.project, "video": args.video, "t": args.t, "round": args.round,
           "note": args.note, "before": args.before, "after": args.after}
+    warnings = []
     try:
-        x = _record_match(args.id, ev)
-    except ValueError as e:
+        x = _record_match(args.id, ev, warnings)
+    except store.LockTimeout:
+        raise
+    except RENDER_ERRORS as e:
+        _flush(warnings)
         return _fail(str(e))
+    _flush(warnings)
+    warnings = []
     if not x["added"]:
         print(f"{x['id']}: this note is already recorded (same project, video, t, round); not counted again")
     print(f"{x['id']}: evidence {len(x['evidence'])}, status {x['status']}")
-    warnings = []
     try:
         promoted = _auto_promote(x, warnings)
     except store.LockTimeout:
@@ -942,6 +1009,8 @@ def cmd_feedback(args):
             if line.startswith(FEEDBACK_OPEN):
                 n += 1
                 print(f"{n}. {line[len(FEEDBACK_OPEN):]}")
+        if not n:
+            print("no open items")
         return 0
     with store.lock(p):
         lines = _feedback_read(p)
