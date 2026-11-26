@@ -59,13 +59,18 @@ references/craft-rules.md for the general ones; write only what is specific here
 - Effects: <text appear → click; line/graph draw → marker; transition → whoosh; …>, density ≈ <n per minute>
 
 ## Review-round rules (added after each round)
-<Numbered, dated. A note the owner gave twice becomes a rule here and applies to every
-video in this style. Example: "R3.1 Every B-roll element enters from outside the frame and
-leaves past the edge (2026-11-06)".>
+<!-- style-lab:learned-rules:start -->
+<!-- style-lab:learned-rules:end -->
 
 ## Known gaps
 <what the references did not show enough of; what to ask the user>
 ```
+
+**Review-round rules.** Keep that heading and the marker pair exactly as above, empty at A5,
+in both STYLE.md and the style skill. `lessons.py approve` writes the style's approved rules
+between the markers (numbered, measured, with evidence count, date and lesson id) and keeps
+everything outside them as written (`references/learning-loop.md` §6). Never type rules
+between the markers by hand; rules there apply to every video in this style.
 
 After writing it, list it to the user with its name and tell them a new session will pick it up
 (skills load at session start).

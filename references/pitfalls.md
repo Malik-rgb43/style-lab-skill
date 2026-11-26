@@ -75,8 +75,9 @@ Owners type notes on the review page and close it without pressing send. Read dr
 Batch all notes → fix → one draft render per round; final render only on the owner's OK.
 
 ## 11. A note repeated in two rounds
-If the owner repeats a note, it is not about one frame any more: make it a global rule in the
-style, fix every video, and write it into the style's "Review-round rules".
+If the owner repeats a note, it is not about one frame any more: `lessons.py match` it to the
+first lesson, offer it for approval as a rule in the right layer, and once approved fix every
+video (`references/learning-loop.md`).
 
 ## Smaller ones
 - **Two copies of the speaker drift.** A blurred background copy of the same video under a

@@ -11,12 +11,27 @@ reinstalling the skill never wipes a style, a client or a setting:
   clients/<slug>/
     client.json                 the brand profile
     logo/  fonts/               files the user gave (copies, never links)
+    lessons.md                  generated: the client's approved rules
+  lessons/lessons.json          every interpreted note (the learning loop)
+  craft-rules.learned.md        generated: approved craft rules
+  settings.json                 learning-loop settings (auto_promote)
+  taste/<client slug>.jsonl     every pick and rejection (`_none.jsonl` for no client)
+  skill-feedback.md             problems in the skill's own process, as a checklist
   capabilities.json             the connections check (Stage 0)
   brand.md                      optional: the user's own default brand
 ```
-Later versions add `ideas/`, `lessons/`, `projects.json`, `taste/` and `studio/` here; nothing
-in the skill folder holds user data. Footage, builds and renders stay in the user's own project
-folders.
+Later versions add `ideas/`, `projects.json` and `studio/` here; nothing in the skill folder
+holds user data. Footage, builds and renders stay in the user's own project folders.
+
+**Style pack and project folders** (where phase A and phase B write):
+```
+<pack>/  refs/ sources.md  analysis/  board/ (board.json board.html thumbs/)  animations.json
+         library/<V01-A06 title>/  STYLE.md (numbered rules, tokens, motion, sound)  kit/
+<project>/edits/<clip>/  raw/ words.json edit_ready.mp4 edit_ready.words.json plan.json
+         plan.html build/ assets/ renders/ revisions.md SOURCES.md
+~/.claude/skills/style-<slug>/SKILL.md   the generated style skill
+```
+`refs/` videos are local study copies, never published.
 
 Rules for every script that writes here (`store.py` does this for all of them):
 - one writer at a time: a `<file>.lock` next to the file, taken with retry; a lock older than
@@ -47,8 +62,8 @@ Rules for every script that writes here (`store.py` does this for all of them):
 | kind | `trained` \| `described` \| `derived` | from videos, from a description, from another style |
 | aspect | `9:16` \| `16:9` \| `1:1` \| `4:5` | |
 | name_source | `user` \| `claude` | who chose the name |
-| version | whole number | bump it when the rules change |
-| rules_count | whole number | numbered rules in STYLE.md |
+| version | whole number | bump it when the rules change; `lessons.py` adds 1 whenever it rewrites the style's learned rules |
+| rules_count | whole number | approved style-layer rules (set by `lessons.py`) |
 | aliases | list | other names that find it; never another style's slug, name or alias |
 | board_url, notes | text | |
 | created / updated | ISO dates | set by the script |
@@ -128,3 +143,52 @@ re-runs of the local check.
 - `stages`: per stage, what it uses, what is missing and what costs money. The stage map is
   `STAGES` at the top of `scripts/doctor.py`: `train`, `train_profile`, `cut`, `frames`,
   `build`, `3d`, `cloud_asr` (paid), `publish`.
+
+## lessons/lessons.json (the learning loop)
+Written only by `scripts/lessons.py`; how it is used: `references/learning-loop.md`.
+```json
+{"version": 1, "next_id": 3, "lessons": [ { ...one entry per lesson... } ]}
+```
+| Field | Values | Meaning |
+|---|---|---|
+| id | `L0001`, `L0002` … | never reused |
+| text | text | the owner's note in his words (for an exception: generated from the reason) |
+| measurable | text | Claude's measurable reading; this is the rule text once approved |
+| layer | `craft` \| `style` \| `client` \| `video` | section 2 of the learning loop |
+| target | slug or null | the style (style layer) or client (client layer); null for craft and video |
+| kind | `quality` \| `taste` \| null | craft lessons only |
+| scope | text | where it applies ("all entrances"); empty = everywhere |
+| evidence | list | `{project, video, t, round, note, before, after, added}`; one (project, video, t, round) counts once |
+| status | `candidate` \| `proposed` \| `rule` \| `rejected` \| `merged` \| `one-off` | video lessons are `one-off` |
+| rule_no | whole number or null | its number within its layer and target, set on approval |
+| exception_of | lesson id or null | the taste craft rule a style exception overrides |
+| reason | text | why a lesson was rejected, or why an exception differs |
+| merged_into | lesson id or null | set when merged |
+| created / updated / promoted | ISO dates | `promoted` = the day it became a rule |
+
+Generated rule files: `craft-rules.learned.md`, `clients/<slug>/lessons.md` (whole files) and,
+for a style, the block between `<!-- style-lab:learned-rules:start -->` and
+`<!-- style-lab:learned-rules:end -->` in its STYLE.md and style skill. Each written file gets
+a `<file>.bak-YYYYMMDD` backup once a day.
+
+## settings.json
+`{"auto_promote": false}`. `lessons.py settings auto_promote=true` (only on the owner's request)
+turns proposed lessons into rules at once, without the conflict check; `lessons.py settings`
+prints the values.
+
+## taste/<client slug>.jsonl
+One JSON object per line, appended by `taste.py log`; `_none.jsonl` holds picks made for no
+client:
+```json
+{"date": "2026-01-01", "client": "example-shop", "style": "paper-3d", "step": "plan", "project": "launch-reel",
+ "picked": "b03-opt2", "rejected": ["b03-opt1", "b03-opt3"],
+ "tags": {"picked": ["warm", "paper"], "rejected": ["neon"]}, "note": ""}
+```
+`step` is `plan` | `frames` | `motion` | `palette` | `idea`. `taste.py summary` reads the last 50
+entries (`--last`), optionally of one style (`--style`), and returns `prefers`, `avoids` and
+`rejected_twice`.
+
+## skill-feedback.md
+A Markdown checklist written by `lessons.py feedback add|done`: `- [ ] <date> (step: B4,
+project: P) <text>` for an open item, `- [x] …` once done. `feedback list` numbers the open
+items; `feedback done <n>` uses that number.

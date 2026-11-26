@@ -46,25 +46,29 @@ If no page can be shown, accept the same thing as text: one numbered note per li
   unsent draft text; ask for the JSON or the text if the owner only says "I left notes").
 - Look at every attached frame and drawing before fixing. Extract frames ±1 s around the time
   to see the motion the note is about.
-- Restate each note as one concrete change ("move the chip under the speaker layer at 0:14.2")
-  and keep the owner's words next to it.
+- Before any fix, show one line per note: his words → what I understood (measurable) → where
+  → layer, with two readings when unsure (`references/learning-loop.md` §1-2). Then save each
+  reading as a lesson (`lessons.py add` or `match`, §3).
 
 ## Fixing
 - Batch: all notes of the round → fix → one draft render → next round. Never render per note.
-- **Same note in two rounds = a global rule.** Write it into the style's STYLE.md / style
-  skill under "Review-round rules" with the date, and fix every occurrence in every video,
-  not only the noted time.
+- **Notes become rules only through the learning loop** (`references/learning-loop.md`): a
+  lesson seen in 2 rounds or 2 videos is proposed, and the owner's yes (`lessons.py approve`)
+  makes it a numbered rule in the right layer (craft, style or client). Then fix every
+  occurrence in every video of the project, not only the noted time. Never hand-write a rule
+  into "Review-round rules".
 - "Delete this" means delete and centre what is left; do not swap in a new prop unless asked.
 - "Boring / banal / static / looks AI" means replace the beat with a new idea (craft-rules §1),
   not add more motion to the old one.
 - Keep everything the owner added himself and every note already fixed. Back up the build
   before a round (`build.pre-r2.py`).
-- Log each round in `revisions.md`: note, change, status.
+- Log each round in `revisions.md`: note, change, status, lesson id.
 
 ## Verify before handing back
 - Validate (0 errors), snapshot every noted time ±0.5 s at 0.2 s steps and every entrance or
   exit you changed. Read the snapshots and confirm each note is fixed.
-- Report one line per note: number, what changed. Then render the round's draft.
+- Report one line per note: number, what changed. Then render the round's draft, and offer
+  the proposed lessons for approval (`lessons.py list --status proposed`).
 
 ## Final
 Only on the owner's explicit OK: final quality render, loudness pass, a last look at a 2.5 s

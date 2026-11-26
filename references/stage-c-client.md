@@ -59,8 +59,10 @@ No logo yet: continue, and say videos will carry the name in the heading font un
 (monochrome, analogous, accent) with their checks; `references/palette.md` explains them. Show
 the three on real frames (a caption on its pill, a headline with one emphasis word, a CTA),
 one marked **ההמלצה שלי**, with one plain line each on how it feels. A proposal that fails a
-check is shown with what fails, never as the recommendation. Save the pick:
-`python scripts/clients.py palette <slug> --pick accent`.
+check is shown with what fails, never as the recommendation. Before marking the recommendation
+read `taste.py summary --client <slug>` (`references/learning-loop.md` §8). Save the pick:
+`python scripts/clients.py palette <slug> --pick accent`, and log it:
+`python scripts/taste.py log --client <slug> --step palette --picked accent --rejected monochrome --rejected analogous --project <project, or client-setup> --tags picked=<tags> rejected=<tags>`.
 Then set the theme the client's videos use: `clients.py set <slug> theme=dark|light|both`.
 
 **C5. Fonts.** Default: the course fonts (Karantina 700 headings, Heebo body, Consolas mono).
