@@ -1,3 +1,4 @@
+import os
 import json
 import shutil
 import subprocess
@@ -59,8 +60,6 @@ def test_add_hebrew_name_autoslug(home, tmp_path):
 def test_env_registry_still_wins(home, tmp_path, monkeypatch):
     reg = tmp_path / "elsewhere" / "styles.json"
     monkeypatch.setenv("STYLE_LAB_REGISTRY", str(reg))
-    import conftest
-    conftest._ENV["env"] = dict(__import__("os").environ)
     r = run_cli("styles.py", "add", "x1", "--name", "X One", "--pack", tmp_path)
     assert r.returncode == 0, r.stderr
     assert reg.exists()
@@ -78,7 +77,7 @@ def test_set_aspect_validates(home, tmp_path):
 def test_parallel_adds(home, tmp_path):
     procs = [subprocess.Popen(
         [sys.executable, str(Path("scripts") / "styles.py"), "add", f"p{i}", "--name", f"P {i}", "--pack", str(tmp_path)],
-        cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(6)]
+        cwd=REPO_ROOT, env=dict(os.environ), stdout=subprocess.PIPE, stderr=subprocess.PIPE) for i in range(6)]
     for p in procs:
         p.communicate()
         assert p.returncode == 0

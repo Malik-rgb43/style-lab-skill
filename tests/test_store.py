@@ -111,7 +111,7 @@ def test_readers_during_writers(home):
         "for i in range(25):\n"
         "    store.update_json(p, [], lambda d, v=w*100+i: d.append(v))\n"
     )
-    procs = [subprocess.Popen([sys.executable, "-c", code, scripts, str(w)]) for w in range(4)]
+    procs = [subprocess.Popen([sys.executable, "-c", code, scripts, str(w)], env=dict(os.environ)) for w in range(4)]
     errors = []
     stop = threading.Event()
 
