@@ -26,7 +26,9 @@ python scripts/clients.py restore <slug>        # re-register a kept folder
 `set` fields: `name industry audience tone notes theme`, the lists
 `aliases languages logo brand_colors dos donts assets` (items split on ","; so write each do or
 don't without a comma), and `fonts.heading`, `fonts.body`, `fonts.mono`. Every write prints one
-line; read it, and on an error fix the input instead of retrying blindly.
+line; read it, and on an error fix the input instead of retrying blindly. A lookup matches the
+slug first, then the name, then an alias; an alias that already names another client, or an empty
+name, is refused. Exit code 2 with "lock busy" means another session is writing: retry.
 
 ## The steps
 **C1. Name.** Ask for the client's name as they write it (Hebrew is fine). The slug is made
@@ -89,6 +91,9 @@ with the default. Ask for corrections and apply them with `set`.
 - A client without a palette: run C4 first, or use the course brand and say so.
 
 ## Changing or removing
-- Rename or fix anything with `set`; a new brand colour means a new palette: rerun C4.
+- Rename or fix anything with `set`; a new brand colour means a new palette: rerun C4 (`set`
+  prints the exact `clients.py palette <slug> --pick <kind>` line when the first colour changes).
 - `remove` only hides the client (the folder and its files stay); `restore <slug>` brings it
-  back. Nothing in the store is deleted by these commands; ask before deleting any file by hand.
+  back. A copied folder is restored under its own folder name (the slug inside is rewritten).
+- `styles.py list` and `styles.py check` print `dangling: client <name> -> style <slug> (missing
+  style)` for a link to a removed style: offer to unlink it or link another style. Nothing in the store is deleted by these commands; ask before deleting any file by hand.

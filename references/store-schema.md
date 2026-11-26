@@ -20,10 +20,12 @@ folders.
 
 Rules for every script that writes here (`store.py` does this for all of them):
 - one writer at a time: a `<file>.lock` next to the file, taken with retry; a lock older than
-  60 s is treated as stale;
+  60 s is treated as stale. A writer that waits 10 s exits with code 2 and one line naming the
+  lock: another session is writing, so retry; delete the lock only if no session is running;
 - atomic writes: a temp file in the same folder, then replace, so a crash never leaves half a
   file; JSON is UTF-8, Hebrew kept as is;
-- `STYLE_LAB_HOME=<folder>` moves the whole store (tests, a portable setup). For styles only,
+- `STYLE_LAB_HOME=<folder>` moves the whole store (tests, a portable setup); a relative folder
+  is made absolute from the current folder. For styles only,
   `--registry <file>` or `STYLE_LAB_REGISTRY` points at another registry file.
 - Never edit these files by hand while a script may run; use the commands.
 
@@ -47,19 +49,27 @@ Rules for every script that writes here (`store.py` does this for all of them):
 | name_source | `user` \| `claude` | who chose the name |
 | version | whole number | bump it when the rules change |
 | rules_count | whole number | numbered rules in STYLE.md |
-| aliases | list | other names that find it |
+| aliases | list | other names that find it; never another style's slug, name or alias |
 | board_url, notes | text | |
 | created / updated | ISO dates | set by the script |
 
 **Linked clients are not stored here.** Links live on the client side (`client.json` →
 `styles`), one source of truth; `styles.py list` and `styles.py show` compute them on read.
 
+Lookup (`show`, `set`, `remove`, `clients.py link`) matches the slug first across all styles,
+then the name, then the aliases, case-insensitive, so a slug always wins. A name must not be
+empty, and an alias that is another style's slug, name or alias is refused.
+
 `python scripts/styles.py migrate` upgrades a v1 registry in place: it sets `version: 2`, adds
 the missing fields with defaults (`kind trained`, `aspect 9:16`, `name_source user`,
 `version 1`, `rules_count 0`) and writes `styles.json.bak-YYYYMMDD` first. Reading a v1 file
 upgrades it in memory only; any write through `styles.py` leaves a v2 file with the backup.
 `styles.py check` lists a missing pack or skill (a problem for `ready` styles, expected while
-`training`); offer to relink (`set <slug> pack=...`) or archive it.
+`training`); offer to relink (`set <slug> pack=...`) or archive it. `check` (on stdout) and
+`list` (on stderr, after the rows) also print one line per client link to a style that is not in
+the registry: `dangling: client <name> -> style <slug> (missing style)`. A dangling link never
+changes the exit code; only a missing path on a `ready` style fails `check`. `styles.py remove`
+says `N client(s) still link to it`; offer `clients.py unlink <client> <slug>` or a relink.
 
 ## clients.json and client.json
 `clients.json` only lists who exists:
@@ -70,7 +80,7 @@ upgrades it in memory only; any write through `styles.py` leaves a v2 file with 
 | Field | Type | Meaning |
 |---|---|---|
 | slug, name | text | id and display name |
-| aliases | list | other names that find the client |
+| aliases | list | other names that find the client; never another client's slug, name or alias |
 | industry, audience, tone | text | tone = a few words ("חם, ישיר, בלי סלנג") |
 | languages | list | e.g. `he, en` |
 | logo | list | logo files inside `clients/<slug>/logo/` |
@@ -84,8 +94,16 @@ upgrades it in memory only; any write through `styles.py` leaves a v2 file with 
 | notes | text | |
 | created / updated | ISO dates | set by the script |
 
+Lookup matches the slug first, then the name, then the aliases (as for styles). A name must
+not be empty.
+
 `clients.py remove` takes the client out of `clients.json` only; the folder stays, and
-`clients.py restore <slug>` brings it back. `add` never overwrites a kept folder.
+`clients.py restore <slug>` brings it back. `add` never overwrites a kept folder. `restore`
+registers the folder's name as the slug: when `client.json` inside says another slug (a copied
+or renamed folder), it is rewritten to the folder name; a slug that is already registered is
+refused. A restored client with the same name as another is registered with a note to rename one.
+`clients.py set <client> brand_colors=...` that changes the first colour of a client with a saved
+palette prints a note to rerun `clients.py palette <client> --pick <kind>`.
 
 ## capabilities.json (Stage 0)
 Written by `doctor.py`; the `session` block is written by `doctor.py session` and kept across
