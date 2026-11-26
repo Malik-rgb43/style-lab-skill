@@ -18,6 +18,7 @@ Commands:
                                                    with one note needs --one-note; possibly conflicting
                                                    rules are printed first and, when any, approve exits 1
                                                    unless --yes-no-conflict)
+    lessons.py feedback add --text .. --step S [--project P] | list | done <n>   (skill-feedback.md)
     lessons.py rules [--style S] [--client C] [--json]
                                                   (every rule that applies, craft then style then client;
                                                    a taste craft rule a style overrides is marked)
@@ -918,6 +919,48 @@ def cmd_settings(args):
     return 0
 
 
+FEEDBACK_OPEN = "- [ ] "
+FEEDBACK_DONE = "- [x] "
+
+
+def _feedback_read(p):
+    return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+
+
+def _feedback_write(p, lines):
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), suffix=".tmp")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(lines) + "\n")
+    store._retry_perm(lambda: os.replace(tmp, p))
+
+
+def cmd_feedback(args):
+    p = store.path("skill-feedback.md")
+    if args.fcmd == "list":
+        n = 0
+        for line in _feedback_read(p):
+            if line.startswith(FEEDBACK_OPEN):
+                n += 1
+                print(f"{n}. {line[len(FEEDBACK_OPEN):]}")
+        return 0
+    with store.lock(p):
+        lines = _feedback_read(p)
+        if args.fcmd == "add":
+            meta = f"step: {args.step}" + (f", project: {args.project}" if args.project else "")
+            lines.append(f"{FEEDBACK_OPEN}{dt.date.today().isoformat()} ({meta}) {' '.join(args.text.split())}")
+            _feedback_write(p, lines)
+            return 0
+        n = 0
+        for i, line in enumerate(lines):
+            if line.startswith(FEEDBACK_OPEN):
+                n += 1
+                if n == args.n:
+                    lines[i] = FEEDBACK_DONE + line[len(FEEDBACK_OPEN):]
+                    _feedback_write(p, lines)
+                    return 0
+    return _fail(f"no open feedback item {args.n}")
+
+
 def main(argv=None):
     return store.exit_on_lock_timeout(_main, argv)
 
@@ -957,9 +1000,17 @@ def _main(argv=None):
     a = sub.add_parser("settings", description="auto_promote=true approves proposed lessons without the "
                        "conflict check that `approve` runs")
     a.add_argument("pairs", nargs="*", help="auto_promote=true|false (auto_promote skips the conflict check)")
+    a = sub.add_parser("feedback", description="skill feedback list (skill-feedback.md in the store home)")
+    fs = a.add_subparsers(dest="fcmd", required=True)
+    f = fs.add_parser("add"); f.add_argument("--text", required=True)
+    f.add_argument("--step", required=True); f.add_argument("--project")
+    fs.add_parser("list")
+    f = fs.add_parser("done"); f.add_argument("n", type=int)
     args = p.parse_args(argv)
 
     store.print_utf8()
+    if args.cmd == "feedback":
+        return cmd_feedback(args)
     if args.cmd == "add":
         return cmd_add(args)
     if args.cmd == "list":
