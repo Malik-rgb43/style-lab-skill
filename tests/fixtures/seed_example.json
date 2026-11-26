@@ -1,0 +1,11 @@
+{
+  "schema": "style-lab-seed/1",
+  "lexicon": {
+    "he": {"example": "אקזמפל", "sample": "סמפל"}
+  },
+  "brand_md": "# Example brand\n\n- Fonts: Example Sans\n- Colors: example blue\n",
+  "sound_libraries": [
+    {"name": "example-sfx", "path": "example/sfx", "kinds": ["sfx"]}
+  ],
+  "settings": {"auto_promote": false}
+}
