@@ -1,0 +1,507 @@
+{
+ "_type": "playlist",
+ "id": "ExampleChannel",
+ "title": "ExampleChannel",
+ "entries": [
+  {
+   "id": "short000001",
+   "url": "https://www.youtube.com/shorts/short000001",
+   "title": "Example short 1",
+   "view_count": 501,
+   "duration": 21,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000001_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000001_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000002",
+   "url": "https://www.youtube.com/shorts/short000002",
+   "title": "Example short 2",
+   "view_count": null,
+   "duration": 22,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000002_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000002_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000003",
+   "url": "https://www.youtube.com/shorts/short000003",
+   "title": "Example short 3",
+   "view_count": 1503,
+   "duration": 23,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000003_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000003_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000004",
+   "url": "https://www.youtube.com/shorts/short000004",
+   "title": "Example short 4",
+   "view_count": 2004,
+   "duration": 24,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000004_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000004_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000005",
+   "url": "https://www.youtube.com/shorts/short000005",
+   "title": "Example short 5",
+   "view_count": 2505,
+   "duration": 25,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000005_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000005_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000006",
+   "url": "https://www.youtube.com/shorts/short000006",
+   "title": "Example short 6",
+   "view_count": 3006,
+   "duration": 26,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000006_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000006_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000007",
+   "url": "https://www.youtube.com/shorts/short000007",
+   "title": "Example short 7",
+   "view_count": null,
+   "duration": 27,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000007_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000007_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000008",
+   "url": "https://www.youtube.com/shorts/short000008",
+   "title": "Example short 8",
+   "view_count": 4008,
+   "duration": 28,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000008_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000008_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000009",
+   "url": "https://www.youtube.com/shorts/short000009",
+   "title": "Example short 9",
+   "view_count": 4509,
+   "duration": 29,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000009_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000009_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000010",
+   "url": "https://www.youtube.com/shorts/short000010",
+   "title": "Example short 10",
+   "view_count": 5010,
+   "duration": 30,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000010_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000010_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000011",
+   "url": "https://www.youtube.com/shorts/short000011",
+   "title": "Example short 11",
+   "view_count": null,
+   "duration": 31,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000011_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000011_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000012",
+   "url": "https://www.youtube.com/shorts/short000012",
+   "title": "Example short 12",
+   "view_count": 6012,
+   "duration": 32,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000012_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000012_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000013",
+   "url": "https://www.youtube.com/shorts/short000013",
+   "title": "Example short 13",
+   "view_count": 6513,
+   "duration": 33,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000013_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000013_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000014",
+   "url": "https://www.youtube.com/shorts/short000014",
+   "title": "Example short 14",
+   "view_count": 7014,
+   "duration": 34,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000014_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000014_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000015",
+   "url": "https://www.youtube.com/shorts/short000015",
+   "title": "Example short 15",
+   "view_count": 7515,
+   "duration": 35,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000015_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000015_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000016",
+   "url": "https://www.youtube.com/shorts/short000016",
+   "title": "Example short 16",
+   "view_count": 8016,
+   "duration": 36,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000016_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000016_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000017",
+   "url": "https://www.youtube.com/shorts/short000017",
+   "title": "Example short 17",
+   "view_count": 8517,
+   "duration": 37,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000017_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000017_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000018",
+   "url": "https://www.youtube.com/shorts/short000018",
+   "title": "Example short 18",
+   "view_count": 9018,
+   "duration": 38,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000018_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000018_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000019",
+   "url": "https://www.youtube.com/shorts/short000019",
+   "title": "Example short 19",
+   "view_count": null,
+   "duration": 39,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000019_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000019_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000020",
+   "url": "https://www.youtube.com/shorts/short000020",
+   "title": "Example short 20",
+   "view_count": 10020,
+   "duration": 40,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000020_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000020_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000021",
+   "url": "https://www.youtube.com/shorts/short000021",
+   "title": "Example short 21",
+   "view_count": 10521,
+   "duration": 41,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000021_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000021_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000022",
+   "url": "https://www.youtube.com/shorts/short000022",
+   "title": "Example short 22",
+   "view_count": 11022,
+   "duration": 42,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000022_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000022_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000023",
+   "url": "https://www.youtube.com/shorts/short000023",
+   "title": "Example short 23",
+   "view_count": 11523,
+   "duration": 43,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000023_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000023_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000024",
+   "url": "https://www.youtube.com/shorts/short000024",
+   "title": "Example short 24",
+   "view_count": null,
+   "duration": 44,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000024_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000024_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000025",
+   "url": "https://www.youtube.com/shorts/short000025",
+   "title": "Example short 25",
+   "view_count": 12525,
+   "duration": 45,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/short000025_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/short000025_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  }
+ ]
+}

@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -53,3 +54,30 @@ def run_cli(script, *args):
         [sys.executable, str(Path("scripts") / script), *map(str, args)],
         cwd=REPO_ROOT, env=env, capture_output=True, text=True, encoding="utf-8",
     )
+
+
+_LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """Tests never reach the network: connecting anywhere but localhost raises."""
+    real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+
+    def _allowed(address):
+        if isinstance(address, tuple) and address:
+            return address[0] in _LOCAL_HOSTS
+        return True  # AF_UNIX paths and the like are not network
+
+    def connect(self, address):
+        if not _allowed(address):
+            raise RuntimeError("network blocked in tests")
+        return real_connect(self, address)
+
+    def connect_ex(self, address):
+        if not _allowed(address):
+            raise RuntimeError("network blocked in tests")
+        return real_connect_ex(self, address)
+
+    monkeypatch.setattr(socket.socket, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)

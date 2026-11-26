@@ -1,0 +1,127 @@
+{
+ "_type": "playlist",
+ "id": "ExampleChannel",
+ "title": "ExampleChannel",
+ "entries": [
+  {
+   "id": "video000001",
+   "url": "https://www.youtube.com/watch?v=video000001",
+   "title": "Example video 1",
+   "view_count": 501,
+   "duration": 21,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/video000001_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/video000001_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "video000002",
+   "url": "https://www.youtube.com/watch?v=video000002",
+   "title": "Example video 2",
+   "view_count": 1002,
+   "duration": 22,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/video000002_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/video000002_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "short000003",
+   "url": "https://www.youtube.com/watch?v=short000003",
+   "title": "Example video 3",
+   "view_count": 1503,
+   "duration": 23,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/video000003_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/video000003_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "video000004",
+   "url": "https://www.youtube.com/watch?v=video000004",
+   "title": "Example video 4",
+   "view_count": 2004,
+   "duration": 24,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/video000004_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/video000004_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "video000005",
+   "url": "https://www.youtube.com/watch?v=video000005",
+   "title": "Example video 5",
+   "view_count": 2505,
+   "duration": 25,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/video000005_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/video000005_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  },
+  {
+   "id": "video000006",
+   "url": "https://www.youtube.com/watch?v=video000006",
+   "title": "Example video 6",
+   "view_count": 3006,
+   "duration": 26,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/video000006_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/video000006_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "Youtube"
+  }
+ ]
+}

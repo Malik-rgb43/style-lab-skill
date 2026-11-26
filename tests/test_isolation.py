@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -20,3 +21,13 @@ def test_subprocess_default_home_is_tmp():
     default = Path(r.stdout.strip())
     assert not conftest._inside(default, conftest.REAL_CLAUDE)
     assert default == Path(os.environ["STYLE_LAB_HOME"])
+
+
+def test_tests_block_network():
+    import pytest
+    s = socket.socket()
+    try:
+        with pytest.raises(RuntimeError, match="network blocked"):
+            s.connect(("203.0.113.1", 80))
+    finally:
+        s.close()

@@ -1,0 +1,199 @@
+{
+ "_type": "playlist",
+ "id": "example.creator",
+ "title": "example.creator",
+ "entries": [
+  {
+   "id": "7300000000000000001",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000001",
+   "title": "Example video 1",
+   "view_count": 1482,
+   "like_count": 57,
+   "comment_count": 4,
+   "repost_count": 1,
+   "timestamp": 1735603200,
+   "duration": 16,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000001_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000001_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  },
+  {
+   "id": "7300000000000000002",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000002",
+   "title": "Example video 2",
+   "view_count": 1964,
+   "like_count": 64,
+   "comment_count": 5,
+   "repost_count": 2,
+   "timestamp": 1735516800,
+   "duration": 17,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000002_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000002_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  },
+  {
+   "id": "7300000000000000003",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000003",
+   "title": "טיפ קצר לעריכה",
+   "view_count": 2446,
+   "like_count": 71,
+   "comment_count": 6,
+   "repost_count": 3,
+   "timestamp": 1735430400,
+   "duration": 18,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000003_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000003_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  },
+  {
+   "id": "7300000000000000004",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000004",
+   "title": "Example video 4",
+   "view_count": 2928,
+   "like_count": 78,
+   "comment_count": 7,
+   "repost_count": 0,
+   "timestamp": 1735344000,
+   "duration": 19,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000004_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000004_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  },
+  {
+   "id": "7300000000000000005",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000005",
+   "title": "Example video 5",
+   "view_count": 3410,
+   "like_count": 85,
+   "comment_count": 3,
+   "repost_count": 1,
+   "timestamp": 1735257600,
+   "duration": 20,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000005_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000005_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  },
+  {
+   "id": "7300000000000000006",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000006",
+   "title": "Example video 6",
+   "view_count": 3892,
+   "like_count": 92,
+   "comment_count": 4,
+   "repost_count": 2,
+   "timestamp": 1735171200,
+   "duration": 21,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000006_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000006_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  },
+  {
+   "id": "7300000000000000007",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000007",
+   "title": "Example video 7",
+   "view_count": 4374,
+   "like_count": 99,
+   "comment_count": 5,
+   "repost_count": 3,
+   "timestamp": 1735084800,
+   "duration": 22,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000007_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000007_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  },
+  {
+   "id": "7300000000000000008",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000008",
+   "title": "Example video 8",
+   "view_count": 4856,
+   "like_count": 106,
+   "comment_count": 6,
+   "repost_count": 0,
+   "timestamp": 1734998400,
+   "duration": 23,
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7300000000000000008_s.jpg",
+     "width": 240,
+     "height": 426
+    },
+    {
+     "url": "https://example.com/t/7300000000000000008_l.jpg",
+     "width": 720,
+     "height": 1280
+    }
+   ],
+   "ie_key": "TikTok"
+  }
+ ]
+}
