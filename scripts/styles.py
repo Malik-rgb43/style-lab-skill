@@ -14,6 +14,11 @@ Commands:
                   (slug optional: made from the name)
     styles.py show <slug or name>
     styles.py set <slug> key=value [key=value ...]
+    styles.py set-status <slug> <training|ready|archived> [--force --reason "<text>"]
+                  [--waive-recipes --reason "<text>"]
+                  (ready needs <pack>/proof.json with recreation.passed and holdout.passed, and no
+                   recipe in <pack>/recipes.json whose `how` starts with ai_ and whose test.status is
+                   not passed; --force logs ready_forced, --waive-recipes logs recipes_waived)
     styles.py remove <slug>          (removes the registry entry only, never files)
     styles.py check                  (every pack and skill path still exists)
 """
@@ -261,6 +266,10 @@ def cmd_set(data, args):
         if k == "status" and v not in STATUSES:
             print(f"status must be one of {STATUSES}", file=sys.stderr)
             return 1
+        if k == "status" and v == "ready":
+            rc, _ = ready_gate(s)  # no override through `set`: use set-status --force
+            if rc is not None:
+                return rc
         if k in ("fonts", "colors") and v not in ("brand", "reference"):
             print(f"{k} must be brand or reference", file=sys.stderr)
             return 1
@@ -300,6 +309,91 @@ def cmd_set(data, args):
         s[k] = v
     s["updated"] = today()
     print(f"updated {s['slug']}")
+    return None
+
+
+def _read_pack_json(pack, name):
+    """(data, error). data is None when the file is absent; error is a message when unreadable."""
+    p = Path(pack) / name
+    if not p.exists():
+        return None, None
+    try:
+        return json.loads(p.read_text(encoding="utf-8")), None
+    except (OSError, ValueError) as e:
+        return None, f"{name} unreadable: {e}"
+
+
+def proof_problems(pack):
+    """What is missing for `ready`: a list of short strings (empty = the proof passed)."""
+    proof, err = _read_pack_json(pack, "proof.json")
+    if err:
+        return [err]
+    if not isinstance(proof, dict):
+        return ["no proof.json (run prove.py holdout and prove.py recreation)"]
+    out = []
+    for key in ("recreation", "holdout"):
+        part = proof.get(key)
+        if not (isinstance(part, dict) and part.get("passed") is True):
+            out.append(f"{key} test not passed")
+    return out
+
+
+def untested_ai_recipes(pack):
+    """(names of ai_ recipes whose test.status is not passed, error message or None)."""
+    data, err = _read_pack_json(pack, "recipes.json")
+    if err:
+        return [], err
+    items = data.get("recipes", []) if isinstance(data, dict) else (data or [])
+    bad = []
+    for r in items if isinstance(items, list) else []:
+        if not isinstance(r, dict) or not str(r.get("how", "")).startswith("ai_"):
+            continue
+        test = r.get("test")
+        if not (isinstance(test, dict) and test.get("status") == "passed"):
+            bad.append(str(r.get("kind") or r.get("how")))
+    return bad, None
+
+
+def ready_gate(s, force=False, waive=False, reason=""):
+    """Check a style may become `ready`. Returns (rc or None, log) where log is merged into the entry."""
+    reason = (reason or "").strip()
+    if (force or waive) and not reason:
+        print("--force and --waive-recipes need --reason \"<text>\"", file=sys.stderr)
+        return 1, {}
+    log = {}
+    problems = proof_problems(s.get("pack", ""))
+    if problems:
+        if not force:
+            print(f"{s['slug']} cannot be ready: {'; '.join(problems)}. "
+                  f"Pass the tests, or --force --reason \"<text>\".", file=sys.stderr)
+            return 1, {}
+        log["ready_forced"] = {"reason": reason, "date": today(), "missing": problems}
+    bad, err = untested_ai_recipes(s.get("pack", ""))
+    if err:
+        bad = [err]
+    if bad:
+        if not waive:
+            print(f"{s['slug']} cannot be ready: untested AI recipes: {', '.join(bad)}. "
+                  f"Test them (recipes.json test.status passed), or --waive-recipes --reason \"<text>\".",
+                  file=sys.stderr)
+            return 1, {}
+        log["recipes_waived"] = {"reason": reason, "date": today(), "recipes": bad}
+    return None, log
+
+
+def cmd_set_status(data, args):
+    s = find(data, args.slug)
+    if not s:
+        print(f"no style {args.slug!r}", file=sys.stderr)
+        return 1
+    if args.status == "ready":
+        rc, log = ready_gate(s, args.force, args.waive_recipes, args.reason)
+        if rc is not None:
+            return rc
+        s.update(log)
+    s["status"] = args.status
+    s["updated"] = today()
+    print(f"{s['slug']}: status {args.status}" + (" (forced)" if "ready_forced" in s and args.status == "ready" and args.force else ""))
     return None
 
 
@@ -363,7 +457,8 @@ def cmd_migrate(args):
 
 
 WRITERS = {"add": cmd_add, "set": cmd_set, "remove": cmd_remove, "require": cmd_require,
-           "unrequire": cmd_unrequire}
+           "unrequire": cmd_unrequire,
+           "set-status": cmd_set_status}
 
 
 def main(argv=None):
@@ -388,6 +483,10 @@ def _main(argv=None):
     a.add_argument("--name-source", dest="name_source", choices=NAME_SOURCES, default="user")
     a = sub.add_parser("show"); a.add_argument("key")
     a = sub.add_parser("set"); a.add_argument("slug"); a.add_argument("pairs", nargs="+")
+    a = sub.add_parser("set-status", help="change status; ready is gated by proof.json and recipes.json")
+    a.add_argument("slug"); a.add_argument("status", choices=STATUSES)
+    a.add_argument("--force", action="store_true"); a.add_argument("--waive-recipes", action="store_true")
+    a.add_argument("--reason", default="")
     a = sub.add_parser("remove"); a.add_argument("slug")
     a = sub.add_parser("require", help="record a connection the style depends on")
     a.add_argument("style"); a.add_argument("--name", required=True); a.add_argument("--why", required=True)
