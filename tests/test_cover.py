@@ -317,3 +317,15 @@ def test_all_black_video_is_no_candidates_and_keeps_old_folder(tmp_path, monkeyp
     assert "video:v1:no_candidates" in err and "left as it is" in err and len(err.strip().splitlines()) == 1
     assert (pack / "cover-candidates" / "old.jpg").read_bytes() == b"old"
     assert not (pack / "cover-candidates.json").exists() and not (pack / "cover-candidates.tmp").exists()
+
+
+def test_look_closeness_uses_look_py_units():
+    """A fingerprint look layer built from look.py's own numbers matches that frame best."""
+    import look
+    rng = np.random.default_rng(3)
+    dark = np.clip(rng.normal(60, 20, (180, 320, 3)), 0, 255).astype(np.uint8)
+    bright = np.clip(rng.normal(190, 8, (180, 320, 3)), 0, 255).astype(np.uint8)
+    ref = {k: {"median": v} for k, v in look.frame_look(dark).items() if k in cover.LOOK_KEYS}
+    same = cover._look_closeness(dark, gray_of(dark), ref)
+    other = cover._look_closeness(bright, gray_of(bright), ref)
+    assert same > 0.95 and other < same - 0.3

@@ -43,6 +43,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import look  # noqa: E402
 import measure_video as mv  # noqa: E402
 import palette  # noqa: E402
 import store  # noqa: E402
@@ -59,7 +60,10 @@ LUMA_MIN, LUMA_MAX, LUMA_STD_MIN = 0.06, 0.97, 0.04
 RELAXED = (0.02, 0.99, 0.015)  # luma min, luma max, std min for a video whose every frame was rejected
 BLUR_RATIO, BLUR_PCT, BLUR_VS_MEDIAN = 3.0, 0.3, 0.5
 MIN_GAP_S = 2.0
-LOOK_KEYS = ("grain_std", "vignette_falloff", "tone_contrast", "sat")
+LOOK_KEYS = ("grain_std", "vignette_falloff", "tone_contrast", "tone_black_pt", "tone_white_pt", "sat",
+             "shadow_tint_a", "shadow_tint_b", "highlight_tint_a", "highlight_tint_b", "halation")
+LOOK_ABS_FLOOR = {"tone_black_pt": 4.0, "tone_white_pt": 4.0, "shadow_tint_a": 0.01, "shadow_tint_b": 0.01,
+                  "highlight_tint_a": 0.01, "highlight_tint_b": 0.01}
 
 
 class Bad(Exception):
@@ -166,35 +170,21 @@ def _palette_closeness(rgb, fp):
     return math.exp(-d / PALETTE_SCALE)
 
 
-def look_measures(rgb, gray):
-    """{grain_std, vignette_falloff, tone_contrast, sat} of one frame (0..1 units)."""
-    g = np.asarray(gray, dtype=np.float32) / 255.0
-    h, w = g.shape
-    out = {"grain_std": 0.0, "vignette_falloff": 0.0}
-    if h >= 6 and w >= 6:
-        box = sum(g[i:h - 2 + i, j:w - 2 + j] for i in range(3) for j in range(3)) / 9.0
-        out["grain_std"] = float((g[1:-1, 1:-1] - box).std())
-        centre = float(g[h // 4:3 * h // 4, w // 4:3 * w // 4].mean())
-        mask = np.ones_like(g, dtype=bool)
-        mask[h // 6:5 * h // 6, w // 6:5 * w // 6] = False
-        edge = float(g[mask].mean())
-        out["vignette_falloff"] = float(min(1.0, max(0.0, 1 - edge / centre))) if centre > 1e-6 else 0.0
-    out["tone_contrast"] = float(np.percentile(g, 95) - np.percentile(g, 5))
-    x = np.asarray(rgb, dtype=np.float32)
-    mx, mn = x.max(axis=-1), x.min(axis=-1)
-    out["sat"] = float(np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0.0).mean())
-    return out
+def look_measures(rgb, gray=None):
+    """The look.py metrics of one frame (same units as a look.json summary and the fingerprint's look layer)."""
+    m = look.frame_look(rgb)
+    return {k: m.get(k) for k in LOOK_KEYS}
 
 
-def _look_closeness(rgb, gray, look):
-    if not isinstance(look, dict):
+def _look_closeness(rgb, gray, ref_look):
+    if not isinstance(ref_look, dict):
         return None
     meas = look_measures(rgb, gray)
     ds = []
     for k in LOOK_KEYS:
-        ref = _med(look.get(k))
-        if ref is not None:
-            ds.append(math.exp(-abs(meas[k] - ref) / max(0.25 * abs(ref), 0.01)))
+        ref, v = _med(ref_look.get(k)), meas.get(k)
+        if ref is not None and _num(v):
+            ds.append(math.exp(-abs(v - ref) / max(0.25 * abs(ref), LOOK_ABS_FLOOR.get(k, 0.01))))
     return sum(ds) / len(ds) if ds else None
 
 
