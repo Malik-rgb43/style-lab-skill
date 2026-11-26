@@ -23,11 +23,14 @@ Usage:
   cut.py <source> <words.aligned.json> <keep.json> --out <dir/stem> [--preset reels|lesson|vsl]
          [--fps N] [--lead-ms N] ... [--no-render]
 
-Presets: lesson (default) = --fps 25 --lead-ms 80 --tail-ms 120 --merge-gap-ms 250
---pause-max-ms 450 --pause-keep-ms 150, no end air; reels = --fps 30 --lead-ms 60 --tail-ms 80
---merge-gap-ms 180 --pause-max-ms 260 --pause-keep-ms 70 --end-air-ms 1000.
-vsl = the reels values (then run tighten.py and check_cut.py on the result).
-Explicit flags override the preset; --end-air-ms 0 switches the end air off.
+Presets: lesson (default) = --lead-ms 80 --tail-ms 120 --merge-gap-ms 250 --pause-max-ms 450
+--pause-keep-ms 150, no end air; reels = --lead-ms 60 --tail-ms 80 --merge-gap-ms 180
+--pause-max-ms 260 --pause-keep-ms 70 --end-air-ms 1000; vsl = the reels values with
+--tail-ms 200 (then run tighten.py and check_cut.py on the result; tighten closes the air).
+Frame rate: the source's own rate when it is a whole number that divides 48000 (24, 25, 30, 50,
+60, ...); otherwise (29.97, a variable rate) the preset's rate (lesson 25, reels and vsl 30) with
+a one-line note. Explicit flags override the preset, and an explicit --fps always wins;
+--end-air-ms 0 switches the end air off.
 
 keep.json: {"keep": [[i0, i1], ...]} (inclusive word indices of the raw transcript).
 Optional "retime": {"<word index>": [start_ms, end_ms]} pins a word the aligner put on the wrong
@@ -48,9 +51,12 @@ piece that starts (ends) at old_src_ms (+-20 ms) to the frame nearest new_src_ms
 end (quietest frame within -20/+40 ms of that).
 
 Writes <stem>.mp4, <stem>.cuts.json (pieces with src_in/src_out/dst_in, joins, long_gaps_kept,
-soft_joins, placeholders) and <stem>.words.json (kept words remapped to the cut timeline).
+soft_joins, placeholders) and <stem>.words.json (kept words remapped to the cut timeline). The
+files are written under temporary names and moved into place together only after the render
+succeeded. --no-render writes only the plan; an older <stem>.mp4 is renamed to <stem>.stale.mp4.
 
-Exit: 0 done, 1 error (bad input, ffmpeg failed), 2 usage, 3 ffmpeg missing.
+Exit: 0 done, 1 error (bad input, ffmpeg failed), 2 usage or a malformed keep.json entry,
+3 ffmpeg missing.
 """
 import argparse
 import json
@@ -62,6 +68,7 @@ import subprocess
 import sys
 import tempfile
 import wave
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -85,7 +92,9 @@ PRESETS = {
     "reels": {"fps": 30, "lead_ms": 60, "tail_ms": 80, "merge_gap_ms": 180,
               "pause_max_ms": 260, "pause_keep_ms": 70, "end_air_ms": 1000},
 }
-PRESETS["vsl"] = dict(PRESETS["reels"])  # talking-head VSL: the reels cut, then tighten.py + check_cut.py
+# talking-head VSL: the reels cut with a longer tail (tighten.py closes the air anyway, and a long
+# voice decay is not clipped), then tighten.py + check_cut.py
+PRESETS["vsl"] = dict(PRESETS["reels"], tail_ms=200)
 SETTING_KEYS = ("lead_ms", "tail_ms", "inside_ms", "merge_gap_ms", "pause_max_ms", "pause_keep_ms",
                 "sentence_keep_ms", "pause_min_cut_frames", "pause_snap_ms", "sliver_frames", "xfade_ms",
                 "end_air_ms")
@@ -101,8 +110,13 @@ class MissingTool(Exception):
     """ffmpeg/ffprobe not found: the CLI prints one line and exits 3."""
 
 
+class BadInput(ValueError):
+    """A malformed input (a keep.json entry, a cuts.json) or a video that does not match its plan:
+    the CLI prints one line and exits 2."""
+
+
 def resolve_opts(preset=None, overrides=None):
-    """Course defaults, then the preset, then explicit overrides (None values are ignored)."""
+    """Built-in defaults, then the preset, then explicit overrides (None values are ignored)."""
     if preset is not None and preset not in PRESETS:
         raise ValueError(f"unknown preset {preset!r}; choose one of {', '.join(sorted(PRESETS))}")
     o = dict(DEFAULTS)
@@ -122,13 +136,33 @@ def require_ffmpeg():
                               "(winget install Gyan.FFmpeg / brew install ffmpeg / apt install ffmpeg)")
 
 
+def has_audio(src):
+    """True when ffprobe finds an audio stream in src (also True when ffprobe cannot tell)."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                        "-of", "json", str(src)], capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        return True
+    try:
+        return bool(json.loads(r.stdout or "{}").get("streams"))
+    except ValueError:
+        return True
+
+
+def audio_error(src, stderr, what="the source audio"):
+    """One-line reason ffmpeg could not read src's audio (a plain line for a file without audio)."""
+    if not has_audio(src):
+        return f"no audio stream in {src}"
+    text = stderr.decode("utf-8", "replace") if isinstance(stderr, bytes) else str(stderr or "")
+    msg = text.strip().splitlines()
+    return f"ffmpeg could not read {what}: " + (msg[-1] if msg else "unknown error")
+
+
 def load_audio(src):
     """Stereo 48 kHz float32 in [-1, 1] through ffmpeg (a mono source is copied to both channels)."""
     r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(src), "-vn", "-ac", "2",
                         "-ar", str(AR), "-f", "s16le", "-"], capture_output=True)
     if r.returncode != 0:
-        msg = r.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise RuntimeError("ffmpeg could not read the source audio: " + (msg[-1] if msg else "unknown error"))
+        raise RuntimeError(audio_error(src, r.stderr))
     return np.frombuffer(r.stdout, dtype=np.int16).reshape(-1, 2).astype(np.float32) / 32768.0
 
 
@@ -158,6 +192,115 @@ def probe_video(src):
     if dur_ms is None:
         dur_ms = _seconds((doc.get("format") or {}).get("duration"))
     return int(s["width"]), int(s["height"]), dur_ms
+
+
+def source_fps(src):
+    """Frame rate of the first video stream as a Fraction (the average rate, else the base rate);
+    None when ffprobe cannot tell."""
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                        "stream=avg_frame_rate,r_frame_rate", "-of", "json", str(src)],
+                       capture_output=True, text=True, encoding="utf-8")
+    if r.returncode != 0:
+        return None
+    try:
+        streams = json.loads(r.stdout or "{}").get("streams") or []
+    except ValueError:
+        return None
+    for key in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            f = Fraction(str((streams[0].get(key) if streams else "") or ""))
+        except (ValueError, ZeroDivisionError):
+            continue
+        if f > 0:
+            return f
+    return None
+
+
+def choose_fps(src_fps, preset_fps, preset_name="lesson"):
+    """(fps, note): the source's own rate when it is a whole number that divides AR, else the
+    preset's rate and a one-line note saying so (note None when the source rate is used)."""
+    if src_fps is None:
+        return preset_fps, (f"note: the source frame rate could not be read; cutting at {preset_fps} fps "
+                            f"(the {preset_name} preset's rate); pass --fps to choose")
+    n = round(float(src_fps))
+    if n > 0 and abs(float(src_fps) - n) < 0.01 and AR % n == 0:
+        return n, None
+    return preset_fps, (f"note: the source is {float(src_fps):.3f} fps, not a whole rate that divides {AR}; "
+                        f"cutting at {preset_fps} fps (the {preset_name} preset's rate); pass --fps to choose")
+
+
+def video_frames(path):
+    """Frame count of the first video stream (the container's count, else counted packets);
+    None when the file has no video stream."""
+    def probe(extra, key):
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", *extra, "-show_entries",
+                            f"stream={key}", "-of", "json", str(path)],
+                           capture_output=True, text=True, encoding="utf-8")
+        if r.returncode != 0:
+            raise RuntimeError(f"ffprobe could not read {path}: " + (r.stderr.strip().splitlines() or ["?"])[-1])
+        try:
+            streams = json.loads(r.stdout or "{}").get("streams") or []
+        except ValueError:
+            streams = []
+        return str(streams[0].get(key, "")) if streams else None
+
+    n = probe([], "nb_frames")
+    if n is None:
+        return None
+    if not n.isdigit():
+        n = probe(["-count_packets"], "nb_read_packets") or ""
+    return int(n) if n.isdigit() else None
+
+
+def check_frames(mp4, cuts, cuts_path):
+    """Raise BadInput when mp4's frame count differs from cuts["frames"] by more than one frame
+    (the video and its plan come from different runs). A cuts doc without "frames" is not checked."""
+    if not isinstance(cuts, dict) or "frames" not in cuts:
+        return
+    try:
+        want = int(cuts["frames"])
+    except (TypeError, ValueError):
+        raise BadInput(f"{cuts_path}: 'frames' is not a whole number")
+    n = video_frames(mp4)
+    if n is None or abs(n - want) > 1:
+        has = "no video stream" if n is None else f"{n} frames"
+        raise BadInput(f"{mp4} has {has} but {cuts_path} says {want}: the video and the plan come from "
+                       f"different runs; render the cut again")
+
+
+def replace_together(pairs):
+    """Move every (tmp, final) pair into place as one set. Existing finals are first moved to
+    <final>.bak; if any step fails, the files already moved in are removed, the backups restored
+    and the temp files deleted, so the earlier set stays whole."""
+    backups, moved = [], []
+    try:
+        for _, final in pairs:
+            if os.path.exists(final):
+                os.replace(final, final + ".bak")
+                backups.append(final)
+        for tmp, final in pairs:
+            os.replace(tmp, final)
+            moved.append(final)
+    except BaseException:
+        for final in moved:
+            _remove(final)
+        for final in backups:
+            try:
+                os.replace(final + ".bak", final)
+            except OSError:
+                pass
+        for tmp, _ in pairs:
+            _remove(tmp)
+        raise
+    for final in backups:
+        _remove(final + ".bak")
+
+
+def _remove(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _seconds(v):
@@ -637,16 +780,33 @@ class _Planner:
         return soft
 
 
+def validate_keep(keep):
+    """Raise BadInput for a keep entry that is not [first word index, last word index] in order."""
+    spans = keep.get("keep", []) if isinstance(keep, dict) else None
+    if not isinstance(spans, list):
+        raise BadInput("keep.json: 'keep' must be a list of [first word index, last word index]")
+    for n, s in enumerate(spans):
+        shown = json.dumps(s, ensure_ascii=False)
+        ok = (isinstance(s, (list, tuple)) and len(s) == 2
+              and all(isinstance(x, int) and not isinstance(x, bool) for x in s))
+        if not ok:
+            raise BadInput(f"keep.json keep entry {n} {shown}: must be [first word index, last word index]")
+        if s[0] > s[1]:
+            raise BadInput(f"keep.json keep entry {n} {shown}: reversed, the first word index is after the last")
+
+
 def plan_pieces(words, keep, audio_db, fps, opts, dur_ms=None):
     """Pure planning: kept words + keep.json + 10 ms slice levels -> pieces, joins, remapped words.
 
-    Returns a dict with pieces (src_in_ms/src_out_ms/dst_in_ms and the course keys src_in/src_out/
-    dst_in in seconds, f_in/f_out frames), joins, long_gaps_kept, soft_joins, placeholders,
-    voiced_gaps, dropped_slivers, words (remapped), frames, duration_s and settings."""
+    Returns a dict with pieces (src_in_ms/src_out_ms/dst_in_ms, the same in seconds as src_in/
+    src_out/dst_in, f_in/f_out frames), joins, long_gaps_kept, soft_joins, placeholders,
+    voiced_gaps, dropped_slivers, words (remapped), frames, duration_s and settings.
+    A malformed or reversed keep entry raises BadInput naming the entry."""
     o = SimpleNamespace(**resolve_opts(None, dict(opts or {}, fps=fps)))
     db = np.asarray(audio_db, dtype=np.float64)
     full_ms = len(db) * 10
     dur_ms = full_ms if dur_ms is None else min(dur_ms, full_ms)
+    validate_keep(keep)
     pl = _Planner(words, keep, db, fps, o, dur_ms)
     for s0, s1 in keep.get("keep", []):
         if s0 not in pl.byi or s1 not in pl.byi:
@@ -791,20 +951,38 @@ def _graph_flag():
     return "-/filter_complex" if not m or int(m.group(1)) >= 7 else "-filter_complex_script"
 
 
-def write_plan(plan, stem, meta=None):
-    """write <stem>.cuts.json, <stem>.words.json (and placeholders.json next to them)."""
+def _plan_files(plan, stem, meta=None):
+    """write <stem>.cuts.json, <stem>.words.json (and placeholders.json next to them) under temp
+    names; returns the (tmp, final) pairs for replace_together."""
     stem = str(stem)
     os.makedirs(os.path.dirname(os.path.abspath(stem)) or ".", exist_ok=True)
     meta = meta or {}
-    cuts = {k: meta[k] for k in ("source", "words", "keep", "preset") if k in meta}
+    cuts = {k: meta[k] for k in ("source", "words", "keep", "preset", "source_fps") if k in meta}
     cuts.update({k: v for k, v in plan.items() if k not in ("words", "fade_out_ms", "fade_in_ms")})
-    _dump(stem + ".cuts.json", cuts)
     fms = 1000.0 / plan["fps"]
-    _dump(stem + ".words.json", {"source": os.path.abspath(stem + ".mp4"), "language": meta.get("language"),
-                                 "duration_ms": int(plan["frames"] * fms), "words": plan["words"]})
+    docs = [(stem + ".cuts.json", cuts),
+            (stem + ".words.json", {"source": os.path.abspath(stem + ".mp4"), "language": meta.get("language"),
+                                    "duration_ms": int(plan["frames"] * fms), "words": plan["words"]})]
     if plan["placeholders"]:
-        _dump(os.path.join(os.path.dirname(os.path.abspath(stem)), "placeholders.json"),
-              [{k: v for k, v in x.items() if k != "room_tone_src_s"} for x in plan["placeholders"]])
+        docs.append((os.path.join(os.path.dirname(os.path.abspath(stem)), "placeholders.json"),
+                     [{k: v for k, v in x.items() if k != "room_tone_src_s"} for x in plan["placeholders"]]))
+    pairs = []
+    try:
+        for final, doc in docs:
+            tmp = final + ".part"
+            pairs.append((tmp, final))
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False, indent=1)
+    except BaseException:
+        for tmp, _ in pairs:
+            _remove(tmp)
+        raise
+    return pairs
+
+
+def write_plan(plan, stem, meta=None):
+    """write <stem>.cuts.json, <stem>.words.json (and placeholders.json next to them) as one set."""
+    replace_together(_plan_files(plan, stem, meta))
 
 
 def _dump(path, doc):
@@ -815,7 +993,8 @@ def _dump(path, doc):
 
 
 def render(source, plan, out_stem, opts=None, audio=None, meta=None):
-    """write the plan files and render <stem>.mp4 in one ffmpeg pass (video select + cut audio)."""
+    """render <stem>.mp4 in one ffmpeg pass (video select + cut audio); the plan files and the mp4
+    are written under temp names and moved into place together after the render succeeded."""
     opts = resolve_opts(None, opts or {})
     stem = str(out_stem)
     stem = stem[:-4] if stem.endswith(".mp4") else stem
@@ -823,7 +1002,20 @@ def render(source, plan, out_stem, opts=None, audio=None, meta=None):
         audio = load_audio(source)
     if "channel_balance" not in plan:  # plan_pieces is pure: measure the balance here if the caller did not
         plan.update(channel_balance(audio))
-    write_plan(plan, stem, meta)
+    pairs = _plan_files(plan, stem, meta)
+    try:
+        _render_mp4(source, plan, stem, opts, audio)
+        pairs.append((stem + ".tmp.mp4", stem + ".mp4"))
+        replace_together(pairs)
+    except BaseException:
+        for tmp, _ in pairs:
+            _remove(tmp)
+        _remove(stem + ".tmp.mp4")
+        raise
+
+
+def _render_mp4(source, plan, stem, opts, audio):
+    """the cut video + audio into <stem>.tmp.mp4."""
     bal = {k: plan[k] for k in ("channel_balance", "gains") if k in plan}
     outa = build_audio(apply_balance(audio, bal), plan)
     fps = plan["fps"]
@@ -848,13 +1040,9 @@ def render(source, plan, out_stem, opts=None, audio=None, meta=None):
                "-frames:v", str(plan["frames"]), "-movflags", "+faststart", stem + ".tmp.mp4"]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
-            try:
-                os.remove(stem + ".tmp.mp4")
-            except OSError:
-                pass
+            _remove(stem + ".tmp.mp4")
             msg = r.stderr.strip().splitlines()
             raise RuntimeError("ffmpeg render failed: " + (msg[-1] if msg else "unknown error"))
-        os.replace(stem + ".tmp.mp4", stem + ".mp4")
 
 
 # ---------------------------------------------------------------- CLI
@@ -875,8 +1063,9 @@ def main(argv=None):
     ap.add_argument("keep", help="keep.json")
     ap.add_argument("--out", required=True, help="output stem, e.g. 1.1/edit_ready.v3")
     ap.add_argument("--preset", choices=sorted(PRESETS), default=None,
-                    help="lesson (default, the course tool values), reels or vsl; explicit flags override it")
-    ap.add_argument("--fps", type=int)
+                    help="lesson (default), reels or vsl; explicit flags override it")
+    ap.add_argument("--fps", type=int,
+                    help="output frame rate (default: the source's rate when it divides 48000, else the preset's)")
     ap.add_argument("--lead-ms", type=int)
     ap.add_argument("--tail-ms", type=int)
     ap.add_argument("--inside-ms", type=int)
@@ -910,6 +1099,7 @@ def main(argv=None):
     if opts["fps"] <= 0 or AR % opts["fps"]:
         print(f"error: --fps must divide {AR} (e.g. 24, 25, 30, 50, 60)", file=sys.stderr)
         return 2
+    stem = a.out[:-4] if a.out.endswith(".mp4") else a.out
     try:
         doc = _read_json(a.words, "words file")
         keep = _read_json(a.keep, "keep file")
@@ -919,7 +1109,13 @@ def main(argv=None):
             raise ValueError(f"{a.keep}: no 'keep' list")
         if not os.path.isfile(a.source):
             raise ValueError(f"source not found: {a.source}")
+        validate_keep(keep)
         _, _, video_ms = probe_video(a.source)
+        src_fps = source_fps(a.source)
+        if a.fps is None:  # the source's own rate when it can be cut on, else the preset's
+            opts["fps"], note = choose_fps(src_fps, opts["fps"], a.preset or "lesson")
+            if note:
+                print(note)
         audio = load_audio(a.source)
         db = slice_db(audio.mean(axis=1))
         dur_ms = len(audio) * 1000 / AR
@@ -930,8 +1126,8 @@ def main(argv=None):
             raise ValueError("nothing to cut: the keep spans give no piece")
         plan.update(channel_balance(audio, db))
         meta = {"source": os.path.abspath(a.source), "words": os.path.abspath(a.words),
-                "keep": os.path.abspath(a.keep), "preset": a.preset or "lesson", "language": doc.get("language")}
-        stem = a.out[:-4] if a.out.endswith(".mp4") else a.out
+                "keep": os.path.abspath(a.keep), "preset": a.preset or "lesson", "language": doc.get("language"),
+                "source_fps": round(float(src_fps), 3) if src_fps else None}
         ph = [(x["id"], x["start"], x["end"], x["room_tone_src_s"]) for x in plan["placeholders"]]
         print(f"{len(plan['pieces'])} pieces, {len(plan['joins'])} joins, {plan['frames']} frames = "
               f"{plan['frames'] / opts['fps']:.2f}s, {len(plan['dropped_slivers'])} sliver(s) dropped, "
@@ -948,8 +1144,15 @@ def main(argv=None):
                   f"balanced ({plan['channel_balance']})")
         if a.no_render:
             write_plan(plan, stem, meta)
+            if os.path.exists(stem + ".mp4"):  # an older render no longer matches the new plan
+                os.replace(stem + ".mp4", stem + ".stale.mp4")
+                print(f"note: {stem}.mp4 was from an earlier run and does not match the new plan: "
+                      f"renamed to {stem}.stale.mp4")
             return 0
         render(a.source, plan, stem, opts, audio=audio, meta=meta)
+    except BadInput as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

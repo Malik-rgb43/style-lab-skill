@@ -45,13 +45,24 @@ the join can be inspected).
 
 Usage:
   tighten.py <stem> --out <out_stem> [--min-pause-ms 250] [--no-placeholders] [--gap-ms 0]
+             [--soft-db 4] [--loud-db 10] [--check-db 0.05]
+
+  --soft-db   edges and sound = room tone + this, 3 slices in a row (dB)
+  --loud-db   any single slice this far above the room tone is sound, a click or a short consonant (dB)
+  --check-db  edge check tolerance on the 120 ms window (dB)
 
 Reads <stem>.mp4, <stem>.cuts.json, <stem>.words.json (from cut.py; the source is cuts.json
-"source"). Writes <out>.mp4 (atomically), <out>.cuts.json (pieces, joins, placeholders,
-edge_check, missing_check, edge_bad, voice_not_died_away, sound_in_pause) and <out>.words.json
-(words on the new timeline). <out> must differ from <stem>. Run check_cut.py on <out> afterwards.
+"source"); the mp4 must have the frame count cuts.json names (+-1), else exit 2. Writes <out>.mp4,
+<out>.cuts.json and <out>.words.json (words on the new timeline) as one set: under temp names, then
+moved into place together (an earlier set is restored if a move fails). cuts.json carries pieces,
+joins (each with type stack | keep | bridge, src_out/src_in and audio_xfade_ms [x0, x1], the
+crossfade on the output timeline), placeholders, edge_check, missing_check, added_check, edge_bad,
+voice_not_died_away, sound_in_pause and room_noise_warning. Read room_noise_warning: when it is
+set, raise --soft-db or check the held joins (sound_in_pause, voice_not_died_away). <out> must
+differ from <stem>. Run check_cut.py on <out> afterwards.
 
-Exit: 0 clean, 1 edge deviation / missing sound or error, 2 usage, 3 ffmpeg missing.
+Exit: 0 clean, 1 edge deviation / missing sound or error, 2 usage, a malformed cuts.json or an mp4
+that does not match it, 3 ffmpeg missing.
 """
 import argparse
 import json
@@ -68,7 +79,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cut  # noqa: E402
 import store  # noqa: E402
-from cut import AR, SL, MissingTool, _dump, _graph_flag, apply_balance, load_audio, require_ffmpeg, slice_db  # noqa: E402,F401
+from cut import (AR, SL, BadInput, MissingTool, _dump, _graph_flag, apply_balance, load_audio,  # noqa: E402,F401
+                 replace_together, require_ffmpeg, slice_db)
 
 XF_MIN_MS = 4.0       # shortest crossfade where two clips meet
 BRIDGE_XF_MS = 10.0   # linear crossfade into/out of the cut's own audio around placeholders
@@ -798,6 +810,14 @@ def _read_json(path):
         raise ValueError(f"cannot read {path}: {e}")
 
 
+def _src_s(rec, key):
+    """a record's source time in seconds (a placeholder record carries only the _ms value)."""
+    if rec.get(key) is not None:
+        return rec[key]
+    v = rec.get(key + "_ms")
+    return round(v / 1000, 3) if v is not None else None
+
+
 def _records(pl, cuts):
     fms = pl["fms"]
     notes = {x.get("id"): x.get("note") for x in cuts.get("placeholders", [])}
@@ -838,11 +858,20 @@ def _records(pl, cuts):
     joins = []
     for n in range(1, len(pl["items"])):
         a, b = pl["items"][n - 1], pl["items"][n]
-        if a["kind"] == "ph" or b["kind"] == "ph":
-            info = {"type": "placeholder", "closed_ms": 0.0}
-        else:
-            info = pl["jinfo"].get(id(b["S"]), {"type": "stack", "closed_ms": 0.0})
         t = b["v0"] * fms
+        if a["kind"] == "ph" or b["kind"] == "ph":
+            info = {"type": "bridge", "closed_ms": 0.0}
+            # the clip fades against the cut's own audio (linear) at its voice end / start; between
+            # two placeholders the cut's own join crossfade is in that audio
+            f = a["S"].fo if a["kind"] == "seg" else (b["S"].fi if b["kind"] == "seg" else None)
+            xf = (f[1], f[2]) if f else (t - JOIN_XF_MS / 2, t + JOIN_XF_MS / 2)
+        else:
+            info = dict(pl["jinfo"].get(id(b["S"]), {"type": "stack", "closed_ms": 0.0}))
+            f = b["S"].fi or a["S"].fo
+            xf = (f[1], f[2]) if f else (t - JOIN_XF_MS / 2, t + JOIN_XF_MS / 2)
+        info["src_out"] = _src_s(pieces[n - 1], "src_out")
+        info["src_in"] = _src_s(pieces[n], "src_in")
+        info["audio_xfade_ms"] = [round(xf[0], 3), round(xf[1], 3)]
         joins.append({"n": n, "dst": round(t / 1000, 3), **info,
                       "before": " ".join(w["w"] for w in words if t - 2500 <= w["end_ms"] <= t + 100),
                       "after": " ".join(w["w"] for w in words if t - 100 <= w["start_ms"] <= t + 2500)})
@@ -876,6 +905,7 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
         raise ValueError(f"source of the cut not found: {source}")
     if not os.path.isfile(stem + ".mp4"):
         raise ValueError(f"cut not found: {stem}.mp4")
+    cut.check_frames(stem + ".mp4", cuts, stem + ".cuts.json")
     if os.path.normcase(os.path.abspath(out_stem)) == os.path.normcase(os.path.abspath(os.path.splitext(source)[0])):
         raise ValueError("--out must differ from the raw source's stem (it would overwrite the recording)")
     mode = cuts.get("channel_balance", "none")
@@ -888,9 +918,13 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
     old = load_audio(stem + ".mp4")
     opts = {"min_pause_ms": min_pause_ms, "keep_placeholders": keep_placeholders, "gap_ms": gap_ms,
             "soft_db": soft_db, "loud_db": loud_db, "search_ms": search_ms}
-    pl = plan(cuts, wdoc, slice_db(src.mean(axis=1)), opts)
-    audio = mix(pl, src, old)
-    pieces, joins, words, phs, ids = _records(pl, cuts)
+    try:
+        pl = plan(cuts, wdoc, slice_db(src.mean(axis=1)), opts)
+        audio = mix(pl, src, old)
+        pieces, joins, words, phs, ids = _records(pl, cuts)
+    except (KeyError, TypeError) as e:  # a piece or word without a field cut.py always writes
+        raise BadInput(f"{stem}.cuts.json / .words.json is malformed (missing or wrong field {e}); "
+                       f"write them again with cut.py")
     edges = edge_check(pl, src, audio, check_ms, check_db, ids)
     missing = missing_audit(pl)
     added = added_audit(pl, ids)
@@ -911,15 +945,15 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
             doc[k] = cuts[k]
     wd = {"source": os.path.abspath(out_stem + ".mp4"), "language": wdoc.get("language"),
           "duration_ms": int(frames * fms), "words": words}
-    # all three files are written under temp names and moved into place together
+    # all three files are written under temp names and moved into place together (an earlier set
+    # is backed up first and restored if a move fails)
     final = [out_stem + ".mp4", out_stem + ".cuts.json", out_stem + ".words.json"]
     temp = [out_stem + ".tmp.mp4", out_stem + ".tmp.cuts.json", out_stem + ".tmp.words.json"]
     try:
         render(pl, source, stem + ".mp4", temp[0], audio, crf)
         _dump(temp[1], doc)
         _dump(temp[2], wd)
-        for a, b in zip(temp, final):
-            os.replace(a, b)
+        replace_together(list(zip(temp, final)))
     except BaseException:
         for t in temp:
             if os.path.exists(t):
@@ -959,6 +993,9 @@ def main(argv=None):
     except cut.MissingTool as e:
         print(str(e), file=sys.stderr)
         return 3
+    except BadInput as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     except (ValueError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

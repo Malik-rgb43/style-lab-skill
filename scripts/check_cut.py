@@ -8,14 +8,18 @@
 3. Lists EXTRA / MISSING / DIFF words, pauses longer than --max-gap-ms (the ASR gap must be
    confirmed by a quiet run in the audio), any heard word longer than --max-word-ms (hidden repeat
    suspect), joins that land inside speech (energy over the local room-tone floor) and a left/right
-   channel imbalance.
+   channel imbalance. A join of tighten.py (it carries "audio_xfade_ms") is judged on its
+   crossfade window only; its "stack" joins are skipped with a note, because tighten's own
+   edge_check and missing_check already audit them. A cut.py join is judged on the loudest
+   10 ms slice within +-30 ms of its cut point.
 
     check_cut.py <stem> [--lang he|en|<code>] [--model <id or dir>] [--heard <words.json>]
                  [--explain <explain.json>] [--max-gap-ms 450] [--max-word-ms 1200]
                  [--join-db 12] [--max-balance-db 1.0] [--allow-download]
 
-Reads <stem>.mp4, <stem>.words.json and <stem>.cuts.json. Writes <stem>.check.words.json (unless
---heard) and <stem>.check.txt. --explain takes {"items": [{"match": "text in the item", "why":
+Reads <stem>.mp4, <stem>.words.json and <stem>.cuts.json; the mp4 must have the frame count
+cuts.json names (+-1), else exit 2. Writes <stem>.check.words.json (unless --heard) and
+<stem>.check.txt. --explain takes {"items": [{"match": "text in the item", "why":
 "reason", "t": seconds (optional)}]}; explained items are listed but no longer fail the check.
 
 ASR model (local cache only; nothing is downloaded without --allow-download):
@@ -23,7 +27,8 @@ ASR model (local cache only; nothing is downloaded without --allow-download):
     others  mobiuslabsgmbh/faster-whisper-large-v3-turbo (about 1.6 GB)
     --model overrides either (a Hugging Face id or a local folder).
 
-Exit: 0 clean (or every item explained), 1 items left or bad input, 3 missing package or model.
+Exit: 0 clean (or every item explained), 1 items left or bad input, 2 the mp4 does not match its
+cuts.json (a stale render), 3 missing package, model or ffmpeg.
 """
 import argparse
 import difflib
@@ -37,6 +42,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import align  # noqa: E402
+import cut  # noqa: E402
 import cutlang  # noqa: E402
 import store  # noqa: E402
 
@@ -124,32 +130,72 @@ def long_words(heard, max_word_ms):
             for w in heard if w["end_ms"] - w["start_ms"] > max_word_ms]
 
 
-def join_energy(cuts, audio_db, join_db):
-    """Joins whose cut point sits inside speech: loudest 10 ms slice within +-30 ms of the join
-    is more than join_db over the local room-tone floor."""
+def stack_joins(cuts):
+    """tighten.py "stack" joins: not judged by join_energy (tighten's edge_check and
+    missing_check audit them)."""
+    return [j for j in cuts.get("joins", []) if j.get("type") == "stack"]
+
+
+def _window_db(audio_db, mono, x0_ms, x1_ms):
+    """loudest level in the window [x0, x1] ms: the RMS of exactly that window when the samples
+    are given (a 10 ms slice can straddle the next voice onset), else the loudest slice it touches."""
+    if mono is not None:
+        i0, i1 = int(max(0.0, x0_ms) * 48), int(max(0.0, x1_ms) * 48)
+        i1 = max(i1, i0 + 96)  # at least 2 ms
+        seg = np.asarray(mono[i0:i1], dtype=np.float64)
+        return float(20 * np.log10(np.sqrt((seg * seg).mean()) + 1e-9)) if len(seg) else None
+    k0 = max(0, int(x0_ms // SLICE_MS))
+    k1 = max(k0 + 1, int(np.ceil(x1_ms / SLICE_MS)))
+    win = audio_db[k0:k1]
+    return float(win.max()) if len(win) else None
+
+
+def join_energy(cuts, audio_db, join_db, mono=None):
+    """Joins that land inside speech: more than join_db over the local room-tone floor.
+
+    A join with "audio_xfade_ms" [x0, x1] (tighten.py) is judged on that crossfade window only;
+    a "stack" join is skipped (see stack_joins). A join without it (cut.py) is judged on the
+    loudest 10 ms slice within +-30 ms of the cut point. mono: optional 48 kHz samples of the
+    file, for an exact window level."""
     out = []
     if not len(audio_db):
         return out
     for j in cuts.get("joins", []):
-        k = int(j["dst"] * 1000 / SLICE_MS)
-        win = audio_db[max(0, k - 3): k + 3]
-        if not len(win):
+        if j.get("type") == "stack":
             continue
-        over = float(win.max() - _floor(audio_db, j["dst"]))
+        xf = j.get("audio_xfade_ms")
+        if isinstance(xf, (list, tuple)) and len(xf) == 2:
+            top = _window_db(audio_db, mono, float(xf[0]), float(xf[1]))
+            t = (float(xf[0]) + float(xf[1])) / 2000
+        else:
+            k = int(j["dst"] * 1000 / SLICE_MS)
+            win = audio_db[max(0, k - 3): k + 3]
+            top = float(win.max()) if len(win) else None
+            t = float(j["dst"])
+        if top is None:
+            continue
+        over = float(top - _floor(audio_db, t))
         if over > join_db:
+            src_out, src_in = j.get("src_out"), j.get("src_in")
             out.append({"kind": "JOIN", "t": float(j["dst"]), "n": j.get("n"), "over_db": over,
                         "context": f"[{str(j.get('before', ''))[-30:]}|{str(j.get('after', ''))[:30]}]",
-                        "src": f"{j.get('src_out', 0):.2f}->{j.get('src_in', 0):.2f}"})
+                        "src": f"{src_out if src_out is not None else 0:.2f}->"
+                               f"{src_in if src_in is not None else 0:.2f}"})
     return out
 
 
-def audio_db_of(source):
-    """Mono level per 10 ms slice (dBFS) of the file's audio."""
+def audio_mono_of(source):
+    """Mono 48 kHz float32 samples of the file's audio."""
     r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(source), "-vn", "-ac", "1",
                         "-ar", "48000", "-f", "s16le", "-"], capture_output=True)
     if r.returncode != 0:
-        raise RuntimeError("ffmpeg could not read " + str(source))
-    x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768
+        raise RuntimeError(cut.audio_error(source, r.stderr, str(source)))
+    return np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768
+
+
+def audio_db_of(source, mono=None):
+    """Mono level per 10 ms slice (dBFS) of the file's audio."""
+    x = audio_mono_of(source) if mono is None else mono
     n = len(x) // 480
     if n == 0:
         return np.zeros(0)
@@ -223,6 +269,8 @@ def describe(it):
                 f"(src {it['src']}) {it['context']}")
     if k == "BALANCE":
         return f"BALANCE left/right differ by {it['db']:+.1f} dB (L minus R)"
+    if k == "TIGHTEN":
+        return f"TIGHTEN {it['count']} edge problem(s) listed in cuts.json edge_bad by tighten.py"
     return str(it)
 
 
@@ -243,7 +291,8 @@ def check(stem, lang=None, model=None, heard_file=None, explain_file=None, max_g
     exp_doc = json.load(open(stem + ".words.json", encoding="utf-8"))
     exp = exp_doc["words"]
     cuts = json.load(open(stem + ".cuts.json", encoding="utf-8"))
-    lang = (lang if lang and lang != "auto" else exp_doc.get("language") or "he").lower()
+    cut.check_frames(mp4, cuts, stem + ".cuts.json")
+    lang =(lang if lang and lang != "auto" else exp_doc.get("language") or "he").lower()
     if heard_file:
         heard = json.load(open(heard_file, encoding="utf-8"))["words"]
     else:
@@ -251,10 +300,14 @@ def check(stem, lang=None, model=None, heard_file=None, explain_file=None, max_g
         with open(stem + ".check.words.json", "w", encoding="utf-8") as f:
             json.dump({"source": os.path.basename(mp4), "words": heard}, f, ensure_ascii=False, indent=1)
     items = diff_words([w["w"] for w in exp], heard, lang, [w["start_ms"] / 1000 for w in exp])
-    db = audio_db_of(mp4)
+    mono = audio_mono_of(mp4)
+    db = audio_db_of(mp4, mono)
     items += long_pauses(heard, db, max_gap_ms)
     items += long_words(heard, max_word_ms)
-    items += join_energy(cuts, db, join_db)
+    items += join_energy(cuts, db, join_db, mono)
+    stacked = stack_joins(cuts)
+    if cuts.get("edge_bad"):  # the stack joins are skipped above: tighten's own failures still count
+        items.append({"kind": "TIGHTEN", "t": 0.0, "count": len(cuts["edge_bad"])})
     bal = channel_balance(mp4)
     if abs(bal) > max_balance_db:
         items.append({"kind": "BALANCE", "t": 0.0, "db": bal})
@@ -268,7 +321,10 @@ def check(stem, lang=None, model=None, heard_file=None, explain_file=None, max_g
     ratio = difflib.SequenceMatcher(None, e, g, autojunk=False).ratio()
     lines = [f"match {ratio:.3f}, {len(e)} expected / {len(g)} heard tokens, "
              f"{len(cuts.get('joins', []))} joins, {len(left)} item(s) left, {len(done)} explained"]
-    lines += [f"  {it['t']:7.2f}s {s}" for it, s, _ in left]
+    if stacked:
+        lines.append(f"  note: {len(stacked)} stack join(s) not judged by energy here: tighten.py's "
+                     f"edge_check and missing_check audit them (edge_bad in its cuts.json)")
+    lines +=[f"  {it['t']:7.2f}s {s}" for it, s, _ in left]
     lines += [f"  {it['t']:7.2f}s EXPLAINED {s} -- {why}" for it, s, why in done]
     txt = "\n".join(lines)
     with open(stem + ".check.txt", "w", encoding="utf-8") as f:
@@ -293,6 +349,11 @@ def main(argv=None):
     ap.add_argument("--allow-download", action="store_true",
                     help="permit fetching a missing ASR model (about 1.6 GB)")
     a = ap.parse_args(argv)
+    try:
+        cut.require_ffmpeg()
+    except cut.MissingTool as e:
+        print(str(e), file=sys.stderr)
+        return 3
     stem = a.stem[:-4] if a.stem.endswith(".mp4") else a.stem
     for ext in (".mp4", ".words.json", ".cuts.json"):
         if not os.path.isfile(stem + ext):
@@ -307,6 +368,9 @@ def main(argv=None):
     except align.Blocked as e:
         print(str(e), file=sys.stderr)
         return 3
+    except cut.BadInput as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     except (RuntimeError, OSError, ValueError, KeyError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

@@ -335,3 +335,68 @@ def test_slow_hebrew_alignment_moves_edges(monkeypatch):
              [abs(w["end_ms"] - w["asr_end_ms"]) for w in al]
     assert statistics.median(shifts) > 20
     assert all(w["start_ms"] < w["end_ms"] for w in al)
+
+
+# ---------- final review fixes ----------
+
+def test_missing_ffmpeg_exits_3_one_line(tmp_path, home, monkeypatch):
+    from conftest import run_cli
+    src, words, out = _tiny_inputs(tmp_path)
+    empty = tmp_path / "nobin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    r = run_cli("align.py", src, words, "--out", out)
+    assert r.returncode == 3, r.stdout + r.stderr
+    lines = [x for x in r.stderr.splitlines() if x.strip()]
+    assert len(lines) == 1 and "ffmpeg" in lines[0] and "install" in lines[0], lines
+    assert not out.exists()
+
+
+def _fake_modules(monkeypatch, **mods):
+    import sys
+    import types
+    for name, attrs in mods.items():
+        m = types.ModuleType(name)
+        for k, v in attrs.items():
+            setattr(m, k, v)
+        monkeypatch.setitem(sys.modules, name, m)
+
+
+def _raises(exc):
+    def f(*a, **k):
+        raise exc
+    return f
+
+
+@pytest.mark.parametrize("download, exc, want", [
+    (False, ValueError("invalid header in model.safetensors\nsecond line"), "could not be loaded"),
+    (True, OSError("connection reset by peer"), "could not download"),
+])
+def test_he_model_that_cannot_be_loaded_exits_3_one_line(tmp_path, monkeypatch, capsys, download, exc, want):
+    monkeypatch.setattr(align, "preflight", lambda *a, **k: None)
+    monkeypatch.setattr(align, "load_audio", lambda src: np.zeros(16000, dtype=np.float32))
+    bad = type("Bad", (), {"from_pretrained": staticmethod(_raises(exc))})
+    _fake_modules(monkeypatch, torch={"set_num_threads": lambda n: None},
+                  huggingface_hub={"hf_hub_download": lambda *a, **k: "vocab.json"},
+                  transformers={"Wav2Vec2FeatureExtractor": bad, "Wav2Vec2ForCTC": bad})
+    src, words, out = _tiny_inputs(tmp_path)
+    args = [str(src), str(words), "--out", str(out)] + (["--allow-download"] if download else [])
+    assert align.main(args) == 3
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and want in err[0] and align.HE_MODEL_ID in err[0], err
+    assert not out.exists()
+
+
+def test_corrupt_cached_mms_model_exits_3_one_line(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(align, "preflight", lambda *a, **k: None)
+    monkeypatch.setattr(align, "mms_cached", lambda: True)
+    monkeypatch.setattr(align, "load_audio", lambda src: np.zeros(16000, dtype=np.float32))
+    mms = type("MMS", (), {"get_model": staticmethod(_raises(RuntimeError("PytorchStreamReader failed")))})
+    _fake_modules(monkeypatch, torch={"set_num_threads": lambda n: None}, torchaudio={},
+                  **{"torchaudio.pipelines": {"MMS_FA": mms}})
+    src, words, out = _tiny_inputs(tmp_path, lang="en")
+    words.write_text(json.dumps({"language": "en", "words": [
+        {"i": 0, "w": "hello", "start_ms": 0, "end_ms": 400, "p": 0.9}]}), encoding="utf-8")
+    assert align.main([str(src), str(words), "--out", str(out)]) == 3
+    err = capsys.readouterr().err.strip().splitlines()
+    assert len(err) == 1 and "could not be loaded" in err[0] and "MMS_FA" in err[0], err

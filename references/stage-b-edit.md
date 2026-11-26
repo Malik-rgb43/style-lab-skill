@@ -12,9 +12,11 @@ the script exits 3 naming the model, its size and `--allow-download`.
 ## Steps
 1. **Transcribe**: `transcribe_words.py raw.mp4 --out words.json` (Hebrew: ivrit-ai model; cloud
    only if the user asks, `transcribe_cloud_ivrit.py`, paid). Show low-confidence words (names,
-   numbers, brands) and fix them. Spellings the transcript gets wrong every time (a brand, a
-   tech word) go into the per-user lexicon: `python scripts/cutlang.py lexicon add --lang he
-   --word <heard> --spelling <written>`; `lexicon list --lang he` shows it.
+   numbers, brands) and fix them. A Latin word in a Hebrew transcript (a brand, a tech word)
+   can only be aligned when the per-user lexicon says how it is spoken, written in the
+   language's letters: `python scripts/cutlang.py lexicon add --lang he --word <latin word>
+   --spelling <how it is spoken, in Hebrew letters>`; `lexicon list --lang he` shows it. Only
+   single Latin words are looked up, so a Hebrew or a multi-word key has no effect.
 2. **Align**: `python scripts/align.py raw.mp4 words.json --out words.aligned.json
    [--lang he|en|auto] [--chunk-s 30] [--margin-s 0.6] [--from-word N] [--to-word N]
    [--threads N] [--allow-download]`. Forced alignment (Hebrew wav2vec2 CTC, other languages MMS
@@ -36,13 +38,19 @@ the script exits 3 naming the model, its size and `--allow-download`.
    - `set_in_ms` / `set_out_ms`: `[[old_src_ms, new_src_ms], ...]` move one piece's in / out point.
 5. **Cut**: `python scripts/cut.py raw.mp4 words.aligned.json keep.json --out <dir>/<stem>
    --preset reels|lesson|vsl`. Cuts land only in the quiet between words, on frame boundaries,
-   with 15 ms crossfades. Presets: `reels` (30 fps, pauses shortened, 1 s end air), `lesson`
-   (25 fps, pauses about 0.3 s, no end air), `vsl` (talking head; follow it with step 6).
-   Course flags override a preset: `--fps --lead-ms --tail-ms --inside-ms --merge-gap-ms
+   with 15 ms crossfades. Presets: `reels` (pauses shortened, 1 s end air), `lesson` (pauses
+   about 0.3 s, no end air), `vsl` (the reels cut with a 200 ms tail, for talking heads; follow
+   it with step 6). Frame rate: the source's own rate when it is a whole number that divides
+   48000 (24, 25, 30, 50, 60); otherwise (29.97, a variable rate) the preset's rate (lesson 25,
+   reels and vsl 30) with a one-line note. Explicit flags override a preset, and `--fps` always
+   wins: `--fps --lead-ms --tail-ms --inside-ms --merge-gap-ms
    --pause-max-ms --pause-keep-ms --sentence-keep-ms --pause-min-cut-frames --pause-snap-ms
    --end-air-ms --sliver-frames --xfade-ms --crf --excl-overlap --no-render`.
    Outputs: `<stem>.mp4`, `<stem>.cuts.json`, `<stem>.words.json` (remapped to the cut timeline),
-   and `placeholders.json` when keep.json has placeholders. `--end-air-ms 0` switches the end air
+   and `placeholders.json` when keep.json has placeholders, moved into place together after the
+   render. `--no-render` writes only the plan and renames an older `<stem>.mp4` to
+   `<stem>.stale.mp4`. A malformed or reversed keep entry exits 2 naming the entry.
+   `--end-air-ms 0` switches the end air
    off, also under `--preset reels`. In `cuts.json` read `soft_joins` (a join with no quiet frame
    in reach), `long_gaps_kept` (a gap kept because no quiet frame existed), `dropped_slivers`
    (pieces too short to keep; each lists `lost_words`, and the CLI prints a warning for them: a
@@ -50,24 +58,32 @@ the script exits 3 naming the model, its size and `--allow-download`.
    the source; the output is balanced). For `vsl` the CLI ends with `next: tighten.py <stem>
    --out <stem>.tight, then check_cut.py <stem>.tight`.
 6. **VSL / talking head only**: `python scripts/tighten.py <stem> --out <out_stem>
-   [--min-pause-ms 250] [--no-placeholders] [--gap-ms 0] [--soft-db 4]
+   [--min-pause-ms 250] [--no-placeholders] [--gap-ms 0] [--soft-db 4] [--loud-db 10]
    [--check-db 0.05]` joins without dead air. Flags: `--min-pause-ms` closes every pause at least
    this long; `--no-placeholders` drops placeholders and closes their joins; `--gap-ms` room tone
-   left between a voice end and the next start; `--soft-db`
-   sound and edges = room tone + this (3 slices in a row); `--check-db` edge check tolerance. Outputs
-   `<out_stem>.mp4/.cuts.json/.words.json`; cuts.json carries `edge_check`, `missing_check`,
-   `added_check`, `edge_bad`, and the informational `voice_not_died_away` and `sound_in_pause` (joins kept as the
-   cut made them). Exit 1 = an edge off by more than `--check-db` (default 0.05 dB) or sound
-   missing from the output (any `edge_bad` item; the files are still written, fix the cut, do not
-   ship it); exit 3 = ffmpeg missing. The audit also has an "added" check: exit 1 if any output
-   audio was read from outside the kept pieces. `sound_in_pause` lists joins held because soft
-   sound was found in the pause; raising `--soft-db` lets a noisy room close more joins.
+   left between a voice end and the next start; `--soft-db` sound and edges = room tone + this
+   (3 slices in a row); `--loud-db` any single slice this far above the room tone is sound (a
+   click, a short consonant); `--check-db` edge check tolerance. Outputs
+   `<out_stem>.mp4/.cuts.json/.words.json`, moved into place together; cuts.json carries
+   `edge_check`, `missing_check`, `added_check`, `edge_bad`, the informational
+   `voice_not_died_away` and `sound_in_pause` (joins kept as the cut made them), and per join
+   `type` (stack, keep or bridge), `src_out`/`src_in` and `audio_xfade_ms`. Exit 1 = an edge off
+   by more than `--check-db` (default 0.05 dB) or sound missing from the output (any `edge_bad`
+   item; the files are still written, fix the cut, do not ship it); exit 2 = a malformed
+   cuts.json or an mp4 whose frame count does not match it (a stale render: cut again); exit 3 =
+   ffmpeg missing. The audit also has an "added" check: exit 1 if any output audio was read from
+   outside the kept pieces. `sound_in_pause` lists joins held because soft sound was found in the
+   pause. Read `room_noise_warning` (printed as a warning too): when it is set, raise `--soft-db`
+   or check the held joins in `sound_in_pause` and `voice_not_died_away`.
 7. **Check**: `python scripts/check_cut.py <final stem> [--lang] [--model] [--heard] [--explain]
    [--max-gap-ms 450] [--max-word-ms 1200] [--join-db 12] [--max-balance-db 1.0]
    [--allow-download]`, where the final stem is the tighten output for vsl and the cut stem
    otherwise. It re-transcribes the whole cut without VAD and diffs it against the expected words;
-   writes `<stem>.check.words.json` (unless `--heard`) and `<stem>.check.txt`. Exit 0 = clean,
-   1 = items left, 3 = missing package or model. `--explain` takes `{"items": [{"match": "text in
+   writes `<stem>.check.words.json` (unless `--heard`) and `<stem>.check.txt`. On a tighten
+   output it judges each join on its crossfade window and skips the stack joins with a note
+   (tighten's edge check covers them; its `edge_bad` still fails the check). Exit 0 = clean,
+   1 = items left, 2 = the mp4 does not match its cuts.json, 3 = missing package, model or
+   ffmpeg. `--explain` takes `{"items": [{"match": "text in
    the item", "why": "reason", "t": seconds (optional)}]}`; explained items are listed but no
    longer fail. Fix and re-run until clean, or until every remaining item is explained to the
    user (a mis-heard word that is really there, a deliberate pause).

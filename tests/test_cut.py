@@ -240,10 +240,10 @@ def test_render_lesson_writes_outputs_and_stays_in_sync(tmp_path, home, base_cli
 def test_25fps_source_cut_at_30fps_keeps_av_in_sync(tmp_path, home, base_clip):
     src, words, kp = base_clip
     stem = tmp_path / "reel"
-    r = run_cli("cut.py", src, words, kp, "--out", stem, "--preset", "reels")
+    r = run_cli("cut.py", src, words, kp, "--out", stem, "--preset", "reels", "--fps", "30")
     assert r.returncode == 0, r.stderr
     cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
-    assert cuts["fps"] == 30
+    assert cuts["fps"] == 30 and cuts["source_fps"] == 25
     fms = 1000 / 30
     for p in cuts["pieces"]:
         assert abs(p["src_in_ms"] - p["f_in"] * fms) < 0.001 and abs(p["src_out_ms"] - p["f_out"] * fms) < 0.001
@@ -306,7 +306,7 @@ def test_preset_equals_explicit_flags(tmp_path, home, base_clip):
     a = tmp_path / "a"
     b = tmp_path / "b"
     r1 = run_cli("cut.py", src, words, kp, "--out", a, "--preset", "reels", "--no-render")
-    r2 = run_cli("cut.py", src, words, kp, "--out", b, "--no-render", "--fps", "30", "--lead-ms", "60",
+    r2 = run_cli("cut.py", src, words, kp, "--out", b, "--no-render", "--lead-ms", "60",
                  "--tail-ms", "80", "--merge-gap-ms", "180", "--pause-max-ms", "260", "--pause-keep-ms", "70",
                  "--end-air-ms", "1000")
     assert r1.returncode == 0 and r2.returncode == 0, r1.stderr + r2.stderr
@@ -314,10 +314,11 @@ def test_preset_equals_explicit_flags(tmp_path, home, base_clip):
     c2 = json.loads(Path(f"{b}.cuts.json").read_text(encoding="utf-8"))
     for k in ("fps", "frames", "settings", "pieces", "joins"):
         assert c1[k] == c2[k], k
+    assert c1["fps"] == 25  # the 25 fps source keeps its own rate under every preset
     r3 = run_cli("cut.py", src, words, kp, "--out", tmp_path / "c", "--preset", "reels",
-                 "--pause-keep-ms", "100", "--no-render")
+                 "--pause-keep-ms", "100", "--fps", "30", "--no-render")
     c3 = json.loads(Path(f"{tmp_path / 'c'}.cuts.json").read_text(encoding="utf-8"))
-    assert c3["settings"]["pause_keep_ms"] == 100 and c3["fps"] == 30
+    assert c3["settings"]["pause_keep_ms"] == 100 and c3["fps"] == 30  # an explicit --fps wins
 
 
 def test_missing_ffmpeg_exits_3_one_line(tmp_path, home, monkeypatch):
@@ -389,6 +390,14 @@ def test_render_api_balances_channels_and_replaces_atomically(tmp_path, home):
     with pytest.raises(RuntimeError):
         cut.render(tmp_path / "missing.mkv", plan2, bad, o, audio=audio)
     assert not Path(f"{bad}.mp4").exists() and not Path(f"{bad}.tmp.mp4").exists()
+    # the plan files are moved in only with the video: a failed render writes none of them
+    assert not list(tmp_path.glob("bad.*"))
+    # ... and a failed re-render leaves the earlier set whole
+    before = {p.name: p.read_bytes() for p in tmp_path.glob("api.*")}
+    with pytest.raises(RuntimeError):
+        cut.render(tmp_path / "missing.mkv", cut.plan_pieces(mm.words_doc(SPANS)["words"], {"keep": [[0, 1]]},
+                                                             db, 25, o), stem, o, audio=audio)
+    assert {p.name: p.read_bytes() for p in tmp_path.glob("api.*")} == before
 
 
 def test_end_air_without_room_falls_back_to_the_normal_tail():
@@ -467,8 +476,8 @@ def test_dropped_sliver_warning_names_each_lost_word(tmp_path, home, base_clip):
 
 
 def test_vsl_preset_is_the_reels_cut_and_prints_the_next_step(tmp_path, home, base_clip):
-    assert cut.PRESETS["vsl"] == cut.PRESETS["reels"]
-    assert cut.resolve_opts("vsl") == cut.resolve_opts("reels")
+    assert cut.PRESETS["vsl"] == dict(cut.PRESETS["reels"], tail_ms=200)  # tighten closes the air
+    assert cut.resolve_opts("vsl") == dict(cut.resolve_opts("reels"), tail_ms=200)
     src, words, kp = base_clip
     stem = tmp_path / "v"
     r = run_cli("cut.py", src, words, kp, "--out", stem, "--preset", "vsl")
@@ -478,3 +487,122 @@ def test_vsl_preset_is_the_reels_cut_and_prints_the_next_step(tmp_path, home, ba
                    f"then python scripts/check_cut.py {stem}.tight"]
     r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "r", "--preset", "reels", "--no-render")
     assert "next:" not in r.stdout
+
+
+# ---------------------------------------------------------------- final review fixes
+
+def test_choose_fps_keeps_a_whole_source_rate_else_the_preset():
+    from fractions import Fraction
+    assert cut.choose_fps(Fraction(60), 30, "reels") == (60, None)
+    assert cut.choose_fps(Fraction(24), 25) == (24, None)
+    fps, note = cut.choose_fps(Fraction(30000, 1001), 30, "vsl")
+    assert fps == 30 and "29.970" in note and "vsl" in note and "--fps" in note
+    fps, note = cut.choose_fps(Fraction(7), 25)  # 48000 / 7 is not whole
+    assert fps == 25 and note
+    fps, note = cut.choose_fps(None, 25)
+    assert fps == 25 and "could not be read" in note
+
+
+def test_60fps_source_is_cut_at_60fps(tmp_path, home):
+    src, words, kp = _setup(tmp_path, fps=60)
+    stem = tmp_path / "s60"
+    r = run_cli("cut.py", src, words, kp, "--out", stem, "--preset", "reels")
+    assert r.returncode == 0, r.stderr
+    assert not [x for x in r.stdout.splitlines() if x.startswith("note:") and "fps" in x], r.stdout
+    cuts =json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    assert cuts["fps"] == 60 and cuts["source_fps"] == 60
+    _av_ok(f"{stem}.mp4", 60, cuts["frames"])
+    # an explicit --fps always wins over the source rate
+    r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "s30", "--preset", "reels", "--fps", "30",
+                "--no-render")
+    assert r.returncode == 0, r.stderr
+    assert json.loads(Path(f"{tmp_path / 's30'}.cuts.json").read_text(encoding="utf-8"))["fps"] == 30
+
+
+def test_29_97fps_source_uses_the_preset_rate_with_a_note(tmp_path, home):
+    wav = tmp_path / "a.wav"
+    mm.write_wav(wav, mm.tone_track(DUR, SPANS))
+    src = tmp_path / "ntsc.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"testsrc2=s=160x90:r=30000/1001:d={DUR / 1000}", "-i", str(wav), "-map", "0:v", "-map", "1:a",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "pcm_s16le", str(src)],
+                   check=True)
+    assert abs(float(cut.source_fps(src)) - 29.97) < 0.01
+    words = mm.write_json(tmp_path / "w.json", mm.words_doc(SPANS))
+    kp = mm.write_json(tmp_path / "k.json", KEEP)
+    for preset, want in (("lesson", 25), ("vsl", 30)):
+        stem = tmp_path / preset
+        r = run_cli("cut.py", src, words, kp, "--out", stem, "--preset", preset, "--no-render")
+        assert r.returncode == 0, r.stderr
+        notes = [x for x in r.stdout.splitlines() if x.startswith("note:") and "fps" in x]
+        assert len(notes) == 1 and "29.970" in notes[0] and f"{want} fps" in notes[0], r.stdout
+        assert json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))["fps"] == want
+
+
+@pytest.mark.parametrize("entry, why", [([5], "must be"), ([3, 1], "reversed"), (["a", 2], "must be"),
+                                        ([1, 2, 3], "must be")])
+def test_malformed_or_reversed_keep_entry_exits_2_naming_it(tmp_path, home, base_clip, entry, why):
+    src, words, _ = base_clip
+    kp = mm.write_json(tmp_path / "k.json", {"keep": [[0, 1], entry]})
+    r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "x", "--no-render")
+    assert r.returncode == 2, r.stdout + r.stderr
+    lines = [x for x in r.stderr.splitlines() if x.strip()]
+    assert len(lines) == 1 and "keep entry 1" in lines[0] and why in lines[0], lines
+    assert json.dumps(entry) in lines[0]
+    assert not list(tmp_path.glob("x*"))
+
+
+def test_source_without_audio_is_one_plain_line(tmp_path, home):
+    src = tmp_path / "silent.mkv"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=160x90:r=25:d={DUR / 1000}",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(src)], check=True)
+    words = mm.write_json(tmp_path / "w.json", mm.words_doc(SPANS))
+    kp = mm.write_json(tmp_path / "k.json", KEEP)
+    r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "x")
+    assert r.returncode == 1
+    lines = [x for x in r.stderr.splitlines() if x.strip()]
+    assert len(lines) == 1 and "no audio stream" in lines[0] and "Traceback" not in r.stderr, lines
+
+
+def test_no_render_renames_a_stale_video(tmp_path, home, base_clip):
+    src, words, kp = base_clip
+    stem = tmp_path / "st"
+    assert run_cli("cut.py", src, words, kp, "--out", stem).returncode == 0
+    old = Path(f"{stem}.mp4").read_bytes()
+    kp2 = mm.write_json(tmp_path / "k2.json", {"keep": [[0, 1]]})
+    r = run_cli("cut.py", src, words, kp2, "--out", stem, "--no-render")
+    assert r.returncode == 0, r.stderr
+    assert not Path(f"{stem}.mp4").exists()
+    assert Path(f"{stem}.stale.mp4").read_bytes() == old
+    assert "stale.mp4" in r.stdout
+
+
+def test_replace_together_restores_the_earlier_set_on_failure(tmp_path, monkeypatch):
+    finals = [str(tmp_path / n) for n in ("a.mp4", "a.cuts.json", "a.words.json")]
+    for f in finals:
+        Path(f).write_text("old " + f, encoding="utf-8")
+    pairs = []
+    for f in finals:
+        Path(f + ".part").write_text("new " + f, encoding="utf-8")
+        pairs.append((f + ".part", f))
+    real, calls = cut.os.replace, []
+
+    def flaky(a, b):
+        calls.append((a, b))
+        if a.endswith(".words.json.part"):  # the last move of the new set fails
+            raise OSError("disk full")
+        return real(a, b)
+
+    monkeypatch.setattr(cut.os, "replace", flaky)
+    with pytest.raises(OSError):
+        cut.replace_together(pairs)
+    monkeypatch.setattr(cut.os, "replace", real)
+    for f in finals:
+        assert Path(f).read_text(encoding="utf-8") == "old " + f
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.cuts.json", "a.mp4", "a.words.json"]
+    # and a clean run replaces all three, leaving no backup behind
+    for f in finals:
+        Path(f + ".part").write_text("new " + f, encoding="utf-8")
+    cut.replace_together(pairs)
+    assert all(Path(f).read_text(encoding="utf-8") == "new " + f for f in finals)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.cuts.json", "a.mp4", "a.words.json"]

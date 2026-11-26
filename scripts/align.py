@@ -26,10 +26,11 @@ and an optional flag (unaligned, unaligned_script, stretched, low_score). An "al
 reports how far the edges moved. --from-word/--to-word keep only that range in the output.
 A low-score word (score < 0.15) still gets its refined CTC times, flagged "low_score"; its
 asr_start_ms/asr_end_ms stay in the output so the cut step can weigh both spans.
-Unaligned words with Latin letters in a Hebrew file get a one-line hint to add their spelling
-with `cutlang.py lexicon add`.
+Unaligned words with Latin letters in a Hebrew file get a one-line hint to add how the word is
+spoken, written in Hebrew letters, with `cutlang.py lexicon add`.
 
-Exit: 0 done, 1 error (bad input, ffmpeg failed), 2 usage, 3 missing package or model.
+Exit: 0 done, 1 error (bad input, ffmpeg failed), 2 usage, 3 missing package, model or ffmpeg
+(also a cached model that cannot be loaded, or a failed download).
 """
 import argparse
 import importlib.util
@@ -45,6 +46,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import cut  # noqa: E402
 import cutlang  # noqa: E402
 import store  # noqa: E402
 
@@ -62,7 +64,7 @@ PACKAGES = {  # import name -> (install command, approx download)
     "transformers": ("pip install transformers", "about 12 MB"),
 }
 
-# refinement reach (as the course tool): onset up to 120 ms before the CTC start,
+# refinement reach: onset up to 120 ms before the CTC start,
 # offset up to 300 ms after the CTC end, local floor from +-600 ms around the word
 BACK_SLICES = 12
 FWD_SLICES = 30
@@ -115,6 +117,20 @@ def _model_block(model, size):
                    f"rerun with --allow-download to fetch it")
 
 
+def _first_line(e):
+    lines = str(e).strip().splitlines()
+    return (lines[0] if lines else type(e).__name__)[:200]
+
+
+def _load_block(model, where, e, downloading):
+    """one line for a model that could not be fetched or loaded (exit 3, no traceback)."""
+    if downloading:
+        return Blocked(f"could not download or load the model {model}: {_first_line(e)}; check the "
+                       f"connection and the free space in {where}, then rerun")
+    return Blocked(f"the cached model {model} in {where} could not be loaded ({_first_line(e)}); it may be "
+                   f"incomplete or corrupt: delete its folder there and rerun with --allow-download")
+
+
 # ---------------------------------------------------------------- audio
 
 def load_audio(src) -> np.ndarray:
@@ -122,8 +138,7 @@ def load_audio(src) -> np.ndarray:
     r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(src), "-vn", "-ac", "1",
                         "-ar", str(SR), "-f", "s16le", "-"], capture_output=True)
     if r.returncode != 0:
-        msg = r.stderr.decode("utf-8", "replace").strip().splitlines()
-        raise RuntimeError("ffmpeg could not read the source: " + (msg[-1] if msg else "unknown error"))
+        raise RuntimeError(cut.audio_error(src, r.stderr, "the source"))
     return np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768.0
 
 
@@ -274,10 +289,14 @@ def _align_he(words, audio, chunks, allow_download, log):
         model = Wav2Vec2ForCTC.from_pretrained(HE_MODEL_ID, **kw).eval()
         with open(hf_hub_download(HE_MODEL_ID, "vocab.json", **kw), encoding="utf-8") as f:
             vocab = json.load(f)
-    except OSError:
+    except OSError as e:
         if allow_download:
-            raise
+            raise _load_block(HE_MODEL_ID, hf_cache_dir(), e, True)
         raise _model_block(HE_MODEL_ID, HE_MODEL_SIZE)
+    except Exception as e:  # weights or config that do not load (an interrupted download)
+        raise _load_block(HE_MODEL_ID, hf_cache_dir(), e, False)
+    if not isinstance(vocab, dict) or "[PAD]" not in vocab:
+        raise _load_block(HE_MODEL_ID, hf_cache_dir(), ValueError("vocab.json has no [PAD] token"), False)
     blank = vocab["[PAD]"]  # CTC blank (the tokenizer config names "<pad>", the vocab has "[PAD]")
     letters = {c for c in vocab if len(c) == 1 and "א" <= c <= "ת"}
     for w in words:
@@ -301,10 +320,11 @@ def _align_mms(words, audio, chunks, lang, allow_download, log):
     try:
         model = MMS_FA.get_model(with_star=False,
                                  dl_kwargs={"model_dir": str(torch_hub_dir() / "checkpoints")})
-    except Exception:
-        if allow_download or mms_cached():
-            raise
-        raise _model_block(MMS_ID, MMS_SIZE)
+    except Exception as e:
+        if not allow_download and not mms_cached():
+            raise _model_block(MMS_ID, MMS_SIZE)
+        # cached: a corrupt checkpoint; otherwise the download failed
+        raise _load_block(MMS_ID, torch_hub_dir() / "checkpoints", e, not mms_cached())
     model.eval()
     vocab = MMS_FA.get_dict(star=None)
     for w in words:
@@ -435,8 +455,8 @@ def align(source, words_doc, lang, chunk_s=30, margin_s=0.6, allow_download=Fals
     if lang == "he":
         latin = sum(1 for w in words if "ctc_start_ms" not in w and re.search(r"[A-Za-z]", w["w"]))
         if latin:
-            log(f"hint: {latin} word(s) with Latin letters kept ASR times; add their Hebrew spelling "
-                f"with: cutlang.py lexicon add --lang he --word <word> --spelling <spelling>")
+            log(f"hint: {latin} word(s) with Latin letters kept ASR times; add how each is spoken, written in "
+                f"Hebrew letters, with: cutlang.py lexicon add --lang he --word <word> --spelling <spoken>")
     refine_edges(words, db)
     for w in words:
         if "ctc_start_ms" in w and w.get("score", 1) < LOW_SCORE:
@@ -466,6 +486,11 @@ def main(argv=None):
     ap.add_argument("--allow-download", action="store_true",
                     help="permit fetching a missing model (about 1.2-1.3 GB)")
     a = ap.parse_args(argv)
+    try:
+        cut.require_ffmpeg()
+    except cut.MissingTool as e:
+        print(str(e), file=sys.stderr)
+        return 3
 
     try:
         with open(a.words, encoding="utf-8") as f:

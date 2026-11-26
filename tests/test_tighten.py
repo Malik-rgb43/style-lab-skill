@@ -660,3 +660,57 @@ def test_short_window_catches_a_soft_onset_clipped_by_the_cut(tmp_path):
     assert (1, "start", 30) in bad, res["edge_bad"]
     row = [e for e in res["edge_bad"] if e["piece"] == 1 and e["edge"] == "start"][0]
     assert row["uncovered_ms"] >= 20
+
+
+# ---------------------------------------------------------------- final review fixes
+
+def test_joins_carry_type_source_times_and_the_crossfade(tmp_path):
+    stem = _three(tmp_path, [A, B3], [("A", *A, 0), ("B", *B3, 2)])
+    out = str(tmp_path / "t")
+    tighten.tighten(stem, out)
+    cuts = _read(out, ".cuts.json")
+    j, (p0, p1) = cuts["joins"][0], cuts["pieces"]
+    assert j["type"] == "stack"
+    assert (j["src_out"], j["src_in"]) == (p0["src_out"], p1["src_in"])
+    x0, x1 = j["audio_xfade_ms"]
+    assert x0 < x1 <= x0 + 200
+    assert x0 - FMS <= j["dst"] * 1000 <= x1 + FMS  # the picture switches inside the crossfade
+
+
+def test_placeholder_joins_are_bridges_with_their_crossfade(with_placeholder, tmp_path):
+    out = str(tmp_path / "tight")
+    tighten.tighten(with_placeholder, out)
+    joins = _read(out, ".cuts.json")["joins"]
+    assert [j["type"] for j in joins] == ["bridge", "bridge"]
+    for j in joins:
+        x0, x1 = j["audio_xfade_ms"]
+        assert 0 < x1 - x0 <= tighten.BRIDGE_XF_MS + 0.01
+        assert j["src_out"] is not None and j["src_in"] is not None
+
+
+def _copy_cut(stem, dst, edit):
+    cuts = _read(stem, ".cuts.json")
+    edit(cuts)
+    Path(str(dst) + ".cuts.json").write_text(json.dumps(cuts), encoding="utf-8")
+    Path(str(dst) + ".words.json").write_text(Path(stem + ".words.json").read_text(encoding="utf-8"), encoding="utf-8")
+    Path(str(dst) + ".mp4").write_bytes(Path(stem + ".mp4").read_bytes())
+    return dst
+
+
+def test_video_that_does_not_match_its_plan_exits_2(straight, tmp_path):
+    stem, _, _ = straight
+    bad = _copy_cut(stem, tmp_path / "stale", lambda c: c.update(frames=c["frames"] + 5))
+    r = run_cli("tighten.py", bad, "--out", tmp_path / "o")
+    assert r.returncode == 2, r.stdout + r.stderr
+    lines = [x for x in r.stderr.splitlines() if x.strip()]
+    assert len(lines) == 1 and "frames" in lines[0] and "Traceback" not in r.stderr, lines
+    assert not list(tmp_path.glob("o.*"))
+
+
+def test_malformed_cuts_json_exits_2_in_one_line(straight, tmp_path):
+    stem, _, _ = straight
+    bad = _copy_cut(stem, tmp_path / "bad", lambda c: c["pieces"][0].pop("frames"))
+    r = run_cli("tighten.py", bad, "--out", tmp_path / "o")
+    assert r.returncode == 2, r.stdout + r.stderr
+    lines = [x for x in r.stderr.splitlines() if x.strip()]
+    assert len(lines) == 1 and "malformed" in lines[0] and "frames" in lines[0] and "Traceback" not in r.stderr
