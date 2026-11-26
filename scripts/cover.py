@@ -9,14 +9,17 @@ video offers its 2nd and 3rd best at least 2 s apart) to <pack>/cover-candidates
     {"candidates": [{file, video, t, score, why: {...}}], "not_run": [...]}
 The script NEVER sets the cover. The owner picks one; `styles.py set-cover <slug> <image>` stores it.
 
-Hard rejects (a frame is never offered): mean luma below 0.06 or above 0.97, luma std below 0.04, within 3
+Hard rejects (a frame is never offered; a video whose every frame is rejected is retried once with
+relaxed luma and contrast bars, black frames and transitions still rejected, else it is `no_candidates`): mean luma below 0.06 or above 0.97, luma std below 0.04, within 3
 frames of any cut or jump of measure.json, inside a gradual transition (its dur_f), and directional motion
-blur (gradient energy ratio above 3 in either direction while the frame's sharpness percentile is below 0.3).
+blur (a one-sided gradient ratio above 3 AND a sharpness percentile under 0.3 AND raw sharpness under half the
+video's median, so sharp text lines and UI rows are kept). An empty result keeps the old cover-candidates/
+folder and exits 1.
 
 Score parts (each 0..1, weights renormalised over the parts that could be measured), from the fingerprint:
     palette   the frame's DOMINANT colour (measure_video.shot_palette, as fingerprint.py reads it) against
               layers.colour.metrics.dominant_L / dominant_chroma
-    look      layers.look.metrics grain_std, vignette_falloff, tone_contrast, sat (when present), measured on
+    look      optional; keys follow layers.look.metrics of Task 10 (look.py): grain_std, vignette_falloff, tone_contrast, sat (when present), measured on
               0..1 luma: grain = std of the 3x3 high-pass residual, vignette = 1 - edge/centre mean,
               tone = p95 - p5, sat = mean (max - min)/max; each within 25 % of the style median
     text      layers.type.metrics text_height_pct / big_text_per_min say the style has on-screen text: the
@@ -53,7 +56,8 @@ TALKING_FACE_SHARE = 0.5
 FACES_RELEVANT_SHARE = 0.2
 PALETTE_SCALE = 0.12  # OKLab distance at which palette closeness falls to 1/e
 LUMA_MIN, LUMA_MAX, LUMA_STD_MIN = 0.06, 0.97, 0.04
-BLUR_RATIO, BLUR_PCT = 3.0, 0.3
+RELAXED = (0.02, 0.99, 0.015)  # luma min, luma max, std min for a video whose every frame was rejected
+BLUR_RATIO, BLUR_PCT, BLUR_VS_MEDIAN = 3.0, 0.3, 0.5
 MIN_GAP_S = 2.0
 LOOK_KEYS = ("grain_std", "vignette_falloff", "tone_contrast", "sat")
 
@@ -118,16 +122,22 @@ def directional_ratio(gray):
     return 1.0 if hi <= 1e-9 else float("inf")
 
 
-def reject_reason(gray, sharp_pct=None):
-    """Why a frame can never be a cover, or None."""
+def reject_reason(gray, sharp_pct=None, raw_sharp=None, video_median=None, relax=False):
+    """Why a frame can never be a cover, or None. Directional blur needs ALL of: sharpness percentile under
+    0.3, raw Laplacian variance under half the video's median, and a one-sided gradient ratio above 3 (a
+    sharp frame of text lines or UI rows is one-sided too, and is kept). relax=True lowers the luma and
+    contrast bars (RELAXED) for a dark or flat style; a black frame is still rejected."""
+    lmin, lmax, smin = RELAXED if relax else (LUMA_MIN, LUMA_MAX, LUMA_STD_MIN)
     g = np.asarray(gray, dtype=np.float32) / 255.0
-    if g.mean() < LUMA_MIN:
+    if g.mean() < lmin:
         return "too dark"
-    if g.mean() > LUMA_MAX:
+    if g.mean() > lmax:
         return "too bright"
-    if g.std() < LUMA_STD_MIN:
+    if g.std() < smin:
         return "flat (no contrast)"
-    if sharp_pct is not None and sharp_pct < BLUR_PCT and directional_ratio(gray) > BLUR_RATIO:
+    if (sharp_pct is not None and raw_sharp is not None and video_median is not None
+            and sharp_pct < BLUR_PCT and raw_sharp < BLUR_VS_MEDIAN * video_median
+            and directional_ratio(gray) > BLUR_RATIO):
         return "directional motion blur"
     return None
 
@@ -208,12 +218,14 @@ def _text_score(text, fp):
     return 1.0
 
 
-def score_frame(rgb, gray, fingerprint=None, look_summary=None, faces=None, text=None, sharp_pct=None):
+def score_frame(rgb, gray, fingerprint=None, look_summary=None, faces=None, text=None, sharp_pct=None,
+                raw_sharp=None, video_median=None, relax=False):
     """(score 0..1, why) for one frame. Pure. rgb (h, w, 3) uint8, gray (h, w) uint8. faces: True/False/None
     (None = no detector); text: a list of [x, y, w, h] fraction boxes, a bool or None; sharp_pct: the frame's
     sharpness percentile within its video (the raw sharpness is used when it is None). A hard-rejected frame
-    scores 0 with why {"rejected": reason}."""
-    why_r = reject_reason(gray, sharp_pct)
+    scores 0 with why {"rejected": reason}. raw_sharp / video_median (raw Laplacian variance of the frame and
+    the median of its video) enable the directional-blur reject; relax: see reject_reason."""
+    why_r = reject_reason(gray, sharp_pct, raw_sharp, video_median, relax)
     if why_r:
         return 0.0, {"rejected": why_r}
     sharp = sharp_pct if sharp_pct is not None else _squash(sharpness(gray))
@@ -335,7 +347,7 @@ def cmd_candidates(a):
     look = (look.get("summary") or look.get("metrics")) if isinstance(look, dict) else None
     require_ffmpeg()
     det = mv._face_detector()
-    cands = []
+    cands, rejects = [], {}
     for vid in ids:
         measure = _read(adir / vid / "measure.json")
         src = _source(adir / vid, measure)
@@ -349,21 +361,45 @@ def cmd_candidates(a):
             rgb = _grab_rgb(src, t, w, h)
             if rgb is not None:
                 frames.append((t, rgb, (rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)).astype(np.uint8)))
-        pcts = sharpness_percentiles([sharpness(g) for _, _, g in frames])
-        for (t, rgb, gray), pct in zip(frames, pcts):
-            faces = bool(det(gray)) if det else None
-            try:
-                text = mv.text_boxes(gray)
-            except ImportError:
-                text = None
-            score, why = score_frame(rgb, gray, fp, look, faces=faces, text=text, sharp_pct=pct)
-            if "rejected" in why:
-                continue
-            cands.append({"video": vid, "t": t, "score": score, "why": why, "_src": str(src)})
+        raws = [sharpness(g) for _, _, g in frames]
+        pcts = sharpness_percentiles(raws)
+        med = float(np.median(raws)) if raws else None
+        if not frames:
+            not_run.append(f"video:{vid}:no_frames")
+            continue
+        found = None
+        for relax in (False, True):
+            counts, kept = {}, []
+            for (t, rgb, gray), raw, pct in zip(frames, raws, pcts):
+                faces = bool(det(gray)) if det else None
+                try:
+                    text = mv.text_boxes(gray)
+                except ImportError:
+                    text = None
+                score, why = score_frame(rgb, gray, fp, look, faces=faces, text=text, sharp_pct=pct,
+                                         raw_sharp=raw, video_median=med, relax=relax)
+                if "rejected" in why:
+                    counts[why["rejected"]] = counts.get(why["rejected"], 0) + 1
+                else:
+                    kept.append({"video": vid, "t": t, "score": score, "why": why, "_src": str(src)})
+            if kept:
+                found = kept
+                break
+            rejects[vid] = counts
+            if not relax:
+                not_run.append(f"video:{vid}:all_rejected")  # then retried with the relaxed bars
+        if found is None:
+            not_run.append(f"video:{vid}:no_candidates")
+        else:
+            cands.extend(found)
     face_share = _metric(fp, "broll", "face_share")
     if det is None and face_share is not None and face_share > FACES_RELEVANT_SHARE:
         not_run.append("faces")
     top = pick(cands, a.n)
+    if not top:
+        print("no usable cover frame in any video (" + "; ".join(not_run[:4] or ["no frames"])
+              + "); the old cover-candidates folder was left as it is", file=sys.stderr)
+        return 1
     tmp_dir = pack / "cover-candidates.tmp"
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
@@ -381,11 +417,12 @@ def cmd_candidates(a):
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
-    store.write_json(pack / "cover-candidates.json", {"candidates": rows, "not_run": not_run})
+    doc = {"candidates": rows, "not_run": not_run}
+    if rejects:
+        doc["rejects"] = rejects  # reject counts by reason, per video that had every frame rejected
+    store.write_json(pack / "cover-candidates.json", doc)
     for r in rows:
         print(pack / r["file"])
-    if not rows:
-        print("no candidate frames (see not_run in cover-candidates.json)", file=sys.stderr)
     return 0
 
 

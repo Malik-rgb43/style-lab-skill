@@ -119,10 +119,35 @@ def test_hard_rejects():
     smear = blur(noise, 21, axes=(1,))  # horizontal motion smear: vertical detail survives
     smeared = gray_of(smear)
     assert cover.directional_ratio(smeared) > 3 and cover.directional_ratio(gray_of(noise)) < 1.5
-    assert cover.reject_reason(smeared, 0.1) == "directional motion blur"
-    assert cover.reject_reason(smeared, 0.9) in (None, "flat (no contrast)")  # a sharp-ranked frame is kept
-    s, why = cover.score_frame(smear, smeared, None, sharp_pct=0.1)
-    assert s == 0.0 and "rejected" in why
+    raw = cover.sharpness(smeared)
+    # blur needs percentile < 0.3 AND raw < half the video median AND a one-sided ratio
+    assert cover.reject_reason(smeared, 0.1, raw, raw * 3) == "directional motion blur"
+    assert cover.reject_reason(smeared, 0.1, raw, raw * 1.5) is None   # not much softer than its video
+    assert cover.reject_reason(smeared, 0.5, raw, raw * 3) is None     # sharp-ranked
+    assert cover.reject_reason(smeared, 0.1) is None                   # no video statistics: no blur verdict
+    s, why = cover.score_frame(smear, smeared, None, sharp_pct=0.1, raw_sharp=raw, video_median=raw * 3)
+    assert s == 0.0 and why == {"rejected": "directional motion blur"}
+
+
+def test_sharp_text_lines_are_kept():
+    """Horizontal text lines are one-sided (ratio > 3) and rank low in a sharp video, but are not blurred."""
+    lines = np.full((90, 160), 235, np.uint8)
+    lines[4::8] = 20
+    lines[5::8] = 20
+    assert cover.directional_ratio(lines) > 3
+    raw = cover.sharpness(lines)
+    assert cover.reject_reason(lines, 0.05, raw, raw * 1.2) is None
+    rgb = np.stack([lines] * 3, axis=-1)
+    s, why = cover.score_frame(rgb, lines, None, sharp_pct=0.05, raw_sharp=raw, video_median=raw * 1.2)
+    assert "rejected" not in why and s > 0
+
+
+def test_relaxed_bars_keep_black_rejected():
+    dark = (np.indices((90, 160)).sum(axis=0) // 8 % 2 * 14 + 6).astype(np.uint8)  # mean ~0.03, std ~0.027
+    assert cover.reject_reason(dark) in ("too dark", "flat (no contrast)")
+    assert cover.reject_reason(dark, relax=True) is None
+    assert cover.reject_reason(np.zeros((90, 160), np.uint8), relax=True) == "too dark"
+    assert cover.reject_reason(np.full((90, 160), 120, np.uint8), relax=True).startswith("flat")
 
 
 def test_sharpness_percentile_within_video():
@@ -253,3 +278,42 @@ def test_candidates_bad_pack(tmp_path):
     assert run_cli("cover.py", "candidates", tmp_path / "none").returncode == 2
     (tmp_path / "empty").mkdir()
     assert run_cli("cover.py", "candidates", tmp_path / "empty").returncode == 2
+
+
+def fake_video(monkeypatch, pack, frame_fn, ids=("v1",)):
+    """Run cover.main on synthetic frames: no ffmpeg, no decoding."""
+    for vid in ids:
+        src = pack.parent / f"{vid}.mkv"
+        src.write_bytes(b"x")
+        wj(pack / "analysis" / vid / "measure.json", {"source": str(src), "cuts": []})
+    monkeypatch.setattr(cover.mv, "probe", lambda v: {"duration_s": 10.0, "fps": 25.0, "width": 160, "height": 90})
+    monkeypatch.setattr(cover, "_grab_rgb", lambda video, t, w, h: frame_fn(t, h, w))
+    monkeypatch.setattr(cover, "_save_jpg", lambda video, t, out: Path(out).write_bytes(b"jpg"))
+    monkeypatch.setattr(cover.mv, "_face_detector", lambda: None)
+    monkeypatch.setattr(cover.mv, "text_boxes", lambda g: [])
+    monkeypatch.setattr(cover, "require_ffmpeg", lambda: None)
+
+
+def test_dark_style_gets_candidates_through_relaxed_pass(tmp_path, monkeypatch):
+    pack = tmp_path / "pack"
+    def dark(t, h, w):
+        g = (np.indices((h, w)).sum(axis=0) // 8 % 2 * 14 + 6 + int(t) % 3).astype(np.uint8)
+        return np.stack([g, g, g], axis=-1)
+    fake_video(monkeypatch, pack, dark)
+    assert cover.main(["candidates", str(pack), "--n", "2", "--per-video", "8"]) == 0
+    doc = json.loads((pack / "cover-candidates.json").read_text(encoding="utf-8"))
+    assert doc["candidates"] and "video:v1:all_rejected" in doc["not_run"]
+    assert "video:v1:no_candidates" not in doc["not_run"]
+    assert sum(doc["rejects"]["v1"].values()) == 8 and set(doc["rejects"]["v1"]) <= {"too dark", "flat (no contrast)"}
+
+
+def test_all_black_video_is_no_candidates_and_keeps_old_folder(tmp_path, monkeypatch, capsys):
+    pack = tmp_path / "pack"
+    fake_video(monkeypatch, pack, lambda t, h, w: np.zeros((h, w, 3), np.uint8))
+    (pack / "cover-candidates").mkdir(parents=True)
+    (pack / "cover-candidates" / "old.jpg").write_bytes(b"old")
+    assert cover.main(["candidates", str(pack), "--n", "2", "--per-video", "5"]) == 1
+    err = capsys.readouterr().err
+    assert "video:v1:no_candidates" in err and "left as it is" in err and len(err.strip().splitlines()) == 1
+    assert (pack / "cover-candidates" / "old.jpg").read_bytes() == b"old"
+    assert not (pack / "cover-candidates.json").exists() and not (pack / "cover-candidates.tmp").exists()
