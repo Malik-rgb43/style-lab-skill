@@ -377,3 +377,50 @@ def test_small_repaint_is_ui_change_not_a_cut():
     assert cuts == []
     assert [u["kind"] for u in ui] == ["ui_change"] and abs(ui[0]["t"] - 30 / 25) < 1e-6
     assert ui[0]["area"] < 0.15
+
+
+def test_two_jumps_ten_frames_apart_are_both_found(tmp_path):
+    moves = [(0.0, 1.0, "x", 0.2, 0.3, "linear"), (1.0, 1.0, "x", 0.3, 0.6, "linear"),
+             (1.4, 1.4, "x", 0.6, 0.85, "linear")]
+    p = _clip(tmp_path, dur_s=3, fps=25, moves=moves)
+    frames, fps = mv.decode_gray(p, 320)
+    cuts = mv.detect_cuts(frames, fps)
+    assert [c["kind"] for c in cuts] == ["jump", "jump"]
+    for c, want in zip(cuts, (1.0, 1.4)):
+        assert abs(c["t"] - want) <= 1 / 25 + 1e-6
+
+
+def test_weak_jump_on_a_slightly_moving_head(tmp_path):
+    moves = [(0.0, 0.0, "scale", 2.0, 2.0, "linear"), (0.0, 1.0, "x", 0.5, 0.52, "linear"),
+             (1.0, 1.0, "x", 0.52, 0.576, "linear")]
+    p = _clip(tmp_path, dur_s=3, fps=25, moves=moves)
+    frames, fps = mv.decode_gray(p, 320)
+    cuts, ui = mv.detect_cuts_ex(frames, fps)
+    assert [c["kind"] for c in cuts] == ["jump"] and ui == []
+    hist, pix, _ = mv.frame_distances(frames)
+    assert 0.03 <= pix[int(round(cuts[0]["t"] * fps))] <= 0.06
+
+
+def test_punch_in_on_a_small_subject_is_a_jump_not_ui_change(tmp_path):
+    moves = [(0.0, 3.0, "x", 0.45, 0.55, "linear"), (1.0, 1.0, "scale", 1.0, 2.0, "linear")]
+    p = _clip(tmp_path, dur_s=3, fps=25, moves=moves)
+    frames, fps = mv.decode_gray(p, 320)
+    cuts, ui = mv.detect_cuts_ex(frames, fps)
+    assert [c["kind"] for c in cuts] == ["jump"] and ui == []
+
+
+def test_on_twos_with_still_periods_is_still_on_twos(tmp_path):
+    p = _clip(tmp_path, dur_s=4, fps=30, moves=[(0.0, 1.5, "x", 0.2, 0.8, "linear")], stepped=2)
+    frames, fps = mv.decode_gray(p, 320)
+    c = mv.cadence(frames, fps)
+    assert c["on_twos"] is True and 14 <= c["unique_fps"] <= 16
+
+
+def test_ease_names_match_gsap():
+    from fixtures.make_media import _ease
+    assert abs(_ease("power1.out", 0.5) - 0.75) < 1e-9
+    assert abs(_ease("power2.out", 0.5) - 0.875) < 1e-9
+    assert abs(_ease("power2.inOut", 0.25) - 4 * 0.25 ** 3) < 1e-9
+    assert abs(_ease("power3.inout", 0.25) - 8 * 0.25 ** 4) < 1e-9
+    assert abs(_ease("power3.inout", 0.75) - (1 - 8 * 0.25 ** 4)) < 1e-9
+    assert _ease("back.out", 1.0) == 1.0 and _ease("back.out", 0.7) > 1.0

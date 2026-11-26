@@ -105,16 +105,24 @@ _MOVE_DEFAULT = {"x": 0.5, "y": 0.5, "scale": 1.0, "opacity": 1.0}
 
 
 def _ease(name, p):
+    """GSAP names: powerN.in/out/inOut use exponent N+1 (power1 = quad, power2 = cubic, power3 = quart),
+    back.out is the standard back ease (overshoot 1.70158)."""
     p = min(1.0, max(0.0, p))
-    if name == "linear":
+    n = name.lower()
+    if n in ("linear", "none"):
         return p
-    if name == "power2.out":
-        return 1 - (1 - p) ** 2
-    if name == "power3.inout":
-        return 4 * p ** 3 if p < 0.5 else 1 - (-2 * p + 2) ** 3 / 2
-    if name == "back.out":
+    if n == "back.out":
         c1 = 1.70158
         return 1 + (c1 + 1) * (p - 1) ** 3 + c1 * (p - 1) ** 2
+    if n.startswith("power") and "." in n:
+        k, kind = n[5:].split(".", 1)
+        e = int(k) + 1
+        if kind == "in":
+            return p ** e
+        if kind == "out":
+            return 1 - (1 - p) ** e
+        if kind == "inout":
+            return 2 ** (e - 1) * p ** e if p < 0.5 else 1 - (-2 * p + 2) ** e / 2
     raise ValueError(f"unknown ease {name!r}")
 
 
