@@ -363,7 +363,7 @@ def test_render_with_video_shorter_than_audio_stays_in_sync(tmp_path, home):
     r = run_cli("cut.py", src, words, kp, "--out", stem)
     assert r.returncode == 0, r.stderr
     cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
-    assert cuts["pieces"][-1]["src_out_ms"] <= 2300
+    assert cuts["pieces"][-1]["src_out_ms"] <= cut.probe_video(src)[2]  # 58 frames = 2320 ms
     assert cuts["soft_joins"]
     _av_ok(f"{stem}.mp4", 25, cuts["frames"])
 
@@ -420,3 +420,61 @@ def test_room_tone_never_comes_from_digital_silence():
     t0, t1 = rec["src_in_ms"], rec["src_out_ms"]
     assert db[int(t0 // 10): int(t1 // 10)].min() > cut.DIGITAL_SILENCE_DB, (t0, t1)
     assert 5500 <= t0 and t1 <= 9500
+
+
+# ---------------------------------------------------------------- review round 2
+
+def test_final_piece_cut_by_the_source_end_is_never_dropped_as_a_sliver():
+    spans = [(500, 900), (1000, 1400), (2200, 2600)]
+    # the last piece runs from the shortened pause (~2040) to the source end (2280): 6 frames, under 10
+    plan = cut.plan_pieces(mm.words_doc(spans)["words"], {"keep": [[0, 2]]}, _db(spans, 3000), 25,
+                           cut.resolve_opts("lesson", {"sliver_frames": 10}), dur_ms=2300)
+    last = plan["pieces"][-1]
+    assert last["w1"] == 2 and last["src_out_ms"] <= 2300
+    assert 2 in [w["src_i"] for w in plan["words"]]
+    assert plan["dropped_slivers"] == []
+    soft = [s for s in plan["soft_joins"] if s["piece"] == last["id"] and s["edge"] == "out"]
+    assert soft and soft[0]["why"] == "source ends inside the word"
+
+
+def test_manual_points_and_exclusions_are_clamped_to_the_source_end():
+    base = _plan(keep={"keep": [[2, 3]]})
+    old_out = base["pieces"][-1]["src_out_ms"]
+    plan = _plan(keep={"keep": [[2, 3]], "set_out_ms": [[old_out, 9000]]})
+    last = plan["pieces"][-1]
+    assert last["src_out_ms"] <= DUR
+    assert any(s["piece"] == last["id"] and s["edge"] == "out" and s["why"] == "edge clamped to the source end"
+               for s in plan["soft_joins"])
+    # exclude_ms reaching past the source end (cut short at 3000): no edge past it either
+    plan = cut.plan_pieces(mm.words_doc(SPANS)["words"], {"keep": [[2, 3]], "exclude_ms": [[3050, 3200]]},
+                           _db(), 25, cut.resolve_opts("lesson"), dur_ms=3000)
+    assert all(p["src_out_ms"] <= 3000 for p in plan["pieces"])
+    assert any(s["edge"] == "out" for s in plan["soft_joins"])
+
+
+def test_dropped_sliver_warning_names_each_lost_word(tmp_path, home, base_clip):
+    src, words, _ = base_clip
+    # w2 + w3 are excluded down to slivers: both words are lost and must be named
+    kp = mm.write_json(tmp_path / "k.json", {"keep": [[0, 0], [2, 3]], "exclude_ms": [[2300, 3150]]})
+    stem = tmp_path / "sl"
+    r = run_cli("cut.py", src, words, kp, "--out", stem, "--no-render")
+    assert r.returncode == 0, r.stderr
+    cuts = json.loads(Path(f"{stem}.cuts.json").read_text(encoding="utf-8"))
+    lost = [w["i"] for d in cuts["dropped_slivers"] for w in d["lost_words"]]
+    assert sorted(lost) == [2, 3]
+    out = r.stdout
+    assert "w2 (2.20s)" in out and "w3 (2.70s)" in out
+
+
+def test_vsl_preset_is_the_reels_cut_and_prints_the_next_step(tmp_path, home, base_clip):
+    assert cut.PRESETS["vsl"] == cut.PRESETS["reels"]
+    assert cut.resolve_opts("vsl") == cut.resolve_opts("reels")
+    src, words, kp = base_clip
+    stem = tmp_path / "v"
+    r = run_cli("cut.py", src, words, kp, "--out", stem, "--preset", "vsl")
+    assert r.returncode == 0, r.stderr
+    nxt = [x for x in r.stdout.splitlines() if x.startswith("next:")]
+    assert nxt == [f"next: python scripts/tighten.py {stem} --out {stem}.tight, "
+                   f"then python scripts/check_cut.py {stem}.tight"]
+    r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "r", "--preset", "reels", "--no-render")
+    assert "next:" not in r.stdout

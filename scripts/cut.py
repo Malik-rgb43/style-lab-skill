@@ -26,7 +26,8 @@ Usage:
 Presets: lesson (default) = --fps 25 --lead-ms 80 --tail-ms 120 --merge-gap-ms 250
 --pause-max-ms 450 --pause-keep-ms 150, no end air; reels = --fps 30 --lead-ms 60 --tail-ms 80
 --merge-gap-ms 180 --pause-max-ms 260 --pause-keep-ms 70 --end-air-ms 1000.
-Explicit flags override the preset.
+vsl = the reels values (then run tighten.py and check_cut.py on the result).
+Explicit flags override the preset; --end-air-ms 0 switches the end air off.
 
 keep.json: {"keep": [[i0, i1], ...]} (inclusive word indices of the raw transcript).
 Optional "retime": {"<word index>": [start_ms, end_ms]} pins a word the aligner put on the wrong
@@ -84,6 +85,7 @@ PRESETS = {
     "reels": {"fps": 30, "lead_ms": 60, "tail_ms": 80, "merge_gap_ms": 180,
               "pause_max_ms": 260, "pause_keep_ms": 70, "end_air_ms": 1000},
 }
+PRESETS["vsl"] = dict(PRESETS["reels"])  # talking-head VSL: the reels cut, then tighten.py + check_cut.py
 SETTING_KEYS = ("lead_ms", "tail_ms", "inside_ms", "merge_gap_ms", "pause_max_ms", "pause_keep_ms",
                 "sentence_keep_ms", "pause_min_cut_frames", "pause_snap_ms", "sliver_frames", "xfade_ms",
                 "end_air_ms")
@@ -339,7 +341,7 @@ class _Planner:
         thr = P.quiet_thr((wa["end_ms"] + wb["start_ms"]) / 2)
         f0 = math.ceil((wa["end_ms"] + o.inside_ms) / fms)
         f1 = min(math.floor((wb["start_ms"] - o.inside_ms) / fms), P.fmax)
-        Q =[f for f in range(max(0, f0), f1 + 1) if P.e(f) < thr and P.allowed(f)]
+        Q = [f for f in range(max(0, f0), f1 + 1) if P.e(f) < thr and P.allowed(f)]
         if not Q:
             return None
         k = o.pause_keep_ms
@@ -377,24 +379,27 @@ class _Planner:
     # -- span edges
 
     def out_point(self, w, nxt, keep_ms, final=False):
+        """(frame, why): why None = normal, "tight" = words run together, "source_end_in_word"."""
         o, P = self.o, self.P
+        if w["end_ms"] > self.dur_ms:  # the source ends inside this word: cut at the very end, nothing is lost
+            return P.fmax, "source_end_in_word"
         lim = (nxt["start_ms"] - 40) if nxt else self.dur_ms
         if final and o.end_air_ms is not None:
             air = o.end_air_ms
             f = P.pick(w["end_ms"] + air - 20, min(w["end_ms"] + air + 40, lim), w["end_ms"] + air)
             if f is not None:
-                return f, False
+                return f, None
             # no room for the end air (the next word or the source end is closer): normal tail rule
         lo = w["end_ms"] + o.inside_ms
         hi = w["end_ms"] + keep_ms + 80
         f = P.pick(lo, min(hi, lim), w["end_ms"] + keep_ms)
         if f is not None:
-            return f, False
+            return f, None
         # words run together (aligned edges touch): take the deepest energy dip near the word end
         f = P.pick(w["end_ms"] - 40, min(w["end_ms"] + 160, self.dur_ms), w["end_ms"] + 40)
         if f is None:
             f = P.pick_outward(w["end_ms"], +1)
-        return f, True
+        return f, "tight"
 
     def in_point(self, w, prv, keep_ms):
         P = self.P
@@ -418,7 +423,7 @@ class _Planner:
             groups, splits = self.shorten_pauses(idx)
             for g, grp in enumerate(groups):
                 first, last = self.cut[grp[0]], self.cut[grp[-1]]
-                ti = to = False
+                ti, to = False, None
                 if g == 0:
                     fi, ti = self.in_point(first, self.nb(grp[0], -1), o.lead_ms)
                 else:
@@ -428,9 +433,9 @@ class _Planner:
                 else:
                     fo = splits[g][0]
                 pieces.append({"f_in": fi, "f_out": fo, "w0": grp[0], "w1": grp[-1],
-                               "kind_in": "cut" if g == 0 else "pause", "tight": ti or to,
+                               "kind_in": "cut" if g == 0 else "pause", "tight": bool(ti or to),
                                "why_in": "tight" if ti else ("cut" if g == 0 else "pause"),
-                               "why_out": "tight" if to else ("cut" if g == len(groups) - 1 else "pause")})
+                               "why_out": to or ("cut" if g == len(groups) - 1 else "pause")})
         return pieces
 
     # -- forced edits from keep.json
@@ -476,10 +481,34 @@ class _Planner:
                         p[wk] = key
         return pieces
 
+    def clamp_to_end(self, pieces):
+        """no edge outside the source (exclude_ms / set_*_ms can ask for one): clamp it and mark it."""
+        fmax = self.P.fmax
+        for p in pieces:
+            if p["f_out"] > fmax:
+                p["f_out"], p["why_out"] = fmax, "source_end"
+            if p["f_in"] > fmax:
+                p["f_in"], p["why_in"] = fmax, "source_end"
+            if p["f_in"] < 0:
+                p["f_in"] = 0
+        return pieces
+
+    def _keeps_word_start(self, p):
+        a, b = p["f_in"] * self.fms, p["f_out"] * self.fms
+        return b > a and any(a <= self.byi[i]["start_ms"] < b for i in self.order if p["w0"] <= i <= p["w1"])
+
     def drop_and_merge(self, pieces):
         sl = self.o.sliver_frames
-        dropped = [p for p in pieces if p["f_out"] - p["f_in"] < sl]
-        pieces = [p for p in pieces if p["f_out"] - p["f_in"] >= sl]
+
+        def is_sliver(n, p):
+            if p["f_out"] - p["f_in"] >= sl:
+                return False
+            # the final piece shortened by the source end keeps the word it starts: nothing may be swallowed
+            final = n == len(pieces) - 1
+            return not (final and p["why_out"] in ("source_end_in_word", "source_end") and self._keeps_word_start(p))
+
+        dropped = [p for n, p in enumerate(pieces) if is_sliver(n, p)]
+        pieces = [p for n, p in enumerate(pieces) if not is_sliver(n, p)]
         clean = []  # overlapping neighbours (two pauses snapped across each other) -> merge
         for p in pieces:
             if clean and p["f_in"] <= clean[-1]["f_out"]:
@@ -586,7 +615,10 @@ class _Planner:
                     "cut": "no quiet frame within reach of the word edge: quietest frame taken",
                     "pause": "no quiet frame within reach of the pause: quietest frame taken",
                     "exclude_ms": "edge forced by keep.json exclude_ms",
-                    "set_in_ms": "edge set by keep.json set_in_ms", "set_out_ms": "edge set by keep.json set_out_ms"}
+                    "set_in_ms": "edge set by keep.json set_in_ms", "set_out_ms": "edge set by keep.json set_out_ms",
+                    "source_end_in_word": "source ends inside the word",
+                    "source_end": "edge clamped to the source end"}
+        forced = ("source_end_in_word", "source_end")
         soft = []
         for p, rec in zip(pieces, out_pieces):
             if "placeholder" in p:
@@ -594,7 +626,7 @@ class _Planner:
             for edge, f, why in (("in", p["f_in"], p["why_in"]), ("out", p["f_out"], p["why_out"])):
                 t = f * self.fms
                 e, thr = self.P.e(f), self.P.quiet_thr(t)
-                if e >= thr:
+                if e >= thr or why in forced:
                     soft.append({"piece": rec["id"], "edge": edge, "frame": f, "src_ms": round(t, 3),
                                  "db": round(e, 1), "quiet_thr_db": round(thr, 1), "why": why_text.get(why, why),
                                  "words": rec["text"][:60]})
@@ -623,7 +655,9 @@ def plan_pieces(words, keep, audio_db, fps, opts, dur_ms=None):
     pieces = pl.span_pieces(spans)
     pieces = pl.apply_exclusions(pieces)
     pieces = pl.apply_manual_points(pieces)
+    pieces = pl.clamp_to_end(pieces)
     pieces, dropped = pl.drop_and_merge(pieces)
+    kept = {i for p in pieces for i in pl.order if p["w0"] <= i <= p["w1"]}
     pieces = pl.insert_placeholders(pieces)
     out_pieces, joins, out_words, ph_out, total = pl.assemble(pieces)
     soft = pl.soft_joins(pieces, out_pieces, joins)
@@ -634,7 +668,10 @@ def plan_pieces(words, keep, audio_db, fps, opts, dur_ms=None):
         "pieces": out_pieces, "joins": joins, "placeholders": ph_out, "voiced_gaps": pl.voiced_log,
         "long_gaps_kept": pl.kept_long, "soft_joins": soft,
         "dropped_slivers": [{"src_in": p["f_in"] * fms / 1000, "src_out": p["f_out"] * fms / 1000,
-                             "w0": p["w0"], "w1": p["w1"]} for p in dropped],
+                             "w0": p["w0"], "w1": p["w1"],
+                             "lost_words": [{"i": i, "w": pl.byi[i]["w"], "start_ms": pl.byi[i]["start_ms"]}
+                                            for i in pl.order if p["w0"] <= i <= p["w1"] and i not in kept]}
+                            for p in dropped],
         "words": out_words,
         "fade_out_ms": [list(x) for x in keep.get("fade_out_ms", [])],
         "fade_in_ms": [list(x) for x in keep.get("fade_in_ms", [])],
@@ -899,6 +936,9 @@ def main(argv=None):
         print(f"{len(plan['pieces'])} pieces, {len(plan['joins'])} joins, {plan['frames']} frames = "
               f"{plan['frames'] / opts['fps']:.2f}s, {len(plan['dropped_slivers'])} sliver(s) dropped, "
               f"{sum(1 for p in plan['pieces'] if p.get('tight'))} tight, placeholders {ph}")
+        for d in plan["dropped_slivers"]:
+            lost = ", ".join(f"{w['w']} ({w['start_ms'] / 1000:.2f}s)" for w in d["lost_words"]) or "none"
+            print(f"warning: sliver {d['src_in']:.2f}-{d['src_out']:.2f}s dropped, words lost: {lost}")
         if plan["soft_joins"]:
             print(f"warning: {len(plan['soft_joins'])} edge(s) not on a quiet frame: see cuts.json soft_joins")
         if plan["long_gaps_kept"]:
@@ -917,6 +957,9 @@ def main(argv=None):
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"rendered -> {stem}.mp4")
+    if a.preset == "vsl":
+        print(f"next: python scripts/tighten.py {stem} --out {stem}.tight, "
+              f"then python scripts/check_cut.py {stem}.tight")
     return 0
 
 
