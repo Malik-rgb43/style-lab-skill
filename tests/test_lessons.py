@@ -291,5 +291,54 @@ def test_exception_conflicts_only_with_siblings(home, tmp_path):
     e2 = reg_ids()[-1]
     assert run_cli("lessons.py", "approve", e1, "--one-note", "--yes-no-conflict").returncode == 0
     r = run_cli("lessons.py", "conflicts", e2)
-    assert e1 in r.stdout
+    assert e1 in r.stdout and t not in r.stdout
     assert run_cli("lessons.py", "approve", e2, "--one-note").returncode == 1
+
+
+def mkexception(t, measurable="slow ease allowed", reason="calm lessons"):
+    r = run_cli("lessons.py", "exception", "--style", "test-style", "--craft", t,
+                "--measurable", measurable, "--reason", reason)
+    assert r.returncode == 0, r.stderr
+    return reg_ids()[-1]
+
+
+def test_lone_exception_approves_without_flag(home, tmp_path):
+    mkstyle_md(tmp_path)
+    t = mkrule("craft", "t", "--kind", "taste", scope="easing curves")
+    e = mkexception(t)
+    r = run_cli("lessons.py", "conflicts", e)
+    assert r.returncode == 0 and "no possible conflicts" in r.stdout and t not in r.stdout
+    r = run_cli("lessons.py", "approve", e, "--one-note")
+    assert r.returncode == 0, r.stderr
+
+
+def test_exception_layer_target_not_editable(home, tmp_path):
+    mkstyle_md(tmp_path)
+    t = mkrule("craft", "t", "--kind", "taste")
+    e = mkexception(t)
+    for pair in ("layer=craft", "layer=video", "target=test-style"):
+        r = run_cli("lessons.py", "edit", e, pair)
+        assert r.returncode == 1 and "exception" in r.stderr
+    x = reg(home)["lessons"][-1]
+    assert x["layer"] == "style" and x["target"] == "test-style" and x["exception_of"] == t
+    assert run_cli("lessons.py", "edit", e, "scope=easing").returncode == 0
+
+
+def test_approve_revalidates_exception_target(home, tmp_path):
+    import lessons
+    mkstyle_md(tmp_path)
+    t = mkrule("craft", "t", "--kind", "taste")
+    e = mkexception(t)
+
+    def corrupt(d):
+        c = next(x for x in d["lessons"] if x["id"] == t)
+        c["kind"] = "quality"
+
+    lessons.store.update_json(lessons.registry_path(), lessons._empty(), corrupt)
+    r = run_cli("lessons.py", "approve", e, "--one-note")
+    assert r.returncode == 1 and "no longer" in r.stderr
+    assert reg(home)["lessons"][-1]["status"] == "candidate"
+    lessons.store.update_json(lessons.registry_path(), lessons._empty(),
+                              lambda d: next(x for x in d["lessons"] if x["id"] == t).update(kind="taste", status="rejected"))
+    r = run_cli("lessons.py", "approve", e, "--one-note")
+    assert r.returncode == 1 and reg(home)["lessons"][-1]["status"] == "candidate"

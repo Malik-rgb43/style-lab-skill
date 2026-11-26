@@ -27,7 +27,7 @@ Commands:
     lessons.py conflicts <id>                     (structural candidates for Claude to judge)
     lessons.py merge <src> <into>                 (moves evidence; src becomes merged)
     lessons.py render --layer craft|style|client [--target T]
-    lessons.py settings [auto_promote=true|false]
+    lessons.py settings [auto_promote=true|false]  (auto_promote skips the conflict check)
 
 craft needs --kind and no target; style needs a style target; client needs a client target;
 video has neither (status one-off). Other layers start as candidate.
@@ -186,6 +186,8 @@ def _edit(data, args):
     for k in ("text", "measurable"):
         if k in new and not new[k].strip():
             return _fail(f"{k} must not be empty")
+    if x.get("exception_of") and ("layer" in new or "target" in new):
+        return _fail(f"{x['id']} is an exception to {x['exception_of']}: its layer and target cannot change")
     if "layer" in new and x["status"] not in ("candidate", "one-off"):
         return _fail(f"{x['id']} is {x['status']}: layer can change only on candidate or one-off lessons")
     for k in ("target", "kind"):
@@ -360,6 +362,11 @@ def approve(lesson_id, warnings=None, one_note=False):
             raise ValueError(msg)
         if x["status"] not in ("candidate", "proposed"):
             raise ValueError(f"{x['id']} is already a {x['status']}")
+        if x.get("exception_of"):
+            c = _find(data, x["exception_of"])
+            if x["layer"] != "style" or not c or c["layer"] != "craft" or c["status"] != "rule"                     or c.get("kind") != "taste":
+                raise ValueError(f"{x['id']} is an exception to {x['exception_of']}, which is no longer an "
+                                 f"approved taste craft rule of the craft layer; it cannot be approved")
         if x["status"] == "candidate" and not one_note:
             raise ValueError(f"{x['id']} is a candidate: only one note so far; "
                              f"the owner can still approve it with --one-note")
@@ -493,6 +500,8 @@ def conflicts(lesson_id):
         rr = LAYERS.index(r["layer"])
         if rr > rank or (rr == rank and r["target"] != x["target"]):
             continue
+        if x.get("exception_of") == r["id"]:
+            continue  # an exception's own target is not a conflict
         same_exc = bool(x.get("exception_of")) and x.get("exception_of") == r.get("exception_of")
         if (mine & _words(r["scope"])) or same_exc:
             out.append({"id": r["id"], "layer": r["layer"], "measurable": r["measurable"],
@@ -945,7 +954,9 @@ def _main(argv=None):
     a = sub.add_parser("merge"); a.add_argument("src"); a.add_argument("into")
     a = sub.add_parser("render"); a.add_argument("--layer", required=True, choices=("craft", "style", "client"))
     a.add_argument("--target")
-    a = sub.add_parser("settings"); a.add_argument("pairs", nargs="*")
+    a = sub.add_parser("settings", description="auto_promote=true approves proposed lessons without the "
+                       "conflict check that `approve` runs")
+    a.add_argument("pairs", nargs="*", help="auto_promote=true|false (auto_promote skips the conflict check)")
     args = p.parse_args(argv)
 
     store.print_utf8()
