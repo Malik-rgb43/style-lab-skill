@@ -12,6 +12,8 @@ Commands:
     clients.py unlink <client> <style>
     clients.py remove <key>                              (registry entry only; the folder is kept)
     clients.py restore <slug>                            (re-register a kept folder)
+    clients.py palette <client> [--pick monochrome|analogous|accent]
+                                                         (3 proposals from the first brand colour; --pick saves one)
 """
 import argparse
 import datetime as dt
@@ -22,13 +24,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import store  # noqa: E402
+import palette  # noqa: E402
+from palette import parse_hex  # noqa: E402
 
 THEMES = ("dark", "light", "both")
 DEFAULT_FONTS = {"heading": "Karantina 700", "body": "Heebo", "mono": "Consolas"}
 LIST_FIELDS = {"aliases", "languages", "logo", "brand_colors", "dos", "donts", "assets"}
 TEXT_FIELDS = {"name", "industry", "audience", "tone", "notes"}
 FONT_KEYS = ("heading", "body", "mono")
-COLOR_MSG = "colour must be a hex colour like #008754"
+SLUG_RE = r"[a-z0-9][a-z0-9-]*"
+SLUG_MSG = "slug must be lowercase latin letters, digits and dashes"
 
 
 class _Abort(Exception):
@@ -39,17 +44,6 @@ class _Abort(Exception):
 def _fail(msg):
     print(msg, file=sys.stderr)
     return 1
-
-
-def _norm_hex(s):
-    """'#rgb' / '#rrggbb' (with or without '#', spaces ok) -> '#RRGGBB'; ValueError otherwise."""
-    h = s.strip()
-    h = h[1:] if h.startswith("#") else h
-    if re.fullmatch(r"[0-9a-fA-F]{3}", h):
-        h = "".join(c * 2 for c in h)
-    if not re.fullmatch(r"[0-9a-fA-F]{6}", h):
-        raise ValueError(f"{s!r}: {COLOR_MSG}")
-    return "#" + h.upper()
 
 
 def registry_path():
@@ -114,13 +108,15 @@ def _styles():
 
 def cmd_add(reg, args):
     try:
-        colors = [_norm_hex(c) for c in args.color]
+        colors = [parse_hex(c) for c in args.color]
     except ValueError as e:
         return _fail(str(e))
     taken = {e["slug"] for e in reg["clients"]}
-    slug = args.slug or store.slugify(args.name, taken)
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", slug):
-        return _fail("slug must be lowercase latin letters, digits and dashes")
+    folders = store.path("clients")
+    kept = {d.name for d in folders.iterdir() if d.is_dir()} if folders.is_dir() else set()
+    slug = args.slug or store.slugify(args.name, taken | kept)
+    if not re.fullmatch(SLUG_RE, slug):
+        return _fail(SLUG_MSG)
     if _find_entry(reg, slug) or _find_entry(reg, args.name):
         return _fail(f"a client named {slug!r} or {args.name!r} already exists")
     if profile_path(slug).exists():
@@ -133,6 +129,9 @@ def cmd_add(reg, args):
     save_client(c)
     reg["clients"].append({"slug": slug, "name": args.name, "dir": f"clients/{slug}"})
     print(f"added {slug} ({args.name})")
+    base = store.slugify(args.name, set())
+    if not args.slug and slug != base and base in kept and not _find_entry(reg, base):
+        print(f"note: a kept folder clients/{base} exists; `clients.py restore {base}` brings it back")
 
 
 def _get(reg, key):
@@ -160,7 +159,7 @@ def cmd_set(reg, args):
             c["theme"] = v
         elif k == "brand_colors":
             try:
-                c[k] = [_norm_hex(x) for x in items]
+                c[k] = [parse_hex(x) for x in items]
             except ValueError as ex:
                 return _fail(str(ex))
         elif k in LIST_FIELDS:
@@ -223,6 +222,8 @@ def cmd_remove(reg, args):
 
 def cmd_restore(reg, args):
     slug = args.slug
+    if not re.fullmatch(SLUG_RE, slug):
+        return _fail(SLUG_MSG)
     if _find_entry(reg, slug):
         return _fail(f"{slug!r} is already registered")
     c = store.read_json(profile_path(slug), None)
@@ -258,6 +259,22 @@ def cmd_show(args):
     return 0
 
 
+def cmd_palette(args):
+    c = load_client(args.client)
+    if not c:
+        return _fail(f"no client {args.client!r}")
+    if not c.get("brand_colors"):
+        return _fail(f"{c['slug']} has no brand colour; set one with "
+                     f"`clients.py set {c['slug']} brand_colors=#RRGGBB`")
+    src = c["brand_colors"][0]
+    if args.pick:
+        return palette.save(c["slug"], src, args.pick)
+    print(f"{c['slug']}: proposals from {src}; save one with `clients.py palette {c['slug']} --pick <kind>`")
+    print()
+    print(palette.format_proposals(palette.proposals(src)))
+    return 0
+
+
 WRITERS = {"add": cmd_add, "set": cmd_set, "link": cmd_link, "unlink": cmd_unlink, "remove": cmd_remove,
            "restore": cmd_restore}
 
@@ -276,6 +293,8 @@ def main():
     a = sub.add_parser("unlink"); a.add_argument("client"); a.add_argument("style")
     a = sub.add_parser("remove"); a.add_argument("key")
     a = sub.add_parser("restore"); a.add_argument("slug")
+    a = sub.add_parser("palette"); a.add_argument("client")
+    a.add_argument("--pick", choices=("monochrome", "analogous", "accent"))
     args = p.parse_args()
 
     store.print_utf8()
@@ -283,6 +302,8 @@ def main():
         return cmd_list(args)
     if args.cmd == "show":
         return cmd_show(args)
+    if args.cmd == "palette":
+        return cmd_palette(args)
 
     def fn(reg):
         rc = WRITERS[args.cmd](reg, args)

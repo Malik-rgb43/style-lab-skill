@@ -99,7 +99,7 @@ def test_readd_does_not_overwrite_kept_folder(home):
     run_cli("clients.py", "remove", "chnvt-hdgmh")
     f = home / "clients" / "chnvt-hdgmh" / "client.json"
     before = f.read_text(encoding="utf-8")
-    r = run_cli("clients.py", "add", "--name", "חנות הדגמה")
+    r = run_cli("clients.py", "add", "--slug", "chnvt-hdgmh", "--name", "חנות הדגמה")
     assert r.returncode == 1 and "restore" in r.stderr and "Traceback" not in r.stderr
     assert f.read_text(encoding="utf-8") == before
 
@@ -122,3 +122,29 @@ def test_colour_inputs(home):
     for bad in ("##008754", "rgb(1,2,3)"):
         r = run_cli("clients.py", "add", "--slug", "bad", "--name", "Bad", "--color", bad)
         assert r.returncode == 1 and "Traceback" not in r.stderr
+
+
+def test_auto_slug_skips_kept_folder(home):
+    add_client()
+    run_cli("clients.py", "remove", "chnvt-hdgmh")
+    r = run_cli("clients.py", "add", "--name", "חנות הדגמה")
+    assert r.returncode == 0, r.stderr
+    assert "chnvt-hdgmh-2" in r.stdout and "restore" in r.stdout
+    assert profile(home, "chnvt-hdgmh-2")["name"] == "חנות הדגמה"
+
+
+def test_restore_rejects_bad_slug(home):
+    outside = home / "x"  # a profile outside clients/ that ../x would reach
+    outside.mkdir(parents=True)
+    (outside / "client.json").write_text(json.dumps({"slug": "x", "name": "X"}), encoding="utf-8")
+    for bad in ("../x", "..", "A", "x/y"):
+        r = run_cli("clients.py", "restore", bad)
+        assert r.returncode == 1 and "Traceback" not in r.stderr, bad
+        assert "lowercase latin letters" in r.stderr, bad
+    assert not (home / "clients.json").exists()
+
+
+def test_clients_uses_palette_parse_hex():
+    import clients
+    import palette
+    assert clients.parse_hex is palette.parse_hex
