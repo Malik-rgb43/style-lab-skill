@@ -15,7 +15,7 @@ The local part checks binaries (ffmpeg, ffprobe, node, blender, yt-dlp, gh; Blen
 `BLENDER_PATH` and the usual install folders), HyperFrames (bounded, non-interactive,
 `npx --no`: it never downloads; a package that is not cached yet reads "not installed", and the
 first `npx hyperframes` downloads it, so ask the user first), Python
-modules (numpy, cv2, torch, torchaudio, faster_whisper, PIL) and env keys (RunPod; presence
+modules (numpy, cv2, torch, torchaudio, transformers, faster_whisper, PIL), the cut models (presence of the cache folder only, never loaded) and env keys (RunPod; presence
 only, a value is never printed or stored). Each missing item carries an install hint.
 
 The session part is yours: look at your own tool list and skills and record each MCP server or
@@ -26,7 +26,7 @@ so group by note. The map is saved in `~/.claude/style-lab/capabilities.json` (s
 `references/store-schema.md`); a later local run keeps the session block.
 
 Stages in the map (`STAGES` in `doctor.py`) and their Hebrew names for the table:
-`train` אימון, `train_profile` פרופיל, `cut` חיתוך, `frames` פריימים, `build` בנייה, `3d`
+`train` אימון, `train_profile` פרופיל, `cut` חיתוך (Hebrew), `cut_other_languages` חיתוך בשפות אחרות, `frames` פריימים, `build` בנייה, `3d`
 תלת-ממד, `cloud_asr` תמלול בענן (paid), `publish` פרסום. Show the user one short Hebrew table:
 per stage what will be used, what is missing (and the hint to add it), and what costs money
 (cloud ASR, Higgsfield or other generation credits, paid image models, stock). Every later step
@@ -46,6 +46,22 @@ silently.
 | Local Hebrew model (default for Hebrew) | Hebrew speech | an ivrit-ai CT2 model such as `ivrit-ai/whisper-large-v3-turbo-ct2`, downloaded once with the user's OK, passed with `--model <folder>` |
 | Cloud (optional, paid) | long batches, no GPU, and only with the user's OK | `scripts/transcribe_cloud_ivrit.py`: the ivrit.ai RunPod endpoint; reads `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` from the environment only. Say it costs GPU time before running |
 Never trust one pass for names, brands and numbers: show the low-confidence words to the user.
+
+## Precise cut stack (stage B1)
+Used by `align.py`, `cut.py`, `tighten.py`, `check_cut.py` (see `stage-b-edit.md`). Models are
+looked for in the Hugging Face cache (`HF_HOME`) and the torch hub cache (`TORCH_HOME`); a missing
+one is never fetched without the user's yes (`--allow-download`, exit 3 otherwise).
+| Item | Install / download | Size |
+|---|---|---|
+| torch, torchaudio | `pip install torch torchaudio` | about 200 MB CPU build, more with CUDA |
+| transformers | `pip install transformers` | about 10 MB |
+| faster-whisper | `pip install faster-whisper` | small |
+| Hebrew aligner `imvladikon/wav2vec2-large-xlsr-53-hebrew` | `align.py ... --allow-download` | about 1.2 GB |
+| Hebrew check ASR `ivrit-ai/whisper-large-v3-turbo-ct2` | `check_cut.py ... --allow-download` | about 1.6 GB |
+| Other-language aligner (torchaudio MMS_FA) | `align.py --lang en ... --allow-download` | about 1.2 GB |
+| Other-language check ASR `mobiuslabsgmbh/faster-whisper-large-v3-turbo` | `check_cut.py ... --allow-download` | about 1.6 GB |
+Without this stack the only option is the fallback `cut_silences.py` + `verify_cut.py`, which warns
+that the precise pipeline was skipped; use it only after the user accepts the loss of precision.
 
 ## Build engine
 **Default: HyperFrames** (HTML/CSS/JS rendered to video, by HeyGen, Apache-2.0,

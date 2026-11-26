@@ -39,11 +39,25 @@ def everything(monkeypatch):
     monkeypatch.setenv("RUNPOD_ENDPOINT_ID", "y")
 
 
+def fake_models(tmp_path, monkeypatch, which=("model_wav2vec2_he", "model_whisper_he",
+                                              "model_mms_fa", "model_whisper_multi")):
+    hf, th = tmp_path / "hf", tmp_path / "torch"
+    monkeypatch.setenv("HF_HOME", str(hf))
+    monkeypatch.setenv("TORCH_HOME", str(th))
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    for n in which:
+        kind, item = doctor.MODELS[n]
+        d = (hf / "hub" / item) if kind == "hf" else (th / "hub" / "checkpoints" / item)
+        d.parent.mkdir(parents=True, exist_ok=True)
+        d.mkdir() if kind == "hf" else d.write_text("x")
+
+
 def caps():
     return store.read_json(store.path("capabilities.json"), None)
 
 
-def test_all_present(home, everything):
+def test_all_present(home, everything, tmp_path, monkeypatch):
+    fake_models(tmp_path, monkeypatch)
     assert doctor.main([]) == 0
     c = caps()
     assert c["checked"]
@@ -133,3 +147,28 @@ def test_session_clear_and_bad_value(home, everything):
 def test_json_output(home, everything, capsys):
     doctor.main(["--json"])
     assert "stages" in json.loads(capsys.readouterr().out)
+
+
+def test_models_missing_report_hint(home, everything, tmp_path, monkeypatch):
+    fake_models(tmp_path, monkeypatch, which=("model_whisper_he",))
+    doctor.main([])
+    c = caps()
+    assert c["local"]["model_whisper_he"]["ok"] is True
+    assert c["local"]["model_wav2vec2_he"]["ok"] is False
+    assert "--allow-download" in c["local"]["model_wav2vec2_he"]["hint"]
+    assert c["stages"]["cut"]["missing"] == ["model_wav2vec2_he"]
+    assert c["stages"]["cut_other_languages"]["missing"] == ["model_mms_fa", "model_whisper_multi"]
+
+
+def test_cut_stage_uses_stack(home, everything, tmp_path, monkeypatch):
+    fake_models(tmp_path, monkeypatch)
+    doctor.main([])
+    uses = caps()["stages"]["cut"]["uses"]
+    for n in ("ffmpeg", "torch", "torchaudio", "transformers", "faster_whisper"):
+        assert n in uses
+
+
+def test_model_check_never_loads(home, tmp_path, monkeypatch):
+    fake_models(tmp_path, monkeypatch, which=("model_mms_fa",))
+    assert doctor.check_model("model_mms_fa")["ok"] is True
+    assert doctor.check_model("model_whisper_multi")["ok"] is False

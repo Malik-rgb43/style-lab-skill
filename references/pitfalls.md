@@ -79,6 +79,12 @@ If the owner repeats a note, it is not about one frame any more: `lessons.py mat
 first lesson, offer it for approval as a rule in the right layer, and once approved fix every
 video (`references/learning-loop.md`).
 
+## 12. Cutting on raw Whisper word times with a fixed pad
+Whisper word edges are 100-300 ms off in Hebrew. A fixed pad on them leaves long pauses at some
+joins and clips syllables at others, and a round of edits is lost to it. Fix: force-align first
+(`align.py`), cut only in the quiet between words on frame boundaries (`cut.py`), then re-transcribe
+the cut without VAD and diff it (`check_cut.py`). `cut_silences.py` is only a fallback.
+
 ## Smaller ones
 - **Two copies of the speaker drift.** A blurred background copy of the same video under a
   cut-out drifts out of sync. Use a still clean plate of the room instead.

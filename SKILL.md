@@ -83,7 +83,8 @@ in its STYLE.md and skill (learned rules only through `lessons.py`, `references/
 **Where things live** (style pack and project folders): `references/store-schema.md`. `refs/`
 videos are local study copies, never published. Scripts (local, free): `doctor.py`, `styles.py`,
 `clients.py`, `palette.py`, `store.py`, `lessons.py`, `taste.py`, `transcribe_words.py`,
-`cut_silences.py`, `verify_cut.py`, `word_edges.py`, `build_reference_library.py`;
+`align.py`, `cut.py`, `tighten.py`, `check_cut.py`, `cutlang.py`, `word_edges.py`,
+`cut_silences.py` and `verify_cut.py` (fallback only), `build_reference_library.py`;
 `transcribe_cloud_ivrit.py` is paid. Pages: `assets/{board,plan,review}-template.html`.
 
 ## Phase A: train a style (build the style pack)
@@ -154,16 +155,17 @@ the one the user named, else ask with the ready styles as options (one: say whic
 offer phase A. Load `style-<slug>`, read `clients.py show <client>` (palette, fonts, logo, dos /
 don'ts) and write both into `plan.json` so every round uses the same client and style.
 
-### B1. Transcript and cut
-1. `transcribe_words.py raw.mp4 --out words.json` (Hebrew: `--language he --model <ivrit-ai folder>`).
-2. Show the low-confidence words (names, numbers, brands); fix them before planning.
-3. Choose takes with the user if there are several (`--keep keep.json`), then
-   `cut_silences.py raw.mp4 --words words.json --out edit_ready.mp4 --pad-ms 120`
-   (30 ms only for a deliberately punchy style). Joins get a 15 ms audio fade.
-4. Re-listen to every join without VAD (`transcribe_words.py edit_ready.mp4 --start .. --end ..
-   --no-vad --no-context`), check word endings (`word_edges.py --at <t>`), then
-   `verify_cut.py`. Hidden repeats and clipped endings are found here, not by the owner.
-Everything after this uses `edit_ready.mp4` and `edit_ready.words.json`.
+### B1. Transcript and cut (precise pipeline, details in `references/stage-b-edit.md`)
+1. `transcribe_words.py raw.mp4 --out words.json` (Hebrew: `--language he --model <ivrit-ai folder>`);
+   show low-confidence words and fix them.
+2. `align.py raw.mp4 words.json --out words.aligned.json` (forced alignment; exit 3 = a model is
+   missing: ask the user before `--allow-download`). Never cut on raw Whisper times.
+3. Keep ranges: read the aligned words AND listen without VAD on short windows for hidden takes;
+   drop sentence openings repeated in full; prefer the last complete take; write `keep.json`.
+4. `cut.py raw.mp4 words.aligned.json keep.json --out <stem> --preset reels|lesson|vsl`
+   (reels: Reels, lesson: lessons, vsl: VSLs/talking heads, then `tighten.py <stem> --out <o>`).
+5. `check_cut.py <stem>` until clean or every item is explained; only then planning, on
+   `<stem>.mp4` and `<stem>.words.json`. `cut_silences.py`/`verify_cut.py`: fallback, user must accept.
 
 ### B2. The edit plan (show it unasked)
 First read the rules that apply: `python scripts/lessons.py rules --style <s> --client <c>`

@@ -30,7 +30,10 @@ import store  # noqa: E402
 STAGES = {
     "train": ["ffmpeg", "ffprobe", "numpy", "cv2", "faster_whisper"],
     "train_profile": ["yt-dlp"],
-    "cut": ["ffmpeg", "torch", "torchaudio", "faster_whisper"],
+    "cut": ["ffmpeg", "torch", "torchaudio", "transformers", "faster_whisper",
+            "model_wav2vec2_he", "model_whisper_he"],
+    "cut_other_languages": ["ffmpeg", "torch", "torchaudio", "faster_whisper",
+                            "model_mms_fa", "model_whisper_multi"],
     "frames": ["node", "hyperframes"],
     "build": ["node", "hyperframes", "ffmpeg"],
     "3d": ["blender"],
@@ -40,7 +43,14 @@ STAGES = {
 PAID_STAGES = {"cloud_asr"}
 
 BINARIES = ["ffmpeg", "ffprobe", "node", "blender", "yt-dlp", "gh"]
-MODULES = ["numpy", "cv2", "torch", "torchaudio", "faster_whisper", "PIL"]
+MODULES = ["numpy", "cv2", "torch", "torchaudio", "transformers", "faster_whisper", "PIL"]
+# Precise cut models: (kind, cache folder / file name). Presence only; a model is never loaded here.
+MODELS = {
+    "model_wav2vec2_he": ("hf", "models--imvladikon--wav2vec2-large-xlsr-53-hebrew"),
+    "model_whisper_he": ("hf", "models--ivrit-ai--whisper-large-v3-turbo-ct2"),
+    "model_mms_fa": ("torch", "model.pt"),
+    "model_whisper_multi": ("hf", "models--mobiuslabsgmbh--faster-whisper-large-v3-turbo"),
+}
 ENV_KEYS = ["RUNPOD_API_KEY", "RUNPOD_ENDPOINT_ID"]
 
 HINTS = {
@@ -56,7 +66,12 @@ HINTS = {
     "torch": "pip install torch",
     "torchaudio": "pip install torchaudio",
     "faster_whisper": "pip install faster-whisper",
+    "transformers": "pip install transformers (about 10 MB; the Hebrew aligner loads through it)",
     "PIL": "pip install pillow",
+    "model_wav2vec2_he": "Hebrew aligner, about 1.2 GB: run align.py with --allow-download after the user says yes",
+    "model_whisper_he": "Hebrew check ASR, about 1.6 GB: run check_cut.py with --allow-download after the user says yes",
+    "model_mms_fa": "aligner for other languages (torchaudio MMS_FA), about 1.2 GB: run align.py --lang en with --allow-download after the user says yes",
+    "model_whisper_multi": "check ASR for other languages (large-v3-turbo), about 1.6 GB: run check_cut.py with --allow-download after the user says yes",
     "RUNPOD_API_KEY": "set the RUNPOD_API_KEY environment variable (paid cloud ASR)",
     "RUNPOD_ENDPOINT_ID": "set the RUNPOD_ENDPOINT_ID environment variable (paid cloud ASR)",
 }
@@ -184,6 +199,31 @@ def check_module(name, deep=False):
     return d
 
 
+def _model_roots(kind):
+    """Cache folders to look in, from the environment first, then the library defaults."""
+    env = os.environ
+    home = Path.home()
+    roots = []
+    if kind == "hf":
+        if env.get("HUGGINGFACE_HUB_CACHE"):
+            roots.append(Path(env["HUGGINGFACE_HUB_CACHE"]))
+        hf = Path(env["HF_HOME"]) if env.get("HF_HOME") else (
+            Path(env["XDG_CACHE_HOME"]) / "huggingface" if env.get("XDG_CACHE_HOME") else home / ".cache" / "huggingface")
+        roots.append(hf / "hub")
+    else:
+        th = Path(env["TORCH_HOME"]) if env.get("TORCH_HOME") else (
+            Path(env["XDG_CACHE_HOME"]) / "torch" if env.get("XDG_CACHE_HOME") else home / ".cache" / "torch")
+        roots.append(th / "hub" / "checkpoints")
+    return roots
+
+
+def check_model(name):
+    kind, item = MODELS[name]
+    found = any((r / item).exists() for r in _model_roots(kind))
+    return {"ok": found, "version": "", "note": "" if found else "not in the local cache",
+            "hint": "" if found else HINTS[name]}
+
+
 def check_env(name):
     ok = bool(os.environ.get(name))  # presence only, the value is never stored
     return {"ok": ok, "version": "", "hint": "" if ok else HINTS[name]}
@@ -196,11 +236,13 @@ def collect_local(deep=False):
         tasks[n] = (check_module, n, deep)
     for n in ENV_KEYS:
         tasks[n] = (check_env, n)
+    for n in MODELS:
+        tasks[n] = (check_model, n)
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
         futs = {k: ex.submit(*v) for k, v in tasks.items()}
         res = {k: f.result() for k, f in futs.items()}
     local = {"python": {"ok": True, "version": sys.version.split()[0], "path": sys.executable, "hint": ""}}
-    for n in BINARIES + ["hyperframes"] + MODULES + ENV_KEYS:
+    for n in BINARIES + ["hyperframes"] + MODULES + ENV_KEYS + list(MODELS):
         local[n] = res[n]
     return local
 

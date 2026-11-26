@@ -23,6 +23,7 @@ def norm(w):
 
 
 def main():
+    print("fallback: the precise cut pipeline (align.py, cut.py, check_cut.py) was skipped", file=sys.stderr)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("expected")
     ap.add_argument("heard")

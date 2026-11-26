@@ -137,6 +137,7 @@ def remap(words, ranges, drop):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    print("fallback: the precise cut pipeline (align.py, cut.py, check_cut.py) was skipped", file=sys.stderr)
     ap.add_argument("raw")
     ap.add_argument("--words", required=True)
     ap.add_argument("--out", required=True)
