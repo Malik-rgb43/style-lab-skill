@@ -409,6 +409,39 @@ def _timing_threshold(pack):
     return None, "not_run"
 
 
+def _creator_scores(pack, ids, pdir):
+    """Optional structure/retention scores for hold-out videos that have <id>.structure.json or
+    <id>.retention.json predictions and analysis/<id>/creator.json. Returns ({structure?, retention?}, not_run)."""
+    want = [(v, pdir / f"{v}.structure.json", pdir / f"{v}.retention.json") for v in ids
+            if (pdir / f"{v}.structure.json").exists() or (pdir / f"{v}.retention.json").exists()]
+    want = [w for w in want if (Path(pack) / "analysis" / w[0] / "creator.json").exists()]
+    if not want:
+        return {}, []
+    try:
+        import creator
+    except ImportError:
+        return {}, ["structure", "retention"]
+    out = {"structure": {"per_video": {}}, "retention": {"per_video": {}}}
+    for vid, sf, rf in want:
+        doc = _read_dict(Path(pack) / "analysis" / vid / "creator.json", "creator.json")
+        if sf.exists():
+            pred = _read(sf, "predicted structure")
+            pred = pred.get("structure", []) if isinstance(pred, dict) else pred
+            actual = (doc.get("story") or {}).get("structure") or []
+            out["structure"]["per_video"][vid] = creator.score_structure(pred, actual)
+        if rf.exists():
+            pred = _read(rf, "predicted retention")
+            pred = pred.get("retention", []) if isinstance(pred, dict) else pred
+            out["retention"]["per_video"][vid] = score_placement(
+                creator.retention_events(pred), creator.retention_events(doc.get("retention")))
+    res = {}
+    for k, v in out.items():
+        if v["per_video"]:
+            v.update(pool_scores(list(v["per_video"].values())))
+            res[k] = v
+    return res, []
+
+
 def cmd_holdout(a):
     _check_pack(a.pack)
     proof = _read_dict(_proof_path(a.pack), "proof.json") if _proof_path(a.pack).exists() else {}
@@ -428,13 +461,16 @@ def cmd_holdout(a):
             raise Bad(f"missing actual events: {af}")
         scores[vid] = score_placement(_events(_read(pf, "predicted events")), _events(_read(af, "actual events")))
     pooled = pool_scores(list(scores.values()))
+    extra, not_run = _creator_scores(a.pack, ids, pdir)
     thr, src = _timing_threshold(a.pack)
     mae = pooled["timing_mae_s"]
     timing_run = thr is not None
     passed = (timing_run and pooled["overall_f1"] >= HOLDOUT_MIN_F1 and mae is not None and mae <= thr)
     result = {"overall_f1": pooled["overall_f1"], "timing_mae_s": mae,
               "timing": "checked" if timing_run else "not_run", "timing_threshold_s": thr,
-              "timing_threshold_source": src, "per_video": scores}
+              "timing_threshold_source": src, "per_video": scores, **extra}
+    if not_run:
+        result["not_run"] = not_run  # reported only; structure and retention do not decide pass yet
     unknown = bool((proof.get("holdout") or {}).get("trained_unknown"))
 
     def fn(d):

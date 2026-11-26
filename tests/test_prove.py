@@ -402,3 +402,37 @@ def test_graph_pairs_by_prop_and_time(tmp_path):
     html = out.read_text(encoding="utf-8")
     # camera has no partner: 1 polyline x2 svgs; t has ref+build: 2 x2
     assert html.count("<polyline") == 2 + 4
+
+
+def test_holdout_reports_structure_and_retention(tmp_path):
+    pytest.importorskip("creator")
+    pack = make_pack(tmp_path)
+    wj(pack / "laws.json", {"laws": [{"lag": {"p90": 0.5}}]})
+    wj(pack / "analysis" / "c" / "creator.json", {
+        "story": {"structure": [{"part": "hook", "t0": 0.0, "t1": 3.0}, {"part": "payoff", "t0": 8.0, "t1": 12.0}]},
+        "retention": [{"t": 2.0, "device": "zoom"}]})
+    run_cli("prove.py", "holdout-pick", pack, "--ids", "c")
+    pred = tmp_path / "pred"
+    wj(pred / "c.events.json", [{"t": 1.0, "type": "cut"}, {"t": 3.0, "type": "cut"}])
+    wj(pred / "c.structure.json", [{"part": "hook", "t0": 0.2, "t1": 3.0}, {"part": "payoff", "t0": 20.0, "t1": 25.0}])
+    wj(pred / "c.retention.json", [{"t": 2.1, "device": "zoom"}])
+    r = run_cli("prove.py", "holdout", pack, "--predicted", pred)
+    assert r.returncode == 0, r.stderr
+    h = json.loads((pack / "proof.json").read_text(encoding="utf-8"))["holdout"]
+    assert h["passed"] is True  # structure/retention do not decide pass
+    sc = h["scores"]
+    assert sc["structure"]["per_video"]["c"]["tp"] == 1 and sc["structure"]["n_actual"] == 2
+    assert sc["retention"]["overall_f1"] == 1.0
+    assert "not_run" not in sc
+
+
+def test_holdout_structure_not_run_without_creator_module(tmp_path, monkeypatch):
+    pack = make_pack(tmp_path)
+    wj(pack / "analysis" / "c" / "creator.json", {"story": {"structure": []}})
+    pred = tmp_path / "pred"
+    wj(pred / "c.structure.json", [])
+    monkeypatch.setitem(__import__("sys").modules, "creator", None)  # import raises ImportError
+    extra, not_run = prove._creator_scores(pack, ["c"], pred)
+    assert extra == {} and not_run == ["structure", "retention"]
+    extra, not_run = prove._creator_scores(pack, ["d"], pred)  # no creator.json / predictions: nothing
+    assert extra == {} and not_run == []
