@@ -436,3 +436,21 @@ def test_holdout_structure_not_run_without_creator_module(tmp_path, monkeypatch)
     assert extra == {} and not_run == ["structure", "retention"]
     extra, not_run = prove._creator_scores(pack, ["d"], pred)  # no creator.json / predictions: nothing
     assert extra == {} and not_run == []
+
+
+def test_creator_scores_malformed_and_skipped_ids(tmp_path):
+    pytest.importorskip("creator")
+    pack = make_pack(tmp_path)
+    wj(pack / "analysis" / "c" / "creator.json", {"story": {"structure": []}})
+    wj(pack / "analysis" / "d" / "creator.json", {"story": {"structure": []}})  # doc, no prediction
+    wj(pack / "analysis" / "e" / "creator.json", {"story": {"structure": []}})
+    pred = tmp_path / "pred"
+    wj(pred / "c.structure.json", ["hook", "payoff"])  # list of strings
+    wj(pred / "a.structure.json", [])  # prediction, no creator.json
+    wj(pred / "e.retention.json", {"retention": 5})
+    extra, not_run = prove._creator_scores(pack, ["a", "c", "d", "e"], pred)
+    assert extra == {}
+    assert "creator_scores:c:bad_input" in not_run and "creator_scores:e:bad_input" in not_run
+    assert "creator_scores:a:no_creator_json" in not_run and "creator_scores:d:no_prediction" in not_run
+    (pred / "c.structure.json").write_text("{broken", encoding="utf-8")
+    assert "creator_scores:c:bad_input" in prove._creator_scores(pack, ["c"], pred)[1]

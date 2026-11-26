@@ -409,37 +409,62 @@ def _timing_threshold(pack):
     return None, "not_run"
 
 
+def _list_of_dicts(data, key, what):
+    """A prediction file: a list of dicts, or {key: [...]}. Anything else is bad input."""
+    if isinstance(data, dict):
+        data = data.get(key, [])
+    if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+        raise ValueError(f"{what} must be a list of objects")
+    return data
+
+
 def _creator_scores(pack, ids, pdir):
     """Optional structure/retention scores for hold-out videos that have <id>.structure.json or
-    <id>.retention.json predictions and analysis/<id>/creator.json. Returns ({structure?, retention?}, not_run)."""
-    want = [(v, pdir / f"{v}.structure.json", pdir / f"{v}.retention.json") for v in ids
-            if (pdir / f"{v}.structure.json").exists() or (pdir / f"{v}.retention.json").exists()]
-    want = [w for w in want if (Path(pack) / "analysis" / w[0] / "creator.json").exists()]
+    <id>.retention.json predictions and analysis/<id>/creator.json. Returns ({structure?, retention?}, not_run).
+    Never raises on malformed files: the id goes to not_run as creator_scores:<id>:bad_input."""
+    not_run, want = [], []
+    for v in ids:
+        sf, rf = pdir / f"{v}.structure.json", pdir / f"{v}.retention.json"
+        has_pred = sf.exists() or rf.exists()
+        has_doc = (Path(pack) / "analysis" / v / "creator.json").exists()
+        if has_pred and has_doc:
+            want.append((v, sf, rf))
+        elif has_pred:
+            not_run.append(f"creator_scores:{v}:no_creator_json")
+        elif has_doc:
+            not_run.append(f"creator_scores:{v}:no_prediction")
     if not want:
-        return {}, []
+        return {}, not_run
     try:
         import creator
     except ImportError:
-        return {}, ["structure", "retention"]
+        return {}, ["structure", "retention"] + not_run
     out = {"structure": {"per_video": {}}, "retention": {"per_video": {}}}
     for vid, sf, rf in want:
-        doc = _read_dict(Path(pack) / "analysis" / vid / "creator.json", "creator.json")
-        if sf.exists():
-            pred = _read(sf, "predicted structure")
-            pred = pred.get("structure", []) if isinstance(pred, dict) else pred
-            actual = (doc.get("story") or {}).get("structure") or []
-            out["structure"]["per_video"][vid] = creator.score_structure(pred, actual)
-        if rf.exists():
-            pred = _read(rf, "predicted retention")
-            pred = pred.get("retention", []) if isinstance(pred, dict) else pred
-            out["retention"]["per_video"][vid] = score_placement(
-                creator.retention_events(pred), creator.retention_events(doc.get("retention")))
+        try:
+            doc = _read_dict(Path(pack) / "analysis" / vid / "creator.json", "creator.json")
+            story = doc.get("story") or {}
+            part = {}
+            if sf.exists():
+                pred = _list_of_dicts(_read(sf, "predicted structure"), "structure", "predicted structure")
+                actual = _list_of_dicts(story.get("structure") or [], "structure", "actual structure")
+                part["structure"] = creator.score_structure(pred, actual)
+            if rf.exists():
+                pred = _list_of_dicts(_read(rf, "predicted retention"), "retention", "predicted retention")
+                actual = _list_of_dicts(doc.get("retention") or [], "retention", "actual retention")
+                part["retention"] = score_placement(creator.retention_events(pred),
+                                                    creator.retention_events(actual))
+        except (AttributeError, TypeError, KeyError, ValueError, Bad):
+            not_run.append(f"creator_scores:{vid}:bad_input")
+            continue
+        for k, v in part.items():
+            out[k]["per_video"][vid] = v
     res = {}
     for k, v in out.items():
         if v["per_video"]:
             v.update(pool_scores(list(v["per_video"].values())))
             res[k] = v
-    return res, []
+    return res, not_run
 
 
 def cmd_holdout(a):
