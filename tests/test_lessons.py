@@ -145,7 +145,7 @@ def test_edit_layer_only_candidate_or_one_off(home):
 
 def test_reject_refuses_rule(home):
     assert add("--kind", "quality").returncode == 0
-    assert run_cli("lessons.py", "approve", "L0001").returncode == 0
+    assert run_cli("lessons.py", "approve", "L0001", "--one-note").returncode == 0
     r = run_cli("lessons.py", "reject", "L0001")
     assert r.returncode == 1 and "use a later retire command for rules" in r.stderr
     assert reg(home)["lessons"][0]["status"] == "rule"

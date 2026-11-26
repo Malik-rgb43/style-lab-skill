@@ -220,8 +220,8 @@ def test_craft_and_client_files(home):
     assert "1. easing curve is linear — all cuts." in craft and "[quality]" in craft and "L0001" in craft
     assert run_cli("clients.py", "add", "--name", "Client X", "--slug", "client-x").returncode == 0
     add("--target", "client-x", layer="client", text="logo too small", measurable="logo width >= 12%")
-    # a candidate can be approved directly by the owner
-    r = run_cli("lessons.py", "approve", "L0002")
+    # a candidate (one note) can still be approved by an explicit owner yes
+    r = run_cli("lessons.py", "approve", "L0002", "--one-note")
     assert r.returncode == 0, r.stderr
     cl = (home / "clients" / "client-x" / "lessons.md").read_text(encoding="utf-8")
     assert "1. logo width >= 12%" in cl and "L0002" in cl and "[quality]" not in cl
@@ -261,7 +261,107 @@ def test_merge_refusals(home):
     assert run_cli("lessons.py", "reject", "L0003").returncode == 0
     assert run_cli("lessons.py", "merge", "L0001", "L0003").returncode == 1  # rejected target
     assert run_cli("lessons.py", "merge", "L0001", "L0001").returncode == 1
-    assert run_cli("lessons.py", "approve", "L0001").returncode == 0
+    assert run_cli("lessons.py", "approve", "L0001", "--one-note").returncode == 0
     add("--kind", "quality", text="fourth")
     assert run_cli("lessons.py", "merge", "L0001", "L0004").returncode == 1  # rule source
     assert [x["status"] for x in reg(home)["lessons"]] == ["rule", "one-off", "rejected", "candidate"]
+
+
+def test_candidate_needs_one_note(home):
+    add("--kind", "quality")
+    r = run_cli("lessons.py", "approve", "L0001")
+    assert r.returncode == 1 and "only one note so far" in r.stderr and "--one-note" in r.stderr
+    assert lesson(home)["status"] == "candidate"
+    assert not (home / "craft-rules.learned.md").exists()
+    r = run_cli("lessons.py", "approve", "L0001", "--one-note")
+    assert r.returncode == 0, r.stderr
+    assert lesson(home)["status"] == "rule"
+
+
+def test_proposed_approves_without_flag(home):
+    add("--kind", "taste")
+    assert match("L0001").returncode == 0
+    r = run_cli("lessons.py", "approve", "L0001")
+    assert r.returncode == 0, r.stderr
+    assert "[taste]" in (home / "craft-rules.learned.md").read_text(encoding="utf-8")
+
+
+def test_lock_busy_exits_2(home):
+    add("--kind", "quality")
+    assert match("L0001").returncode == 0
+    lk = home / "lessons" / "lessons.json.lock"
+    lk.write_text("")
+    try:
+        r = run_cli("lessons.py", "approve", "L0001")
+        assert r.returncode == 2 and "lock busy" in r.stderr
+        r = run_cli("lessons.py", "render", "--layer", "craft")
+        assert r.returncode == 2 and "lock busy" in r.stderr
+    finally:
+        lk.unlink()
+    assert lesson(home)["status"] == "proposed"
+
+
+def test_style_registry_counts_and_version(home, tmp_path):
+    mkstyle(tmp_path)
+
+    def entry():
+        data = json.loads((home / "styles.json").read_text(encoding="utf-8"))
+        return next(s for s in data["styles"] if s["slug"] == "test-style")
+
+    assert entry()["rules_count"] == 0 and entry()["version"] == 1
+    a = proposed_style_lesson()
+    assert run_cli("lessons.py", "approve", a).returncode == 0
+    assert entry()["rules_count"] == 1 and entry()["version"] == 2
+    b = proposed_style_lesson(text="zoom is slow", measurable="push-in lasts >= 1.5 s")
+    assert run_cli("lessons.py", "approve", b).returncode == 0
+    assert entry()["rules_count"] == 2 and entry()["version"] == 3
+    # a render with nothing new changes no file and no version
+    assert run_cli("lessons.py", "render", "--layer", "style", "--target", "test-style").returncode == 0
+    assert entry()["rules_count"] == 2 and entry()["version"] == 3
+
+
+def test_registry_write_failure_says_resync(home, monkeypatch):
+    import lessons
+    import store
+    add("--kind", "quality")
+    assert match("L0001").returncode == 0
+    real = store.write_json
+
+    def failing(p, data):
+        if str(p).endswith("lessons.json"):
+            raise PermissionError("disk says no")
+        return real(p, data)
+
+    monkeypatch.setattr(store, "write_json", failing)
+    try:
+        lessons.approve("L0001")
+        raise AssertionError("approve should fail")
+    except OSError as e:
+        assert "rule files were updated" in str(e) and "lessons.py render" in str(e)
+    assert lesson(home)["status"] == "proposed"
+    assert "L0001" in (home / "craft-rules.learned.md").read_text(encoding="utf-8")
+
+
+def test_edit_rule_kind_refused_measurable_rerenders(home):
+    add("--kind", "quality")
+    assert match("L0001").returncode == 0
+    assert run_cli("lessons.py", "approve", "L0001").returncode == 0
+    r = run_cli("lessons.py", "edit", "L0001", "kind=taste")
+    assert r.returncode == 1 and "rule" in r.stderr
+    assert lesson(home)["kind"] == "quality"
+    r = run_cli("lessons.py", "edit", "L0001", "measurable=cuts land in silence", "scope=every join")
+    assert r.returncode == 0, r.stderr
+    craft = (home / "craft-rules.learned.md").read_text(encoding="utf-8")
+    assert "1. cuts land in silence — every join." in craft and "easing curve is linear" not in craft
+
+
+def test_edit_rule_rerender_all_or_nothing(home, tmp_path):
+    style_md, _ = mkstyle(tmp_path)
+    lid = proposed_style_lesson()
+    assert run_cli("lessons.py", "approve", lid).returncode == 0
+    for f in style_md.parent.iterdir():
+        f.unlink()
+    style_md.parent.rmdir()
+    r = run_cli("lessons.py", "edit", lid, "scope=intro")
+    assert r.returncode == 1 and str(style_md) in r.stderr
+    assert lesson(home)["scope"] == "captions"

@@ -9,10 +9,12 @@ Commands:
                    --project P --video V [--t S] [--round N] [--before ..] [--after ..]
     lessons.py list [--status S] [--layer L] [--target T] [--json]
     lessons.py show <id>
-    lessons.py edit <id> field=value [...]    (text, measurable, scope, layer, target, kind)
+    lessons.py edit <id> field=value [...]    (text, measurable, scope, layer, target, kind;
+                                               on a rule only text/measurable/scope, re-rendered)
     lessons.py reject <id> [--reason ..]          (not for rules or merged lessons)
     lessons.py match <id> --project P --video V [--t S] [--round N] [--note ..] [--before ..] [--after ..]
-    lessons.py approve <id>                       (owner yes: candidate/proposed -> rule, then render)
+    lessons.py approve <id> [--one-note]          (owner yes: proposed -> rule, then render;
+                                                   a candidate with one note needs --one-note)
     lessons.py merge <src> <into>                 (moves evidence; src becomes merged)
     lessons.py render --layer craft|style|client [--target T]
     lessons.py settings [auto_promote=true|false]
@@ -28,7 +30,8 @@ settings auto_promote=true) makes a rule. Rules are rendered to:
     style  -> the pack's STYLE.md and the style skill file, only between the markers
               <!-- style-lab:learned-rules:start --> and <!-- style-lab:learned-rules:end -->;
               hand text outside them is never changed. Each file is backed up once per day
-              (<file>.bak-YYYYMMDD) before its first write.
+              (<file>.bak-YYYYMMDD) before its first write. The style's styles.json entry
+              gets rules_count, and version + 1 whenever its rule files change.
 """
 import argparse
 import contextlib
@@ -175,8 +178,9 @@ def _edit(data, args):
             return _fail(f"{k} must not be empty")
     if "layer" in new and x["status"] not in ("candidate", "one-off"):
         return _fail(f"{x['id']} is {x['status']}: layer can change only on candidate or one-off lessons")
-    if "target" in new and x["status"] == "rule":
-        return _fail(f"{x['id']} is a rule: its target cannot change")
+    for k in ("target", "kind"):
+        if k in new and x["status"] == "rule":
+            return _fail(f"{x['id']} is a rule: its {k} cannot change")
     layer = new.get("layer", x["layer"])
     target = (new["target"] or None) if "target" in new else x["target"]
     kind = (new["kind"] or None) if "kind" in new else x["kind"]
@@ -202,6 +206,17 @@ def _edit(data, args):
         elif layer != "video" and x["status"] == "one-off":
             x["status"] = "candidate"
     x["updated"] = today()
+    if x["status"] == "rule" and ("measurable" in new or "scope" in new):
+        warnings = []
+        try:
+            _render(x["layer"], x["target"], data, warnings)  # before the registry write: all or nothing
+        except store.LockTimeout:
+            raise
+        except RENDER_ERRORS as e:
+            _flush(warnings)
+            return _fail(f"{e}; the edit was not saved")
+        _flush(warnings)
+        args.rendered = True
     print(f"updated {x['id']}")
 
 
@@ -302,10 +317,29 @@ def match(lesson_id, evidence, warnings=None):
     return out
 
 
-def approve(lesson_id, warnings=None):
-    """Owner yes: candidate/proposed -> rule with the next rule_no of its (layer, target), then render.
+RESYNC = "rule files were updated; re-run approve or `lessons.py render` to resync"
+
+
+def _save_after_render(fn, state):
+    """update_json on the lessons registry; if it fails after rule files were written, say how to resync."""
+    try:
+        store.update_json(registry_path(), _empty(), fn)
+    except store.LockTimeout:
+        raise
+    except _Abort:
+        raise
+    except Exception as e:
+        if state.get("rendered"):
+            raise OSError(f"saving the lessons registry failed ({e}); {RESYNC}") from e
+        raise
+
+
+def approve(lesson_id, warnings=None, one_note=False):
+    """Owner yes: proposed -> rule with the next rule_no of its (layer, target), then render.
+    A candidate (one note so far) needs one_note=True, the owner's explicit yes.
     If rendering fails nothing is saved (the status stays) and the error is raised."""
     out = {}
+    state = {}
 
     def fn(data):
         x = _find(data, lesson_id)
@@ -316,15 +350,19 @@ def approve(lesson_id, warnings=None):
             raise ValueError(msg)
         if x["status"] not in ("candidate", "proposed"):
             raise ValueError(f"{x['id']} is already a {x['status']}")
+        if x["status"] == "candidate" and not one_note:
+            raise ValueError(f"{x['id']} is a candidate: only one note so far; "
+                             f"the owner can still approve it with --one-note")
         nos = [i["rule_no"] for i in data["lessons"]
                if i["layer"] == x["layer"] and i["target"] == x["target"] and i.get("rule_no")]
         x["rule_no"] = max(nos, default=0) + 1
         x["status"] = "rule"
         x["promoted"] = x["updated"] = today()
         paths = _render(x["layer"], x["target"], data, warnings)  # raises before the registry is written
+        state["rendered"] = True
         out.update(x, paths=[str(q) for q in paths])
 
-    store.update_json(registry_path(), _empty(), fn)
+    _save_after_render(fn, state)
     return out
 
 
@@ -437,9 +475,10 @@ def _write_bytes(p, data):
                 os.unlink(tmp)
 
 
-def _commit(plan):
-    """plan = [(path, old bytes or None, new bytes)]. Back up and write each changed file; if a
-    later write fails, put the earlier ones back so nothing is half-written."""
+def _commit(plan, after=None):
+    """plan = [(path, old bytes or None, new bytes)]. Back up and write each changed file, then run
+    after(changed); if a later write or after() fails, put the earlier files back so nothing is
+    half-written."""
     done = []
     try:
         for p, old, new in plan:
@@ -448,6 +487,8 @@ def _commit(plan):
             _backup_once(p)
             _write_bytes(p, new)
             done.append((p, old))
+        if after:
+            after(bool(done))
     except BaseException:
         for p, old in reversed(done):
             with contextlib.suppress(OSError):
@@ -503,8 +544,31 @@ def _render(layer, target, data, warnings=None):
             print(msg, file=sys.stderr)
         else:
             warnings.append(msg)
-    _commit(plan)
+    n = sum(1 for x in data["lessons"] if x["status"] == "rule" and x["layer"] == "style" and x["target"] == s["slug"])
+    _commit(plan, lambda changed: _sync_style_entry(s["slug"], n, changed))
     return [p for p, _, _ in plan]
+
+
+def _sync_style_entry(slug, rules_count, changed):
+    """styles.json: rules_count = rule lessons of the style; version += 1 when its rule files changed.
+    Written the way styles.py writes (locked update, v1 registry migrated with a daily backup)."""
+    import styles
+    s = styles.find(styles.load_registry(), slug)
+    if s and s.get("rules_count") == rules_count and not changed:
+        return
+
+    def fn(reg):
+        if styles.migrate(reg)[1] and styles.registry_path().exists():
+            styles._backup_once(styles.registry_path())
+        e = styles.find(reg, slug)
+        if not e:
+            raise ValueError(f"style {slug!r} left the styles registry while its rules were written")
+        e["rules_count"] = rules_count
+        if changed:
+            e["version"] = int(e.get("version") or 1) + 1
+        e["updated"] = styles.today()
+
+    store.update_json(styles.registry_path(), {"version": 2, "styles": []}, fn)
 
 
 def render(layer, target=None, warnings=None) -> Path:
@@ -523,6 +587,12 @@ def _locked(fn, args):
         store.update_json(registry_path(), _empty(), inner)
     except _Abort as e:
         return e.rc
+    except store.LockTimeout:
+        raise
+    except Exception as e:
+        if getattr(args, "rendered", False):
+            return _fail(f"saving the lessons registry failed ({e}); {RESYNC}")
+        raise
     return 0
 
 
@@ -583,6 +653,8 @@ def cmd_match(args):
     warnings = []
     try:
         promoted = _auto_promote(x, warnings)
+    except store.LockTimeout:
+        raise
     except RENDER_ERRORS as e:
         _flush(warnings)
         return _fail(f"evidence saved; auto-promote failed, {x['id']} stays proposed: {e}")
@@ -595,7 +667,9 @@ def cmd_match(args):
 def cmd_approve(args):
     warnings = []
     try:
-        x = approve(args.id, warnings)
+        x = approve(args.id, warnings, one_note=args.one_note)
+    except store.LockTimeout:
+        raise
     except RENDER_ERRORS as e:
         _flush(warnings)
         return _fail(str(e))
@@ -609,6 +683,8 @@ def cmd_merge(args):
     warnings = []
     try:
         x = merge(args.src, args.into, warnings)
+    except store.LockTimeout:
+        raise
     except RENDER_ERRORS as e:
         _flush(warnings)
         return _fail(str(e))
@@ -636,6 +712,8 @@ def cmd_render(args):
                 raise ValueError(f"no client {target!r}" if target else "client rules need --target <client>")
             target = c["slug"]
         p = render(args.layer, target)
+    except store.LockTimeout:
+        raise
     except RENDER_ERRORS as e:
         return _fail(str(e))
     print(f"wrote {p}")
@@ -683,6 +761,8 @@ def _main(argv=None):
     a.add_argument("--t"); a.add_argument("--round", type=int); a.add_argument("--note")
     a.add_argument("--before"); a.add_argument("--after")
     a = sub.add_parser("approve"); a.add_argument("id")
+    a.add_argument("--one-note", dest="one_note", action="store_true",
+                   help="owner yes for a candidate that has only one note so far")
     a = sub.add_parser("merge"); a.add_argument("src"); a.add_argument("into")
     a = sub.add_parser("render"); a.add_argument("--layer", required=True, choices=("craft", "style", "client"))
     a.add_argument("--target")
