@@ -180,14 +180,21 @@ def slugify(name: str, taken: set) -> str:
     return slug
 
 
-# Defaults for <home>/settings.json keys owned by research tooling (assets_log.py sound-lib).
-# sound_libraries: list of {name, path, kinds: [sfx|music|ambience]}.
-SETTINGS_DEFAULTS = {"sound_libraries": []}
+# <home>/settings.json: the single home of user settings and their defaults.
+# auto_promote: lessons.py; sound_libraries: [{name, path, kinds: [sfx|music|ambience]}].
+SETTINGS_DEFAULTS = {"auto_promote": False, "sound_libraries": []}
 
 
 def settings() -> dict:
-    """settings.json merged over SETTINGS_DEFAULTS (existing keys keep their values)."""
+    """settings.json merged over SETTINGS_DEFAULTS; null and non-dict values are tolerated."""
     data = read_json(path("settings.json"), {})
+    if not isinstance(data, dict):
+        data = {}
     out = copy.deepcopy(SETTINGS_DEFAULTS)
-    out.update(data)
+    for k, v in data.items():
+        if v is None and k in out:
+            continue
+        out[k] = v
+    if not isinstance(out["sound_libraries"], list):
+        out["sound_libraries"] = []
     return out

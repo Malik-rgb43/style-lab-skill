@@ -24,6 +24,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import doctor  # noqa: E402
 import store  # noqa: E402
 
 ASSET_KINDS = ["font", "sfx", "music", "broll", "ui", "model"]
@@ -34,14 +35,6 @@ LEVELS = ["required", "recommended"]
 LOOK_KEYS = ["grain", "vignette", "blur", "palette_ref", "lens", "light", "composition"]
 MOTION_KEYS = ["camera_ease", "dur_s", "subject_motion"]
 
-# Generic capability -> substrings of capability-map names that satisfy it.
-ALIASES = {
-    "image_generator": ["higgsfield", "nano_banana", "nanobanana", "gpt_image", "gpt-image", "midjourney",
-                        "flux", "seedream", "imagen", "firefly", "image_gen"],
-    "video_generator": ["higgsfield", "seedance", "kling", "veo", "sora", "runway", "hailuo", "video_gen"],
-    "stock_footage": ["pexels", "pixabay", "stock"],
-}
-PAID_CAPS = {"image_generator", "video_generator"}
 GEN_FALLBACK = "stock B-roll (Pexels/Pixabay) or screen recordings"
 
 
@@ -65,6 +58,14 @@ def _atomic_text(p: Path, text: str):
                 pass
 
 
+def read_checked(p, default, typ):
+    """read_json that rejects a wrong top-level type with a ValueError (one-line exit 2 in main)."""
+    d = store.read_json(p, default)
+    if not isinstance(d, typ):
+        raise ValueError(f"{p} has the wrong shape (expected {typ.__name__}): fix or delete it")
+    return d
+
+
 # ---------- assets ----------
 
 def _cell(s):
@@ -85,34 +86,60 @@ def cmd_add(a):
         return die("--licence is required (say 'unknown' if it is not known)")
     row = {"kind": a.kind, "name": a.name, "source": a.source, "licence": a.licence,
            "url": a.url or "", "why": a.why or ""}
-    rows = store.update_json(pack / "assets.json", [], lambda d: d.append(row))
-    _atomic_text(pack / "ASSETS.md", render_table(rows))
+    def fn(d):
+        if not isinstance(d, list):
+            raise ValueError(f"{pack / 'assets.json'} is not a list: fix or delete it")
+        d.append(row)
+        _atomic_text(pack / "ASSETS.md", render_table(d))  # same lock as the json write
+    rows = store.update_json(pack / "assets.json", [], fn)
     print(f"logged {a.kind} {a.name} ({len(rows)} assets)")
     return 0
 
 
+def generators_for(src):
+    """Generators a source/how value implies. Exact enum values or the `ai_` prefix, never startswith('ai')."""
+    v = str(src or "").strip().lower()
+    if v in ("ai_image+i2v", "ai_image_i2v"):
+        return ["image_generator", "video_generator"]
+    if v in ("ai_video", "ai_clip"):
+        return ["video_generator"]
+    if v == "ai" or v.startswith("ai_"):
+        return ["image_generator"]
+    return []
+
+
+def merge_proposal(out, name, why, level, fallback):
+    """Add a proposal; a later `required` upgrades an earlier `recommended`."""
+    for x in out:
+        if x["name"] == name:
+            if level == "required" and x["level"] != "required":
+                x["level"] = "required"
+            if not x["fallback"] and fallback:
+                x["fallback"] = fallback
+            return
+    out.append({"name": name, "why": why, "level": level, "fallback": fallback})
+
+
 def propose_requires(rows):
-    out, seen = [], set()
-
-    def add(name, why, level, fallback):
-        if name not in seen:
-            seen.add(name)
-            out.append({"name": name, "why": why, "level": level, "fallback": fallback})
-
+    out = []
     for r in rows:
-        src = str(r.get("source", "")).lower()
-        if r.get("kind") == "broll" and src.startswith("ai"):
-            add("image_generator", f"AI B-roll in the references: {r.get('name')}", "recommended", GEN_FALLBACK)
+        if not isinstance(r, dict):
+            continue
+        if r.get("kind") == "broll":
+            for g in generators_for(r.get("source")):
+                merge_proposal(out, g, f"AI B-roll in the references: {r.get('name')}", "recommended",
+                               GEN_FALLBACK)
         if r.get("kind") == "sfx":
-            add("sound_libraries", f"sound effects used: {r.get('name')}", "recommended",
-                "register a sound folder with `assets_log.py sound-lib add`, or use free packs")
+            merge_proposal(out, "sound_libraries", f"sound effects used: {r.get('name')}", "recommended",
+                           "register a sound folder with `assets_log.py sound-lib add`, or use free packs")
         if r.get("kind") == "model":
-            add("blender", f"3D model used: {r.get('name')}", "recommended", "2D substitute or stock footage")
+            merge_proposal(out, "blender", f"3D model used: {r.get('name')}", "recommended",
+                           "2D substitute or stock footage")
     return out
 
 
 def cmd_requires(a):
-    rows = store.read_json(Path(a.pack) / "assets.json", [])
+    rows = read_checked(Path(a.pack) / "assets.json", [], list)
     props = propose_requires(rows)
     print(json.dumps(props, ensure_ascii=False, indent=2))
     if props:
@@ -193,11 +220,17 @@ def cmd_recipe_add(a):
         return die(f"--how must be one of {HOWS}")
     if a.test and a.test not in TEST_STATUS:
         return die(f"--test must be one of {TEST_STATUS}")
+    err = []
 
     def fn(d):
+        if not isinstance(d.get("recipes", []), list):
+            raise ValueError("recipes.json has the wrong shape: fix or delete it")
         recs = d.setdefault("recipes", [])
-        r = next((x for x in recs if x.get("kind") == a.kind), None)
+        r = next((x for x in recs if isinstance(x, dict) and x.get("kind") == a.kind), None)
         if r is None:
+            if not a.how:
+                err.append(f"first add of recipe {a.kind} needs --how {'|'.join(HOWS)}")
+                return
             r = new_recipe(a.kind)
             recs.append(r)
         if a.how:
@@ -212,6 +245,10 @@ def cmd_recipe_add(a):
             r["negative"] = a.negative
         for t in tools:
             r["tools"] = [x for x in r["tools"] if x["capability"] != t["capability"]] + [t]
+        for cap in a.paid:
+            for x in r["tools"]:
+                if x["capability"] == cap:
+                    x["paid"] = True
         if a.test:
             r["test"]["status"] = a.test
         if a.sample:
@@ -221,60 +258,59 @@ def cmd_recipe_add(a):
         if a.evidence:
             r["source_evidence"] = list(dict.fromkeys(r["source_evidence"] + a.evidence))
     store.update_json(Path(a.pack) / "recipes.json", {"recipes": []}, fn)
+    if err:
+        return die(err[0])
     print(f"recipe {a.kind} saved")
     return 0
 
 
 def cmd_recipe_list(a):
-    d = store.read_json(Path(a.pack) / "recipes.json", {"recipes": []})
+    d = read_recipes(a.pack)
     print(json.dumps(d, ensure_ascii=False, indent=2))
     return 0
 
 
+def read_recipes(pack):
+    p = Path(pack) / "recipes.json"
+    d = read_checked(p, {"recipes": []}, dict)
+    recs = d.get("recipes", [])
+    if not isinstance(recs, list) or not all(
+            isinstance(r, dict) and isinstance(r.get("tools", []), list) for r in recs):
+        raise ValueError(f"{p} has the wrong shape: fix or delete it")
+    return d
+
+
 def load_caps(path=None):
     """The doctor.py capability map: <home>/capabilities.json with `local` and `session` blocks."""
-    return store.read_json(Path(path) if path else store.path("capabilities.json"),
-                           {"local": {}, "session": {}})
-
-
-def _ok_names(caps):
-    names = set()
+    p = Path(path) if path else store.path("capabilities.json")
+    caps = read_checked(p, {"local": {}, "session": {}}, dict)
     for blk in ("local", "session"):
-        for n, v in (caps.get(blk) or {}).items():
-            if isinstance(v, dict) and v.get("ok"):
-                names.add(n.lower())
-    return names
-
-
-def tool_ready(cap, ok_names):
-    c = cap.lower()
-    if c in ok_names:
-        return True
-    return any(al in n for al in ALIASES.get(c, []) for n in ok_names)
+        if not isinstance(caps.get(blk, {}), dict):
+            raise ValueError(f"{p} has the wrong shape ({blk} must be an object)")
+    return caps
 
 
 def check_recipes(recipes, caps):
-    """Return (rows, proposals, failed). A row: {kind, capability, level, ready, paid, fallback}."""
-    ok = _ok_names(caps)
-    rows, props, seen = [], [], set()
+    """Return (rows, proposals, failed). A row: {kind, capability, level, ready, paid, fallback, via}."""
+    rows, props = [], []
     for r in recipes:
         for t in r.get("tools", []):
             cap = t["capability"]
             level = t.get("level", "required")
-            rows.append({"kind": r["kind"], "capability": cap, "level": level,
-                         "ready": tool_ready(cap, ok),
-                         "paid": bool(t.get("paid")) or cap.lower() in PAID_CAPS,
+            res = doctor.resolve(cap, caps)
+            rows.append({"kind": r["kind"], "capability": cap, "level": level, "ready": res["ok"],
+                         "via": res["via"], "paid": bool(t.get("paid")) or doctor.is_paid(cap),
                          "fallback": t.get("fallback", "")})
-            if cap not in seen:
-                seen.add(cap)
-                props.append({"name": cap, "why": f"recipe {r['kind']} needs it",
-                              "level": level, "fallback": t.get("fallback", "")})
+            merge_proposal(props, cap, f"recipe {r['kind']} needs it", level, t.get("fallback", ""))
+        for g in generators_for(r.get("how")):
+            merge_proposal(props, g, f"recipe {r['kind']} is made with {r.get('how')}", "recommended",
+                           GEN_FALLBACK)
     failed = any(x["level"] == "required" and not x["ready"] for x in rows)
     return rows, props, failed
 
 
 def cmd_recipe_check(a):
-    d = store.read_json(Path(a.pack) / "recipes.json", {"recipes": []})
+    d = read_recipes(a.pack)
     rows, props, failed = check_recipes(d.get("recipes", []), load_caps(a.caps))
     for r in rows:
         line = f"[{'ready' if r['ready'] else 'MISSING'}] {r['kind']}: {r['capability']} ({r['level']})"
@@ -320,6 +356,7 @@ def build_parser():
     s.add_argument("--negative")
     s.add_argument("--motion")
     s.add_argument("--tool", action="append", default=[])
+    s.add_argument("--paid", action="append", default=[], help="mark a recipe tool (capability) as paid")
     s.add_argument("--test")
     s.add_argument("--sample", action="append", default=[])
     s.add_argument("--notes")
@@ -349,6 +386,8 @@ def main(argv=None):
         return store.exit_on_lock_timeout(_main, argv)
     except SystemExit as e:
         return e.code if isinstance(e.code, int) else 2
+    except (ValueError, TypeError, KeyError, AttributeError, OSError) as e:
+        return die(f"error: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

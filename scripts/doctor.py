@@ -281,6 +281,51 @@ def print_table(data):
             print(f"  {'✓' if s.get('ok') else 'חסר'} {n}" + (f"  {s['note']}" if s.get("note") else ""))
 
 
+# Generic capability -> tokens/aliases that satisfy it (whole-token match on the map's names).
+ALIASES = {
+    "image_generator": ["higgsfield", "nano_banana", "nanobanana", "gpt_image", "midjourney",
+                        "flux", "seedream", "imagen", "firefly", "image_gen"],
+    "video_generator": ["higgsfield", "seedance", "kling", "veo", "sora", "runway", "hailuo", "video_gen"],
+    "stock_footage": ["pexels", "pixabay"],
+}
+# Names that cost money when used (generators and cloud ASR); tokens are matched whole.
+PAID_NAMES = {"image_generator", "video_generator", "cloud_asr", "runpod_api_key", "runpod_endpoint_id"}
+PAID_TOKENS = {"higgsfield", "seedance", "kling", "veo", "sora", "runway", "hailuo", "midjourney",
+               "seedream", "imagen", "firefly", "runpod", "elevenlabs", "suno"}
+
+
+def _tokens(name):
+    return [t for t in re.split(r"[_\-. ]+", str(name).lower()) if t]
+
+
+def is_paid(cap):
+    return str(cap).lower() in PAID_NAMES or bool(set(_tokens(cap)) & PAID_TOKENS)
+
+
+def resolve(cap, caps):
+    """Is capability `cap` available in the map? Returns {ok, via}. Single source of truth for
+    `doctor.py --style` and `assets_log.py recipe check`. Aliases match whole name tokens only."""
+    c = str(cap).strip().lower()
+    ok = {}
+    for blk in ("local", "session"):
+        blkd = (caps or {}).get(blk)
+        if not isinstance(blkd, dict):
+            continue
+        for n, v in blkd.items():
+            if isinstance(v, dict) and v.get("ok"):
+                ok[str(n).lower()] = str(n)
+    if c in ok:
+        return {"ok": True, "via": ok[c]}
+    ctoks = _tokens(c)
+    for al in ALIASES.get(c, []):
+        atoks = _tokens(al)
+        for low, orig in ok.items():
+            ntoks = _tokens(low)
+            if low == al.lower() or (atoks and all(t in ntoks for t in atoks)):
+                return {"ok": True, "via": orig}
+    return {"ok": False, "via": None}
+
+
 def style_requirements(data, style_key):
     """Rows for the style's `requires` against the capability map. Returns (rows, style) or (None, None)."""
     import styles  # local import: styles.py reads the registry only
@@ -290,8 +335,7 @@ def style_requirements(data, style_key):
     rows = []
     for r in st.get("requires", []):
         n = r.get("name", "")
-        ok = bool(data["local"].get(n, {}).get("ok") or data.get("session", {}).get(n, {}).get("ok"))
-        rows.append({"name": n, "ok": ok, "level": r.get("level", "required"),
+        rows.append({"name": n, "ok": resolve(n, data)["ok"], "level": r.get("level", "required"),
                      "why": r.get("why", ""), "fallback": r.get("fallback", "")})
     return rows, st
 

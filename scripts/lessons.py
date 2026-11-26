@@ -66,7 +66,7 @@ EDITABLE = ("text", "measurable", "scope", "layer", "target", "kind")
 START = "<!-- style-lab:learned-rules:start -->"  # unslugged: generated files, and the legacy pair
 END = "<!-- style-lab:learned-rules:end -->"
 LEARNED_HEADING = "## Review-round rules (learned)"
-SETTINGS_DEFAULT = {"auto_promote": False}
+BOOL_KEYS = ("auto_promote",)  # keys the settings CLI may set (defaults live in store.SETTINGS_DEFAULTS)
 
 
 class _Abort(Exception):
@@ -287,7 +287,7 @@ def _not_live(x):
 
 
 def settings():
-    return store.read_json(store.path("settings.json"), dict(SETTINGS_DEFAULT))
+    return store.settings()
 
 
 def _record_match(lesson_id, evidence, warnings=None):
@@ -976,12 +976,12 @@ def cmd_settings(args):
     new = {}
     for pair in args.pairs:
         k, _, v = pair.partition("=")
-        if k not in SETTINGS_DEFAULT:
-            return _fail(f"unknown setting {k!r}; known: {', '.join(SETTINGS_DEFAULT)}")
+        if k not in BOOL_KEYS:
+            return _fail(f"unknown setting {k!r}; known: {', '.join(BOOL_KEYS)}")
         if v.lower() not in ("true", "false"):
             return _fail(f"{k} must be true or false, got {v!r}")
         new[k] = v.lower() == "true"
-    store.update_json(store.path("settings.json"), dict(SETTINGS_DEFAULT), lambda d: d.update(new))
+    store.update_json(store.path("settings.json"), dict(store.SETTINGS_DEFAULTS), lambda d: d.update(new))
     print(", ".join(f"{k}={str(v).lower()}" for k, v in new.items()))
     return 0
 
