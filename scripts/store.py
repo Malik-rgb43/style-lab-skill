@@ -7,6 +7,7 @@ import contextlib
 import copy
 import json
 import os
+import random
 import re
 import sys
 import tempfile
@@ -42,12 +43,36 @@ def path(*parts: str) -> Path:
     return home().joinpath(*parts)
 
 
-def read_json(p: Path, default):
+def _retry_perm(fn, tries: int = 1000, delay: float = 0.01):
+    """Run fn(); retry on PermissionError (Windows sharing violations)."""
+    for i in range(tries):
+        try:
+            return fn()
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(delay * (0.5 + random.random()))
+
+
+def read_json(p: Path, default, _locked: bool = False):
     p = Path(p)
-    if not p.exists():
+    if not _locked:
+        # Back off briefly while a writer holds the lock so its os.replace is not
+        # starved by readers keeping the file open (Windows sharing violations).
+        lk = p.with_suffix(p.suffix + ".lock")
+        for _ in range(100):
+            if not os.path.lexists(lk):
+                break
+            time.sleep(0.005)
+
+    def _read():
+        # one short read: keeps the file open as briefly as possible
+        return json.loads(p.read_bytes().decode("utf-8-sig"))
+
+    try:
+        return _retry_perm(_read)
+    except FileNotFoundError:
         return copy.deepcopy(default)
-    with open(p, "r", encoding="utf-8") as f:
-        return json.load(f)
 
 
 def write_json(p: Path, data) -> None:
@@ -58,17 +83,7 @@ def write_json(p: Path, data) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.write("\n")
-        last = None
-        for _ in range(100):
-            try:
-                os.replace(tmp, p)
-                last = None
-                break
-            except PermissionError as e:  # Windows: target briefly held open
-                last = e
-                time.sleep(0.02)
-        if last is not None:
-            raise last
+        _retry_perm(lambda: os.replace(tmp, p))
     finally:
         if os.path.exists(tmp):
             with contextlib.suppress(OSError):
@@ -81,12 +96,22 @@ def lock(p: Path, timeout: float = 10.0):
     p.parent.mkdir(parents=True, exist_ok=True)
     lk = p.with_suffix(p.suffix + ".lock")
     deadline = time.monotonic() + timeout
+    perm_since = None
     while True:
         try:
             fd = os.open(str(lk), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             os.close(fd)
             break
         except (FileExistsError, PermissionError):
+            if not os.path.lexists(lk):
+                # PermissionError with no lock file: transient on Windows while a
+                # release is pending, a real permission problem if it persists.
+                now = time.monotonic()
+                perm_since = perm_since or now
+                if now - perm_since > 1.0:
+                    raise
+            else:
+                perm_since = None
             try:
                 if time.time() - lk.stat().st_mtime > STALE_LOCK_SECONDS:
                     os.unlink(lk)
@@ -105,7 +130,7 @@ def lock(p: Path, timeout: float = 10.0):
 
 def update_json(p: Path, default, fn):
     with lock(p):
-        data = read_json(p, default)
+        data = read_json(p, default, _locked=True)
         fn(data)
         write_json(p, data)
     return data
@@ -119,16 +144,14 @@ def append_jsonl(p: Path, obj: dict) -> None:
 
 
 def slugify(name: str, taken: set) -> str:
-    latin = re.findall(r"[a-z0-9]+", name.lower())
-    if latin:
-        base = "-".join(latin)
-    else:
-        words = []
-        for w in re.split(r"\s+", name):
-            t = "".join(_HEB.get(c, "") for c in w)
-            if t:
-                words.append(t)
-        base = "-".join(words) or "item"
+    parts = []
+    for tok in re.findall(r"[a-z0-9]+|[א-ת]+", name.lower()):
+        if tok[0] in _HEB:
+            tok = tok.lstrip("א") or tok  # silent leading alef
+            tok = "".join(_HEB[c] for c in tok if c in _HEB)
+        if tok:
+            parts.append(tok)
+    base = "-".join(parts) or "item"
     slug, n = base, 2
     while slug in taken:
         slug = f"{base}-{n}"

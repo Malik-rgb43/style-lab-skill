@@ -76,3 +76,60 @@ def test_slugify():
     assert store.slugify("Gabi Organic", {"gabi-organic"}) == "gabi-organic-2"
     assert re.match(r"^[a-z0-9][a-z0-9-]*$", store.slugify("!!!", set()))
     assert store.slugify("!!!", {"item"}) == "item-2"
+
+
+def test_slugify_mixed_and_hebrew_words():
+    assert store.slugify("קורס AI", set()) == "kvrs-ai"
+    assert store.slugify("גבי-אורגני", set()) == "gby-vrgny"
+    assert store.slugify("קורס 2", set()) == "kvrs-2"
+
+
+def test_read_json_tolerates_bom(home):
+    p = store.path("bom.json")
+    p.write_bytes(b"\xef\xbb\xbf" + json.dumps({"a": "קורס"}, ensure_ascii=False).encode("utf-8"))
+    assert store.read_json(p, {}) == {"a": "קורס"}
+
+
+def test_lock_real_permission_error_not_timeout(home, monkeypatch):
+    def boom(*a, **k):
+        raise PermissionError("denied")
+    monkeypatch.setattr(store.os, "open", boom)
+    with pytest.raises(PermissionError):
+        with store.lock(store.path("z.json"), timeout=5):
+            pass
+
+
+def test_readers_during_writers(home):
+    import subprocess
+    import sys
+    from pathlib import Path
+    scripts = str(Path(store.__file__).resolve().parent)
+    p = store.path("rw.json")
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); import store\n"
+        "p = store.path('rw.json'); w = int(sys.argv[2])\n"
+        "for i in range(25):\n"
+        "    store.update_json(p, [], lambda d, v=w*100+i: d.append(v))\n"
+    )
+    procs = [subprocess.Popen([sys.executable, "-c", code, scripts, str(w)]) for w in range(4)]
+    errors = []
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            try:
+                store.read_json(p, [])
+            except Exception as e:  # noqa
+                errors.append(repr(e))
+
+    readers = [threading.Thread(target=reader) for _ in range(3)]
+    for t in readers:
+        t.start()
+    codes = [pr.wait(timeout=120) for pr in procs]
+    stop.set()
+    for t in readers:
+        t.join()
+    assert errors == []
+    assert codes == [0, 0, 0, 0]
+    data = store.read_json(p, [])
+    assert len(data) == 100 and len(set(data)) == 100
