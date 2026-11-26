@@ -448,7 +448,7 @@ def _write_cover(src, dst):
         else:
             import subprocess
             vf = (f"scale='if(gt(iw,ih),{COVER_LONG_SIDE},-2)':'if(gt(iw,ih),-2,{COVER_LONG_SIDE})'")
-            r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", vf, "-q:v", "3", str(tmp)],
+            r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", vf, "-q:v", "2", str(tmp)],
                                capture_output=True, text=True)
             if r.returncode != 0:
                 return "could not convert the image (install Pillow: pip install pillow)"
