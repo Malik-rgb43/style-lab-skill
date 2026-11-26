@@ -91,3 +91,34 @@ def test_set_and_unlink(home, tmp_path):
     run_cli("clients.py", "link", "chnvt-hdgmh", a)
     assert run_cli("clients.py", "unlink", "chnvt-hdgmh", a).returncode == 0
     assert profile(home, "chnvt-hdgmh")["styles"] == []
+
+
+def test_readd_does_not_overwrite_kept_folder(home):
+    add_client()
+    run_cli("clients.py", "set", "chnvt-hdgmh", "notes=keep me")
+    run_cli("clients.py", "remove", "chnvt-hdgmh")
+    f = home / "clients" / "chnvt-hdgmh" / "client.json"
+    before = f.read_text(encoding="utf-8")
+    r = run_cli("clients.py", "add", "--name", "חנות הדגמה")
+    assert r.returncode == 1 and "restore" in r.stderr and "Traceback" not in r.stderr
+    assert f.read_text(encoding="utf-8") == before
+
+
+def test_restore_reregisters(home):
+    add_client()
+    run_cli("clients.py", "remove", "chnvt-hdgmh")
+    assert run_cli("clients.py", "restore", "nope").returncode == 1
+    r = run_cli("clients.py", "restore", "chnvt-hdgmh")
+    assert r.returncode == 0, r.stderr
+    assert run_cli("clients.py", "show", "chnvt-hdgmh").returncode == 0
+    assert run_cli("clients.py", "restore", "chnvt-hdgmh").returncode == 1
+
+
+def test_colour_inputs(home):
+    for i, (raw, want) in enumerate([("008754", "#008754"), ("#0a5", "#00AA55"), (" #008754 ", "#008754")]):
+        r = run_cli("clients.py", "add", "--slug", f"c{i}", "--name", f"C{i}", "--color", raw)
+        assert r.returncode == 0, r.stderr
+        assert profile(home, f"c{i}")["brand_colors"] == [want]
+    for bad in ("##008754", "rgb(1,2,3)"):
+        r = run_cli("clients.py", "add", "--slug", "bad", "--name", "Bad", "--color", bad)
+        assert r.returncode == 1 and "Traceback" not in r.stderr

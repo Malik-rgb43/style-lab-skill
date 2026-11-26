@@ -11,6 +11,7 @@ Commands:
     clients.py link <client> <style> [--default]         (style must exist; --default clears other defaults)
     clients.py unlink <client> <style>
     clients.py remove <key>                              (registry entry only; the folder is kept)
+    clients.py restore <slug>                            (re-register a kept folder)
 """
 import argparse
 import datetime as dt
@@ -42,7 +43,8 @@ def _fail(msg):
 
 def _norm_hex(s):
     """'#rgb' / '#rrggbb' (with or without '#', spaces ok) -> '#RRGGBB'; ValueError otherwise."""
-    h = s.strip().lstrip("#")
+    h = s.strip()
+    h = h[1:] if h.startswith("#") else h
     if re.fullmatch(r"[0-9a-fA-F]{3}", h):
         h = "".join(c * 2 for c in h)
     if not re.fullmatch(r"[0-9a-fA-F]{6}", h):
@@ -121,6 +123,9 @@ def cmd_add(reg, args):
         return _fail("slug must be lowercase latin letters, digits and dashes")
     if _find_entry(reg, slug) or _find_entry(reg, args.name):
         return _fail(f"a client named {slug!r} or {args.name!r} already exists")
+    if profile_path(slug).exists():
+        return _fail(f"a client folder already exists at {profile_path(slug).parent}; "
+                     f"restore it with `clients.py restore {slug}` or pick another --slug")
     c = {"slug": slug, "name": args.name, "aliases": [], "industry": args.industry or "", "audience": "",
          "tone": args.tone or "", "languages": [], "logo": [], "fonts": dict(DEFAULT_FONTS),
          "brand_colors": colors, "palette": None, "theme": args.theme, "styles": [], "dos": [],
@@ -216,6 +221,17 @@ def cmd_remove(reg, args):
     print(f"removed {e['slug']} from the registry (folder kept: {store.path(e['dir'])})")
 
 
+def cmd_restore(reg, args):
+    slug = args.slug
+    if _find_entry(reg, slug):
+        return _fail(f"{slug!r} is already registered")
+    c = store.read_json(profile_path(slug), None)
+    if not c:
+        return _fail(f"no client folder for {slug!r} at {profile_path(slug).parent}")
+    reg["clients"].append({"slug": c["slug"], "name": c.get("name", slug), "dir": f"clients/{c['slug']}"})
+    print(f"restored {c['slug']} ({c.get('name', '')})")
+
+
 def cmd_list(args):
     rows = load_registry()["clients"]
     if args.json:
@@ -242,7 +258,8 @@ def cmd_show(args):
     return 0
 
 
-WRITERS = {"add": cmd_add, "set": cmd_set, "link": cmd_link, "unlink": cmd_unlink, "remove": cmd_remove}
+WRITERS = {"add": cmd_add, "set": cmd_set, "link": cmd_link, "unlink": cmd_unlink, "remove": cmd_remove,
+           "restore": cmd_restore}
 
 
 def main():
@@ -258,6 +275,7 @@ def main():
     a = sub.add_parser("link"); a.add_argument("client"); a.add_argument("style"); a.add_argument("--default", action="store_true")
     a = sub.add_parser("unlink"); a.add_argument("client"); a.add_argument("style")
     a = sub.add_parser("remove"); a.add_argument("key")
+    a = sub.add_parser("restore"); a.add_argument("slug")
     args = p.parse_args()
 
     store.print_utf8()
