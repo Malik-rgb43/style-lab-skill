@@ -178,3 +178,16 @@ def slugify(name: str, taken: set) -> str:
         slug = f"{base}-{n}"
         n += 1
     return slug
+
+
+# Defaults for <home>/settings.json keys owned by research tooling (assets_log.py sound-lib).
+# sound_libraries: list of {name, path, kinds: [sfx|music|ambience]}.
+SETTINGS_DEFAULTS = {"sound_libraries": []}
+
+
+def settings() -> dict:
+    """settings.json merged over SETTINGS_DEFAULTS (existing keys keep their values)."""
+    data = read_json(path("settings.json"), {})
+    out = copy.deepcopy(SETTINGS_DEFAULTS)
+    out.update(data)
+    return out
