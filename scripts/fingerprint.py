@@ -2,7 +2,7 @@
 """Fingerprint of a reference set: per-layer metrics with spreads, traits, duplicates, held-out ids.
 
 Reads <pack>/analysis/<id>/ for every video (all files optional except measure.json):
-  measure.json (measure/1), motion.json, sound.json (sound/1), words.json ({language, words}),
+  measure.json (measure/1), motion.json, sound.json (sound/1), look.json (look/1), words.json ({language, words}),
   events.manual.json ([{t, type, label, attrs}], written by Claude from the sheets),
   thumbs.json ([aHash hex strings], see --thumbs). The source video path, when known, is the "source"
   field of measure.json (or of an optional analysis/<id>/source.json {"source": path}).
@@ -18,6 +18,8 @@ metrics}}, traits [{name, seen_in, share, status}], not_run}. A number is {media
 A trait seen in under 30 % of the training videos is an "option", otherwise a "rule-candidate".
 A layer whose source is not "refs" takes its metrics from tokens.json (code) and never from the
 reference measurements; a code layer whose tokens.json comes from another project is refused (exit 2).
+Layer "look" (grain, vignette, sharpness, tone, split toning, halation, chromatic aberration, letterbox,
+flicker, text finish; from look.json) is measured from the references only: its source is always "refs".
 
 Duplicates: two videos whose 10 aHash thumbnails are at a mean Hamming distance of at most 6 (or, with no
 thumbs.json, that share the measure.json video.sha256) are one video; the later one is dropped from
@@ -43,7 +45,17 @@ RULE_SHARE = 0.30          # a trait seen in at least this share of the training
 DUP_HAMMING = 6            # mean Hamming distance (of 64 bits) at or below which two videos are duplicates
 THUMBS_N = 10
 BIG_TEXT_PCT = 8.0         # a text box at least this tall (percent of the frame) is "big text"
-LAYER_NAMES = code_tokens.LAYERS
+REF_ONLY_LAYERS = ("look",)   # measured from the references only; layers.json cannot point them elsewhere
+LAYER_NAMES = tuple(code_tokens.LAYERS) + REF_ONLY_LAYERS
+# layers.look.metrics keys (cover.py and the recipes read them): look.json summary.<key>.median ...
+LOOK_SUMMARY_KEYS = ("grain_std", "grain_size_px", "vignette_falloff", "sharp_centre_edge_ratio", "tone_black_pt",
+                     "tone_white_pt", "tone_contrast", "shadow_tint_a", "shadow_tint_b", "highlight_tint_a",
+                     "highlight_tint_b", "sat", "halation", "chroma_ab_px", "letterbox_top", "letterbox_bottom",
+                     "flicker")
+# ... and from look.json text_finish
+LOOK_TEXT_KEYS = {"text_stroke_px": ("stroke_px", "median"), "text_shadow_share": ("shadow_share",),
+                  "text_glow_share": ("glow_share",)}
+LOOK_METRICS = LOOK_SUMMARY_KEYS + tuple(LOOK_TEXT_KEYS)
 
 
 class BadInput(ValueError):
@@ -88,8 +100,8 @@ def _read(p, default):
 
 
 def load_analysis(d):
-    """One analysis folder -> {id, measure, motion, sound, words, manual, thumbs, source}. Missing files are
-    None (manual: [])."""
+    """One analysis folder -> {id, measure, motion, sound, look, words, manual, thumbs, source}. Missing files
+    are None (manual: [])."""
     d = Path(d)
     m = _read(d / "measure.json", None)
     if not isinstance(m, dict):
@@ -119,7 +131,8 @@ def load_analysis(d):
                 raise BadInput(f"{d.name}: events.manual.json entry {k}: {why}")
     th = _read(d / "thumbs.json", None)
     return {"id": d.name, "measure": m, "motion": _read(d / "motion.json", None),
-            "sound": _read(d / "sound.json", None), "words": _read(d / "words.json", None),
+            "sound": _read(d / "sound.json", None), "look": _read(d / "look.json", None),
+            "words": _read(d / "words.json", None),
             "manual": manual,
             "thumbs": th if isinstance(th, list) and all(h is None or isinstance(h, str) for h in th) else None,
             "source": src if isinstance(src, str) and src else None, "dir": str(d)}
@@ -489,6 +502,20 @@ def motion_eases(analyses, ids):
     return out
 
 
+def look_value(a, key):
+    """One video's value of a layers.look metric from its look.json (None when absent)."""
+    lk = a.get("look") if isinstance(a.get("look"), dict) else None
+    if lk is None:
+        return None
+    if key in LOOK_TEXT_KEYS:
+        v = lk.get("text_finish")
+        for part in LOOK_TEXT_KEYS[key]:
+            v = v.get(part) if isinstance(v, dict) else None
+        return v
+    v = (lk.get("summary") or {}).get(key)
+    return v.get("median") if isinstance(v, dict) else None
+
+
 def ref_metrics(layer, analyses, ids):
     """Metrics of one layer measured from the reference videos (source "refs")."""
     n = len(ids)
@@ -520,6 +547,8 @@ def ref_metrics(layer, analyses, ids):
                 "words_per_s": sp(_vals(A, ids, lambda a: M(a)["words_per_s"])),
                 "duration_s": sp(_vals(A, ids, _dur)),
                 "unique_fps": sp(_vals(A, ids, lambda a: M(a)["cadence"]["unique_fps"]))}
+    if layer == "look":
+        return {k: sp(_vals(A, ids, lambda a, k=k: look_value(a, k))) for k in LOOK_METRICS}
     if layer == "sound":
         return {"lufs": sp(_vals(A, ids, lambda a: M(a)["loudness"]["lufs"])),
                 "sfx_per_min": sp(_vals(A, ids, lambda a: _per_min(len(so(a)["sfx"]), _dur(a)))),
@@ -542,8 +571,8 @@ def build_layers(pack, analyses, ids, not_run):
     tokens = _read(Path(pack) / "tokens.json", None)
     out = {}
     for name in LAYER_NAMES:
-        entry = layers[name]
-        src = entry.get("source", "refs")
+        entry = layers.get(name) or {"source": "refs", "ref": ""}
+        src = "refs" if name in REF_ONLY_LAYERS else entry.get("source", "refs")
         if src == "refs":
             out[name] = {"source": "refs", "metrics": ref_metrics(name, analyses, ids)}
             if name == "motion":
