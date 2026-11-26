@@ -5,6 +5,7 @@ Files: <store home>/taste/<client slug | _none>.jsonl, one JSON object per line.
 Commands:
     taste.py log [--client C] [--style S] --step plan|frames|motion|palette|idea --picked ID
                  [--rejected ID ...] --project P [--tags picked=warm,flat rejected=3d,neon] [--note ..]
+                 [--sig-picked SIG] [--sig-rejected SIG ...]
     taste.py summary [--client C] [--style S] [--last 50] [--json]
 
 summary: prefers = tags picked >= 3 times and >= 2x as often as rejected; avoids = tags rejected
@@ -61,7 +62,7 @@ def _file(slug):
     return store.path("taste", f"{slug}.jsonl")
 
 
-def log(client, style, step, picked, rejected, project, note="", tags=None):
+def log(client, style, step, picked, rejected, project, note="", tags=None, sigs=None):
     if step not in STEPS:
         raise _Bad(f"bad step {step!r}: one of {', '.join(STEPS)}")
     slug = _slug(client)
@@ -69,6 +70,8 @@ def log(client, style, step, picked, rejected, project, note="", tags=None):
            "style": _style_slug(style), "step": step, "project": project, "picked": picked,
            "rejected": list(rejected or []), "tags": tags or {"picked": [], "rejected": []},
            "note": note}
+    if sigs is not None:
+        rec["sigs"] = {"picked": sigs.get("picked"), "rejected": list(sigs.get("rejected") or [])}
     store.append_jsonl(_file(slug), rec)
     return rec
 
@@ -83,6 +86,21 @@ def _read(slug):
             out.append(json.loads(line))
         except ValueError:
             pass
+    return out
+
+
+def used_sigs(client, step, exclude_project=None):
+    """Option signatures the client already picked / rejected at `step` (lines without `sigs` are skipped)."""
+    out = {"picked": set(), "rejected": set()}
+    for r in _read(_slug(client)):
+        if r.get("step") != step or (exclude_project is not None and r.get("project") == exclude_project):
+            continue
+        sg = r.get("sigs")
+        if not isinstance(sg, dict):
+            continue
+        if sg.get("picked"):
+            out["picked"].add(sg["picked"])
+        out["rejected"].update(x for x in (sg.get("rejected") or []) if x)
     return out
 
 
@@ -119,6 +137,7 @@ def _main(argv=None):
     a.add_argument("--step", required=True, choices=STEPS); a.add_argument("--picked", required=True)
     a.add_argument("--rejected", action="append", default=[]); a.add_argument("--project", required=True)
     a.add_argument("--tags", nargs="*", default=[]); a.add_argument("--note", default="")
+    a.add_argument("--sig-picked"); a.add_argument("--sig-rejected", action="append", default=[])
     a = sub.add_parser("summary")
     a.add_argument("--client"); a.add_argument("--style")
     a.add_argument("--last", type=int, default=50); a.add_argument("--json", action="store_true")
@@ -127,7 +146,9 @@ def _main(argv=None):
     try:
         if args.cmd == "log":
             rec = log(args.client, args.style, args.step, args.picked, args.rejected, args.project,
-                      args.note, parse_tags(args.tags))
+                      args.note, parse_tags(args.tags),
+                      {"picked": args.sig_picked, "rejected": args.sig_rejected}
+                      if args.sig_picked or args.sig_rejected else None)
             print(json.dumps(rec, ensure_ascii=False))
             return 0
         s = summary(args.client, args.style, args.last)
