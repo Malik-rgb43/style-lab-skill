@@ -41,19 +41,35 @@ the script exits 3 naming the model, its size and `--allow-download`.
    Course flags override a preset: `--fps --lead-ms --tail-ms --inside-ms --merge-gap-ms
    --pause-max-ms --pause-keep-ms --sentence-keep-ms --pause-min-cut-frames --pause-snap-ms
    --end-air-ms --sliver-frames --xfade-ms --crf --excl-overlap --no-render`.
-   Outputs: `<stem>.mp4`, `<stem>.cuts.json`, `<stem>.words.json` (remapped to the cut timeline).
-   In `cuts.json` read `soft_joins` (a join with no quiet frame in reach), `long_gaps_kept` (a gap
-   kept because no quiet frame existed) and `channel_balance_db` (left minus right of the source;
-   the output is balanced).
+   Outputs: `<stem>.mp4`, `<stem>.cuts.json`, `<stem>.words.json` (remapped to the cut timeline),
+   and `placeholders.json` when keep.json has placeholders. `--end-air-ms 0` switches the end air
+   off, also under `--preset reels`. In `cuts.json` read `soft_joins` (a join with no quiet frame
+   in reach), `long_gaps_kept` (a gap kept because no quiet frame existed), `dropped_slivers`
+   (pieces too short to keep; each lists `lost_words`, and the CLI prints a warning for them: a
+   word you wanted is gone, widen the keep range) and `channel_balance_db` (left minus right of
+   the source; the output is balanced). For `vsl` the CLI ends with `next: tighten.py <stem>
+   --out <stem>.tight, then check_cut.py <stem>.tight`.
 6. **VSL / talking head only**: `python scripts/tighten.py <stem> --out <out_stem>
-   [--min-pause-ms 250] [--no-placeholders]` joins without dead air; its edge check must be 0 dB
-   off or it exits 1 (then fix the cut, do not ship it).
-7. **Check**: `python scripts/check_cut.py <stem> [--lang] [--model] [--heard] [--explain]
-   [--max-gap-ms 450] [--max-word-ms 1200] [--join-db 12] [--allow-download]` re-transcribes the
-   whole cut without VAD and diffs it against the expected words. Exit 0 = clean, 1 = items left,
-   3 = missing package or model. Fix and re-run until clean, or until every remaining item is
-   explained to the user (a mis-heard word that is really there, a deliberate pause).
-8. Only then planning (B2). Everything after uses `<stem>.mp4` and `<stem>.words.json`.
+   [--min-pause-ms 250] [--no-placeholders] [--gap-ms 0] [--voice-db 8] [--soft-db 4]
+   [--check-db 0.05]` joins without dead air. Flags: `--min-pause-ms` closes every pause at least
+   this long; `--no-placeholders` drops placeholders and closes their joins; `--gap-ms` room tone
+   left between a voice end and the next start; `--voice-db` sound = room tone + this; `--soft-db`
+   an edge = 3 slices below room tone + this; `--check-db` edge check tolerance. Outputs
+   `<out_stem>.mp4/.cuts.json/.words.json`; cuts.json carries `edge_check`, `missing_check`,
+   `edge_bad`, and the informational `voice_not_died_away` and `sound_in_pause` (joins kept as the
+   cut made them). Exit 1 = an edge off by more than `--check-db` (default 0.05 dB) or sound
+   missing from the output (any `edge_bad` item; the files are still written, fix the cut, do not
+   ship it); exit 3 = ffmpeg missing.
+7. **Check**: `python scripts/check_cut.py <final stem> [--lang] [--model] [--heard] [--explain]
+   [--max-gap-ms 450] [--max-word-ms 1200] [--join-db 12] [--max-balance-db 1.0]
+   [--allow-download]`, where the final stem is the tighten output for vsl and the cut stem
+   otherwise. It re-transcribes the whole cut without VAD and diffs it against the expected words;
+   writes `<stem>.check.words.json` (unless `--heard`) and `<stem>.check.txt`. Exit 0 = clean,
+   1 = items left, 3 = missing package or model. `--explain` takes `{"items": [{"match": "text in
+   the item", "why": "reason", "t": seconds (optional)}]}`; explained items are listed but no
+   longer fail. Fix and re-run until clean, or until every remaining item is explained to the
+   user (a mis-heard word that is really there, a deliberate pause).
+8. Only then planning (B2), on `<final stem>.mp4` and `<final stem>.words.json`.
 
 ## Fallback
 If the stack is missing and the user will not install it, say so in Hebrew, name the cost (long

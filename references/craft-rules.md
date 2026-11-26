@@ -85,7 +85,7 @@ than once. Numbers are for 1080x1920 at 30 fps; scale them for other formats.
 - No cut in the middle of a word. Check every join and the last word. If the video ends
   mid-speech, hold the last frame ~1 s and let the audio finish.
 - Cut off-topic openings, laughs and throat clears even if they were said twice.
-- Verify the finished cut by transcribing the cut file itself (`verify_cut.py`).
+- Verify the finished cut by transcribing the cut file itself (`check_cut.py`; `verify_cut.py` only as the fallback).
 
 ## 7. Sound
 - A sound effect only on a visible event (an entrance, a click, a landing, a full-face move).

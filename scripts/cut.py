@@ -20,7 +20,7 @@ force-aligned word edges from align.py). Rules:
     is balanced (cuts.json channel_balance_db = the source difference, left minus right)
 
 Usage:
-  cut.py <source> <words.aligned.json> <keep.json> --out <dir/stem> [--preset reels|lesson]
+  cut.py <source> <words.aligned.json> <keep.json> --out <dir/stem> [--preset reels|lesson|vsl]
          [--fps N] [--lead-ms N] ... [--no-render]
 
 Presets: lesson (default) = --fps 25 --lead-ms 80 --tail-ms 120 --merge-gap-ms 250
@@ -875,7 +875,7 @@ def main(argv=None):
     ap.add_argument("keep", help="keep.json")
     ap.add_argument("--out", required=True, help="output stem, e.g. 1.1/edit_ready.v3")
     ap.add_argument("--preset", choices=sorted(PRESETS), default=None,
-                    help="lesson (default, the course tool values) or reels; explicit flags override it")
+                    help="lesson (default, the course tool values), reels or vsl; explicit flags override it")
     ap.add_argument("--fps", type=int)
     ap.add_argument("--lead-ms", type=int)
     ap.add_argument("--tail-ms", type=int)

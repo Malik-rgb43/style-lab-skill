@@ -56,7 +56,7 @@ one is never fetched without the user's yes (`--allow-download`, exit 3 otherwis
 | torch, torchaudio | `pip install torch torchaudio` | about 200 MB CPU build, more with CUDA |
 | transformers | `pip install transformers` | about 10 MB |
 | faster-whisper | `pip install faster-whisper` | small |
-| Hebrew aligner `imvladikon/wav2vec2-large-xlsr-53-hebrew` | `align.py ... --allow-download` | about 1.2 GB |
+| Hebrew aligner `imvladikon/wav2vec2-large-xlsr-53-hebrew` | `align.py ... --allow-download` | about 1.3 GB |
 | Hebrew check ASR `ivrit-ai/whisper-large-v3-turbo-ct2` | `check_cut.py ... --allow-download` | about 1.6 GB |
 | Other-language aligner (torchaudio MMS_FA) | `align.py --lang en ... --allow-download` | about 1.2 GB |
 | Other-language check ASR `mobiuslabsgmbh/faster-whisper-large-v3-turbo` | `check_cut.py ... --allow-download` | about 1.6 GB |
