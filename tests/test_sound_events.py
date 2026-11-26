@@ -371,3 +371,65 @@ def test_bad_input(tmp_path):
         se.word_spans({"words": [{"start": "x", "end": 1.0}]})
     with pytest.raises(se.BadInput):
         se.cut_times({"cuts": "nope"})
+
+
+# ---------------------------------------------------------------- timbre + sections
+
+def _bursts(sr, n=4, on=0.3, gap=1.0, seed=0):
+    rng = np.random.default_rng(seed)
+    y = np.zeros(int((n * (on + gap) + 0.5) * sr))
+    spans = []
+    for i in range(n):
+        a = 0.3 + i * (on + gap)
+        i0 = int(a * sr)
+        y[i0:i0 + int(on * sr)] = rng.normal(0, 0.1, int(on * sr))
+        spans.append((a, a + on))
+    return y, spans
+
+
+def test_voice_compression_and_room():
+    sr = se.AR
+    dry, spans = _bursts(sr)
+    t = np.arange(int(1.0 * sr)) / sr
+    ir = np.random.default_rng(1).normal(0, 1, len(t)) * np.exp(-6.91 * t / 0.4)
+    ir[0] = 1.0
+    wet = np.convolve(dry, ir)[: len(dry)]
+    wet *= np.abs(dry).max() / np.abs(wet).max()
+    r_dry = se.timbre(dry, sr, spans)["rt60_est_s"]
+    r_wet = se.timbre(wet, sr, spans)["rt60_est_s"]
+    assert r_dry is not None and r_wet is not None and r_wet - r_dry > 0.2
+    assert r_wet == pytest.approx(0.4, abs=0.15)
+    limited = np.clip(dry, -0.1, 0.1)
+    assert se.timbre(limited, sr, spans)["crest_db"] < se.timbre(dry, sr, spans)["crest_db"] - 3
+    # white noise is flat per Hz, so it rises ~3 dB per octave; de-ess reads the 5-9 kHz share
+    tm = se.timbre(dry, sr, spans)
+    assert tm["spectral_tilt_db_per_oct"] == pytest.approx(3.0, abs=1.0)
+    assert tm["de_ess_db"] is not None and tm["timbre_scope"] == "words"
+    vp = se.voice_profile(dry, sr, spans)
+    assert {"spectral_tilt_db_per_oct", "crest_db", "rt60_est_s", "de_ess_db"} <= set(vp)
+
+
+def test_timbre_silent_and_short():
+    sr = se.AR
+    out = se.timbre(np.zeros(sr), sr, [(0.1, 0.4)])
+    assert out["crest_db"] is None and out["rt60_est_s"] is None
+    assert se.timbre(np.zeros(100), sr, None)["spectral_tilt_db_per_oct"] is None
+
+
+def test_music_sections_split_at_change():
+    sr = se.AR
+    t = np.arange(int(10 * sr)) / sr
+    low = 0.2 * np.sin(2 * np.pi * 110 * t) * (1 + 0.5 * np.sin(2 * np.pi * 2 * t))
+    high = 0.05 * np.random.default_rng(2).normal(0, 1, len(t))
+    secs = se.music_sections(np.concatenate([low, high]), sr)
+    assert len(secs) == 2 and secs[0]["t1"] == pytest.approx(10.0, abs=1.01)
+    assert secs[0]["t0"] == 0.0 and secs[-1]["t1"] == pytest.approx(20.0, abs=0.05)
+    one = se.music_sections(low, sr)
+    assert len(one) == 1
+
+
+def test_music_sections_energy_is_dbfs():
+    sr = se.AR
+    t = np.arange(int(6 * sr)) / sr
+    y = np.sin(2 * np.pi * 440 * t) * 10 ** (-20 / 20) * np.sqrt(2)  # -20 dBFS RMS
+    assert se.music_sections(y, sr)[0]["energy"] == pytest.approx(-20.0, abs=0.5)

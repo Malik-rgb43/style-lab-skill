@@ -142,6 +142,19 @@ THRESHOLDS = {
     "duck_bins_db": 30.0,          # music bins: within 30 dB of the strongest music-alone bin
     "duck_percentile": 25.0,       # bins the voice leaves alone have the lowest ratio
     # voice
+    "tilt_lo_hz": 125.0,           # voice spectral tilt: dB per octave fitted over these octave bands
+    "tilt_hi_hz": 8000.0,
+    "crest_pct": 99.9,             # crest = this percentile of |x| over the RMS, in the word audio
+    "rt60_min_gap_s": 0.2,         # a word end is read for the room only when this much quiet follows
+    "rt60_window_s": 0.8,          # ... over at most this long
+    "rt60_drop_db": 20.0,          # T20: 3 x the time the level takes to fall this far after the end
+    "rt60_min_ends": 2,
+    "sib_band_hz": (5000.0, 9000.0),  # de-ess: sibilance band over 100 Hz..5 kHz, dB
+    "section_win_s": 1.0,          # music sections: features per window, Foote novelty kernel half-width
+    "section_kernel_w": 4,
+    "section_min_s": 4.0,
+    "section_db_scale": 6.0,       # windows this many dB apart (RMS over bands) are ~37 % similar
+    "section_min_novelty": 0.3,    # 0..1; a boundary needs at least this
     "pause_min_s": 0.1,            # gaps between words shorter than this are not pauses
     # coupling
     "couple_window_s": 0.3,        # an SFX this close to a cut / move / word onset is coupled to it
@@ -1080,7 +1093,8 @@ def _music(y, sr, spans=None, cuts=None, tempo_y=None):
     prof = {"present": bool(present), "bpm": _r(bpm, 2), "bpm_conf": _r(conf, 3), "bpm_method": method,
             "onset_periodicity_bpm": _r(periodicity, 2),
             "bpm_octave_check": octave, "beats_n": len(beats), "energy_per_s": energy,
-            "bed_level_db": _r(bed_db, 1), "ducking_db": _r(ducking, 1), "beat_cut_share": share}
+            "bed_level_db": _r(bed_db, 1), "ducking_db": _r(ducking, 1), "beat_cut_share": share,
+            "sections": music_sections(y, sr, alone) if present else []}
     return prof, beats
 
 
@@ -1203,6 +1217,148 @@ def voice_profile(y, sr, words=None):
         out["pause_median_s"] = _r(np.median(gaps), 3) if gaps else None
     elif mix is not None:
         out["lufs"], out["lufs_scope"] = _r(mix, 2), "mix"
+    out.update(timbre(y, sr, spans))
+    return out
+
+
+def _span_idx(n, sr, spans):
+    if not spans:
+        return np.arange(n)
+    parts = [np.arange(max(0, int(a * sr)), min(n, int(b * sr))) for a, b in spans]
+    parts = [p for p in parts if len(p)]
+    return np.concatenate(parts) if parts else np.zeros(0, int)
+
+
+def spectral_tilt(x, sr):
+    """dB per octave: the slope of the octave-band levels from tilt_lo_hz to tilt_hi_hz (None if silent)."""
+    T = THRESHOLDS
+    if len(x) < 2048:
+        return None
+    P, freqs = _power(x, sr, 2048, 1024)
+    spec = P.mean(axis=0)
+    lo, hi = T["tilt_lo_hz"], min(T["tilt_hi_hz"], sr / 2 * 0.95)
+    centres, lv = [], []
+    f = lo
+    while f * 2 ** 0.5 <= hi:
+        m = (freqs >= f / 2 ** 0.5) & (freqs < f * 2 ** 0.5)
+        if m.any() and spec[m].sum() > 0:
+            centres.append(math.log2(f))
+            lv.append(float(_db(spec[m].sum())))
+        f *= 2
+    if len(centres) < 3:
+        return None
+    return float(np.polyfit(centres, lv, 1)[0])
+
+
+def crest_db(x):
+    """Peak (crest_pct percentile of |x|) over RMS in dB; lower = more compressed."""
+    x = np.asarray(x, dtype=np.float64)
+    rms = float(np.sqrt(np.mean(x ** 2))) if len(x) else 0.0
+    if rms <= 1e-9:
+        return None
+    return float(20 * math.log10(max(float(np.percentile(np.abs(x), THRESHOLDS["crest_pct"])), 1e-12) / rms))
+
+
+def rt60_estimate(y, sr, spans):
+    """Room decay, estimated from the level after each phrase end that has quiet after it (T20 x 3):
+    median seconds, or None with fewer than rt60_min_ends readable ends."""
+    T = THRESHOLDS
+    if not spans:
+        return None
+    dur = len(y) / sr
+    vals = []
+    for i, (_, end) in enumerate(spans):
+        nxt = spans[i + 1][0] if i + 1 < len(spans) else dur
+        gap = nxt - end
+        if gap < T["rt60_min_gap_s"]:
+            continue
+        a, b = max(0.0, end - 0.03), min(dur, end + min(gap, T["rt60_window_s"]))
+        tt, e = _env(y, sr, a, b)
+        if len(e) < 10:
+            continue
+        head = tt <= end + 0.02
+        if not head.any():
+            continue
+        k = int(np.argmax(np.where(head, e, -np.inf)))
+        L0, t0 = float(e[k]), float(tt[k])
+        below = np.nonzero(e[k:] < L0 - T["rt60_drop_db"])[0]
+        if len(below):
+            vals.append(3.0 * (float(tt[k + below[0]]) - t0))
+            continue
+        seg_t, seg_e = tt[k:], e[k:]
+        if len(seg_t) >= 5 and seg_t[-1] - seg_t[0] > 0.05:
+            slope = float(np.polyfit(seg_t, seg_e, 1)[0])
+            if slope < -1e-3:
+                vals.append(min(10.0, 60.0 / -slope))
+    return float(np.median(vals)) if len(vals) >= T["rt60_min_ends"] else None
+
+
+def de_ess(x, sr):
+    """Sibilance band energy over 100 Hz..5 kHz, in dB (higher = more sibilant / less de-essed)."""
+    lo_s, hi_s = THRESHOLDS["sib_band_hz"]
+    if len(x) < 1024 or sr / 2 <= lo_s:
+        return None
+    P, freqs = _power(x, sr, 1024, 512)
+    spec = P.mean(axis=0)
+    sib = spec[(freqs >= lo_s) & (freqs < min(hi_s, sr / 2))].sum()
+    rest = spec[(freqs >= 100) & (freqs < lo_s)].sum()
+    if sib <= 0 or rest <= 0:
+        return None
+    return float(_db(sib) - _db(rest))
+
+
+def timbre(y, sr, spans=None):
+    """{spectral_tilt_db_per_oct, crest_db, rt60_est_s, de_ess_db}, from the word audio (the mix without words)."""
+    y = _mono(np.asarray(y, dtype=np.float64))
+    x = y[_span_idx(len(y), sr, spans)] if len(y) else y
+    return {"spectral_tilt_db_per_oct": _r(spectral_tilt(x, sr), 2), "crest_db": _r(crest_db(x), 2),
+            "rt60_est_s": _r(rt60_estimate(y, sr, spans), 3), "de_ess_db": _r(de_ess(x, sr), 2),
+            "timbre_scope": "words" if spans else "mix"}
+
+
+def music_sections(y, sr, mask_s=None):
+    """[{t0, t1, energy}] from Foote novelty over per-window band levels (checkerboard kernel on the
+    self-similarity matrix). mask_s: per-10 ms booleans of music-alone time; energy = mean dBFS there."""
+    T = THRESHOLDS
+    L, hop_s, _ = _band_levels(y, sr)
+    dur = len(_mono(y)) / sr
+    w = max(1, int(round(T["section_win_s"] / hop_s)))
+    n = len(L) // w
+    if n < 2:
+        return [{"t0": 0.0, "t1": _r(dur, 2), "energy": None}] if dur > 0 else []
+    F = L[: n * w].reshape(n, w, -1).mean(axis=1)
+    # similarity from the RMS dB distance between windows (a steady bed is 1 everywhere, so a tiny
+    # wobble never becomes a boundary); Foote novelty normalised to 0..1
+    d = np.sqrt(((F[:, None, :] - F[None, :, :]) ** 2).mean(axis=2))
+    S = np.exp(-(d / T["section_db_scale"]) ** 2)
+    kw = T["section_kernel_w"]
+    sign = np.concatenate([-np.ones(kw), np.ones(kw)])
+    K = np.outer(sign, sign)
+    nov = np.zeros(n)
+    for i in range(1, n):
+        k = min(kw, i, n - i)
+        sub = S[i - k:i + k, i - k:i + k]
+        kk = K[kw - k:kw + k, kw - k:kw + k]
+        nov[i] = max(0.0, float((sub * kk).sum()) / (2 * k * k))
+    min_w = max(1, int(round(T["section_min_s"] / T["section_win_s"])))
+    bounds = []
+    for i in np.argsort(-nov):
+        if nov[i] < T["section_min_novelty"]:
+            break
+        if all(abs(i - b) >= min_w for b in bounds) and min_w <= i <= n - min_w:
+            bounds.append(int(i))
+    edges = [0] + sorted(bounds) + [n]
+    _, lv = _env(_mono(y), sr, 0.0, dur, hop_s=hop_s)  # dBFS, same scale as energy_per_s
+    lin = 10 ** (lv / 10)
+    out = []
+    for a, b in zip(edges[:-1], edges[1:]):
+        seg = lin[a * w:b * w]
+        if mask_s is not None:
+            m = np.asarray(mask_s[a * w:b * w], bool)
+            k = min(len(m), len(seg))
+            seg = seg[:k][m[:k]]
+        out.append({"t0": _r(a * w * hop_s, 2), "t1": _r(dur if b == n else b * w * hop_s, 2),
+                    "energy": _r(float(_db(seg.mean())), 1) if len(seg) else None})
     return out
 
 

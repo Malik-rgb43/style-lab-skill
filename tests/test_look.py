@@ -256,3 +256,19 @@ def test_fingerprint_reads_look(tmp_path):
     assert lk["metrics"]["text_stroke_px"]["median"] == 2.0
     assert lk["metrics"]["text_shadow_share"]["median"] == 0.5
     assert lk["metrics"]["text_glow_share"]["median"] == 0.0
+
+
+def test_fingerprint_reads_voice_timbre(tmp_path):
+    for k, crest in enumerate((9.0, 11.0, 13.0)):
+        d = tmp_path / "analysis" / f"V{k}"
+        d.mkdir(parents=True)
+        (d / "measure.json").write_text(json.dumps({"schema": "measure/1", "video": {
+            "sha256": "%064x" % (k + 1), "duration_s": 60.0}, "cuts": [], "shots": [], "not_run": []}),
+            encoding="utf-8")
+        (d / "sound.json").write_text(json.dumps({"schema": "sound/1", "sfx": [], "voice": {
+            "crest_db": crest, "rt60_est_s": 0.3, "spectral_tilt_db_per_oct": -4.0, "de_ess_db": -18.0},
+            "music": {"present": True, "bpm": 120.0, "ducking_db": 6.0,
+                      "sections": [{"t0": 0, "t1": 30}, {"t0": 30, "t1": 60}]}}), encoding="utf-8")
+    m = fp.build(tmp_path)["layers"]["sound"]["metrics"]
+    assert m["crest_db"]["median"] == 11.0 and m["rt60_est_s"]["median"] == 0.3
+    assert m["music_sections_per_min"]["median"] == 2.0 and m["music_ducking_db"]["median"] == 6.0

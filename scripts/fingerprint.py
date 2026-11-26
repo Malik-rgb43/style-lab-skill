@@ -56,6 +56,7 @@ LOOK_SUMMARY_KEYS = ("grain_std", "grain_size_px", "vignette_falloff", "sharp_ce
 LOOK_TEXT_KEYS = {"text_stroke_px": ("stroke_px", "median"), "text_shadow_share": ("shadow_share",),
                   "text_glow_share": ("glow_share",)}
 LOOK_METRICS = LOOK_SUMMARY_KEYS + tuple(LOOK_TEXT_KEYS)
+VOICE_TIMBRE_KEYS = ("spectral_tilt_db_per_oct", "crest_db", "rt60_est_s", "de_ess_db")  # sound.json voice
 
 
 class BadInput(ValueError):
@@ -554,7 +555,11 @@ def ref_metrics(layer, analyses, ids):
                 "sfx_per_min": sp(_vals(A, ids, lambda a: _per_min(len(so(a)["sfx"]), _dur(a)))),
                 "sfx_level_vs_voice_db": sp(_vals(A, ids, lambda a: _median(
                     [s.get("level_vs_voice_db") for s in so(a)["sfx"]]))),
-                "bpm": sp(_vals(A, ids, lambda a: so(a)["music"]["bpm"]))}
+                "bpm": sp(_vals(A, ids, lambda a: so(a)["music"]["bpm"])),
+                "music_ducking_db": sp(_vals(A, ids, lambda a: so(a)["music"]["ducking_db"])),
+                "music_sections_per_min": sp(_vals(A, ids, lambda a: _per_min(len(so(a)["music"]["sections"]), _dur(a))
+                                                   if so(a)["music"]["present"] else None)),
+                **{k: sp(_vals(A, ids, lambda a, k=k: so(a)["voice"][k])) for k in VOICE_TIMBRE_KEYS}}
     return {}
 
 
