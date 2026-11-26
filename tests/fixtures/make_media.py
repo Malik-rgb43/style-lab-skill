@@ -96,3 +96,92 @@ def words_doc(spans, flags=None, asr=None, texts=None, lang="he"):
 def write_json(path, doc):
     Path(path).write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
     return Path(path)
+
+
+# ---------------------------------------------------------------- motion clips (measure_video tests)
+
+_BG_CYCLE = [(20, 20, 30), (210, 200, 180), (70, 30, 110), (230, 120, 40), (30, 150, 90)]
+_MOVE_DEFAULT = {"x": 0.5, "y": 0.5, "scale": 1.0, "opacity": 1.0}
+
+
+def _ease(name, p):
+    p = min(1.0, max(0.0, p))
+    if name == "linear":
+        return p
+    if name == "power2.out":
+        return 1 - (1 - p) ** 2
+    if name == "power3.inout":
+        return 4 * p ** 3 if p < 0.5 else 1 - (-2 * p + 2) ** 3 / 2
+    if name == "back.out":
+        c1 = 1.70158
+        return 1 + (c1 + 1) * (p - 1) ** 3 + c1 * (p - 1) ** 2
+    raise ValueError(f"unknown ease {name!r}")
+
+
+def _prop_at(moves, prop, t):
+    ms = sorted((m for m in moves if m[2] == prop), key=lambda m: m[0])
+    if not ms:
+        return _MOVE_DEFAULT[prop]
+    val = ms[0][3]
+    for t0, t1, _p, v0, v1, ease in ms:
+        if t < t0:
+            return val
+        if t >= t1:
+            val = v1
+        else:
+            val = v0 + (v1 - v0) * _ease(ease, (t - t0) / (t1 - t0))
+            return val
+    return val
+
+
+def _bg_at(i, fps, cuts):
+    """Background colour of frame i: cuts are float times (hard) or (time, dissolve_frames)."""
+    norm = sorted((c, 0) if not isinstance(c, (tuple, list)) else (c[0], int(c[1])) for c in cuts)
+    seg, mix_to, alpha = 0, None, 0.0
+    for k, (ct, dn) in enumerate(norm):
+        f0 = int(round(ct * fps))
+        if i >= f0 + dn:
+            seg = k + 1
+        elif i >= f0 and dn:
+            seg, mix_to, alpha = k, k + 1, (i - f0 + 1) / dn
+    a = np.array(_BG_CYCLE[seg % len(_BG_CYCLE)], float)
+    if mix_to is not None:
+        b = np.array(_BG_CYCLE[mix_to % len(_BG_CYCLE)], float)
+        a = a * (1 - alpha) + b * alpha
+    return a
+
+
+def make_motion_clip(path, *, dur_s, fps, moves=(), cuts=(), size="320x180", stepped=1):
+    """Silent clip: a white box on a dark background, lossless H.264, so motion is exact.
+
+    moves: [(t0, t1, prop, v0, v1, ease)], prop x|y (frame fractions of the box centre) |scale
+    (1 = box side 20% of the height) | opacity; ease linear|power2.out|power3.inout|back.out.
+    cuts: hard-cut times (they change the background colour); (time, n_frames) is an n-frame
+    cross-dissolve of the background. stepped=2 holds every frame twice ("on twos")."""
+    path = Path(path)
+    w, h = (int(v) for v in size.split("x"))
+    n = int(round(dur_s * fps))
+    cols, rows = np.arange(w)[None, :], np.arange(h)[:, None]
+    proc = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", size, "-r", str(fps),
+         "-i", "-", "-c:v", "libx264", "-preset", "ultrafast", "-qp", "0", "-g", str(fps),
+         "-pix_fmt", "yuv420p", str(path)], stdin=subprocess.PIPE)
+    try:
+        for i in range(n):
+            bg = _bg_at(i, fps, cuts)
+            t = ((i // stepped) * stepped) / fps
+            cx, cy = _prop_at(moves, "x", t) * w, _prop_at(moves, "y", t) * h
+            side = _prop_at(moves, "scale", t) * 0.2 * h
+            op = _prop_at(moves, "opacity", t)
+            covx = np.clip(np.minimum(cols + 1, cx + side / 2) - np.maximum(cols, cx - side / 2), 0, 1)
+            covy = np.clip(np.minimum(rows + 1, cy + side / 2) - np.maximum(rows, cy - side / 2), 0, 1)
+            alpha = (covy * covx * op)[..., None]
+            frame = bg[None, None, :] * (1 - alpha) + 255.0 * alpha
+            proc.stdin.write(np.clip(np.rint(frame), 0, 255).astype(np.uint8).tobytes())
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("ffmpeg failed writing the motion clip")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    return path
