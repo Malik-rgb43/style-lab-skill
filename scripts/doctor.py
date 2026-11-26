@@ -139,6 +139,9 @@ def check_binary(name):
     return {"ok": True, "version": version, "path": str(exe), "note": "", "hint": ""}
 
 
+NPX_NOT_CACHED = "not installed (the first `npx hyperframes` downloads it; ask the user first)"
+
+
 def check_hyperframes():
     def bad(note):
         return {"ok": False, "version": "", "path": "", "note": note, "hint": HINTS["hyperframes"]}
@@ -149,7 +152,8 @@ def check_hyperframes():
         npx = shutil.which("npx")  # npx.cmd on Windows
         if not npx:
             return bad("not installed")
-        cmd = [npx, "--yes", "hyperframes", "--version"]
+        # --no: never download during the automatic check; only a cached package runs.
+        cmd = [npx, "--no", "hyperframes", "--version"]
     try:
         rc, out = _run(cmd, timeout=45)
     except subprocess.TimeoutExpired:
@@ -157,6 +161,8 @@ def check_hyperframes():
     except (subprocess.SubprocessError, OSError):
         return bad("not installed")
     if rc != 0:
+        if not exe:
+            return bad(NPX_NOT_CACHED)
         return bad(f"check failed (exit {rc})")
     return {"ok": True, "version": _first_line(out), "path": cmd[0], "note": "", "hint": ""}
 

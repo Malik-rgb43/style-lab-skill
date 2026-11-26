@@ -12,7 +12,9 @@ python scripts/doctor.py session --set figma=missing
 python scripts/doctor.py session --clear # forget the session block
 ```
 The local part checks binaries (ffmpeg, ffprobe, node, blender, yt-dlp, gh; Blender also from
-`BLENDER_PATH` and the usual install folders), HyperFrames (bounded, non-interactive), Python
+`BLENDER_PATH` and the usual install folders), HyperFrames (bounded, non-interactive,
+`npx --no`: it never downloads; a package that is not cached yet reads "not installed", and the
+first `npx hyperframes` downloads it, so ask the user first), Python
 modules (numpy, cv2, torch, torchaudio, faster_whisper, PIL) and env keys (RunPod; presence
 only, a value is never printed or stored). Each missing item carries an install hint.
 

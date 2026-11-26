@@ -70,13 +70,22 @@ def test_hyperframes_noninteractive(home, everything, monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "hyperframes" else f"/bin/{n}")
     doctor.main([])
     cmd, kw = next(c for c in CALLS if "hyperframes" in c[0])
-    assert "--yes" in cmd and kw["stdin"] == subprocess.DEVNULL
+    assert "--no" in cmd and "--yes" not in cmd and kw["stdin"] == subprocess.DEVNULL
     assert caps()["local"]["hyperframes"]["ok"] is True
 
 
-def test_hyperframes_failed_note(home, everything, monkeypatch):
+def test_hyperframes_npx_not_cached_never_downloads(home, everything, monkeypatch):
     monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "hyperframes" else f"/bin/{n}")
-    FakePopen.rc = 3
+    FakePopen.rc = 1
+    h = doctor.check_hyperframes()
+    cmd = next(c for c, _ in CALLS if "hyperframes" in c)
+    assert cmd[1] == "--no" and "--yes" not in cmd
+    assert h["ok"] is False and h["note"].startswith("not installed")
+    assert "ask the user first" in h["note"]
+
+
+def test_hyperframes_failed_note(home, everything, monkeypatch):
+    FakePopen.rc = 3  # a global hyperframes binary that fails its --version
     h = doctor.check_hyperframes()
     assert h["note"] == "check failed (exit 3)"
 
