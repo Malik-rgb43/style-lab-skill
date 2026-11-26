@@ -72,20 +72,23 @@ def test_join_inside_burst_fails_and_quiet_join_passes():
     assert items[0]["over_db"] == pytest.approx(40.0, abs=1)
 
 
-def test_tighten_joins_judged_on_the_crossfade_and_stack_joins_skipped():
+def test_tighten_joins_judged_on_the_crossfade_window():
     db = _db(4)
     db[200:260] = -20.0  # speech from 2.0 s
-    # a stack join whose picture switch sits on the next onset (2.0 s): never judged here
-    stack = {"n": 1, "dst": 2.0, "type": "stack", "audio_xfade_ms": [2000.0, 2010.0]}
+    # a stack join whose picture switch sits on the next onset (2.0 s) but whose crossfade is in
+    # the quiet before it: judged on the window, it passes (+-30 ms of the switch would not)
+    stack = {"n": 1, "dst": 2.0, "type": "stack", "audio_xfade_ms": [1985.0, 1995.0]}
+    # a stack join whose crossfade is in speech fails like any other
+    stack_bad = {"n": 5, "dst": 2.1, "type": "stack", "audio_xfade_ms": [2095.0, 2105.0]}
     # a keep join whose +-30 ms slices reach the onset, but whose crossfade is in the quiet before it
     keep = {"n": 2, "dst": 1.98, "type": "keep", "audio_xfade_ms": [1965.0, 1980.0]}
     # a keep join whose crossfade is in speech
     loud = {"n": 3, "dst": 2.3, "type": "keep", "audio_xfade_ms": [2292.5, 2307.5], "src_out": 9.0,
             "src_in": 9.5}
-    cuts = {"joins": [stack, keep, loud]}
+    cuts = {"joins": [stack, keep, loud, stack_bad]}
     items = cc.join_energy(cuts, db, 12.0)
-    assert [i["n"] for i in items] == [3] and items[0]["src"] == "9.00->9.50"
-    assert cc.stack_joins(cuts) == [stack]
+    assert [i["n"] for i in items] == [3, 5] and items[0]["src"] == "9.00->9.50"
+    assert [i["n"] for i in cc.join_energy({"joins": [{"n": 1, "dst": 2.0}]}, db, 12.0)] == [1]
     # the same keep join without the crossfade field (cut.py) is judged on +-30 ms and fails
     assert [i["n"] for i in cc.join_energy({"joins": [{"n": 2, "dst": 1.98}]}, db, 12.0)] == [2]
     # with the samples, the window level is exact: a quiet crossfade right before an onset that

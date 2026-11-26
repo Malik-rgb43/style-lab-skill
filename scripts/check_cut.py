@@ -8,10 +8,11 @@
 3. Lists EXTRA / MISSING / DIFF words, pauses longer than --max-gap-ms (the ASR gap must be
    confirmed by a quiet run in the audio), any heard word longer than --max-word-ms (hidden repeat
    suspect), joins that land inside speech (energy over the local room-tone floor) and a left/right
-   channel imbalance. A join of tighten.py (it carries "audio_xfade_ms") is judged on its
-   crossfade window only; its "stack" joins are skipped with a note, because tighten's own
-   edge_check and missing_check already audit them. A cut.py join is judged on the loudest
-   10 ms slice within +-30 ms of its cut point.
+   channel imbalance. A join of tighten.py (stack, keep or bridge: it carries "audio_xfade_ms")
+   is judged on its crossfade window only, at the exact sample level (the picture switch of a
+   stack join can sit right on the next voice onset, which a slice window would catch). A cut.py
+   join is judged on the loudest 10 ms slice within +-30 ms of its cut point. A tightened cut
+   whose cuts.json lists edge_bad items fails the check too.
 
     check_cut.py <stem> [--lang he|en|<code>] [--model <id or dir>] [--heard <words.json>]
                  [--explain <explain.json>] [--max-gap-ms 450] [--max-word-ms 1200]
@@ -130,12 +131,6 @@ def long_words(heard, max_word_ms):
             for w in heard if w["end_ms"] - w["start_ms"] > max_word_ms]
 
 
-def stack_joins(cuts):
-    """tighten.py "stack" joins: not judged by join_energy (tighten's edge_check and
-    missing_check audit them)."""
-    return [j for j in cuts.get("joins", []) if j.get("type") == "stack"]
-
-
 def _window_db(audio_db, mono, x0_ms, x1_ms):
     """loudest level in the window [x0, x1] ms: the RMS of exactly that window when the samples
     are given (a 10 ms slice can straddle the next voice onset), else the loudest slice it touches."""
@@ -153,16 +148,14 @@ def _window_db(audio_db, mono, x0_ms, x1_ms):
 def join_energy(cuts, audio_db, join_db, mono=None):
     """Joins that land inside speech: more than join_db over the local room-tone floor.
 
-    A join with "audio_xfade_ms" [x0, x1] (tighten.py) is judged on that crossfade window only;
-    a "stack" join is skipped (see stack_joins). A join without it (cut.py) is judged on the
+    A join with "audio_xfade_ms" [x0, x1] (tighten.py: stack, keep and bridge alike) is judged on
+    that crossfade window only. A join without it (cut.py) is judged on the
     loudest 10 ms slice within +-30 ms of the cut point. mono: optional 48 kHz samples of the
     file, for an exact window level."""
     out = []
     if not len(audio_db):
         return out
     for j in cuts.get("joins", []):
-        if j.get("type") == "stack":
-            continue
         xf = j.get("audio_xfade_ms")
         if isinstance(xf, (list, tuple)) and len(xf) == 2:
             top = _window_db(audio_db, mono, float(xf[0]), float(xf[1]))
@@ -305,8 +298,7 @@ def check(stem, lang=None, model=None, heard_file=None, explain_file=None, max_g
     items += long_pauses(heard, db, max_gap_ms)
     items += long_words(heard, max_word_ms)
     items += join_energy(cuts, db, join_db, mono)
-    stacked = stack_joins(cuts)
-    if cuts.get("edge_bad"):  # the stack joins are skipped above: tighten's own failures still count
+    if cuts.get("edge_bad"):  # tighten's own edge failures count here too
         items.append({"kind": "TIGHTEN", "t": 0.0, "count": len(cuts["edge_bad"])})
     bal = channel_balance(mp4)
     if abs(bal) > max_balance_db:
@@ -321,9 +313,6 @@ def check(stem, lang=None, model=None, heard_file=None, explain_file=None, max_g
     ratio = difflib.SequenceMatcher(None, e, g, autojunk=False).ratio()
     lines = [f"match {ratio:.3f}, {len(e)} expected / {len(g)} heard tokens, "
              f"{len(cuts.get('joins', []))} joins, {len(left)} item(s) left, {len(done)} explained"]
-    if stacked:
-        lines.append(f"  note: {len(stacked)} stack join(s) not judged by energy here: tighten.py's "
-                     f"edge_check and missing_check audit them (edge_bad in its cuts.json)")
     lines +=[f"  {it['t']:7.2f}s {s}" for it, s, _ in left]
     lines += [f"  {it['t']:7.2f}s EXPLAINED {s} -- {why}" for it, s, why in done]
     txt = "\n".join(lines)

@@ -48,7 +48,8 @@ def test_presets_exact_values():
                                      "pause_max_ms": 450, "pause_keep_ms": 150, "end_air_ms": None}
     lesson = cut.resolve_opts("lesson")
     assert lesson == cut.resolve_opts(None)
-    assert lesson["inside_ms"] == 60 and lesson["xfade_ms"] == 15.0 and lesson["sliver_frames"] == 6
+    assert lesson["inside_ms"] == 60 and lesson["xfade_ms"] == 15.0 and lesson["sliver_ms"] == 240
+    assert lesson["pause_min_cut_ms"] == 120 and lesson["sliver_frames"] is None
 
 
 def test_explicit_flag_overrides_preset():
@@ -606,3 +607,93 @@ def test_replace_together_restores_the_earlier_set_on_failure(tmp_path, monkeypa
     cut.replace_together(pairs)
     assert all(Path(f).read_text(encoding="utf-8") == "new " + f for f in finals)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["a.cuts.json", "a.mp4", "a.words.json"]
+
+
+def test_replace_together_backups_are_unique_and_never_touch_a_users_bak(tmp_path, monkeypatch, capsys):
+    final = str(tmp_path / "a.mp4")
+    Path(final).write_text("old", encoding="utf-8")
+    Path(final + ".bak").write_text("the user's own backup", encoding="utf-8")
+    seen = []
+    real = cut.os.replace
+
+    def spy(a, b):
+        seen.append(b)
+        return real(a, b)
+
+    monkeypatch.setattr(cut.os, "replace", spy)
+    Path(final + ".part").write_text("new", encoding="utf-8")
+    cut.replace_together([(final + ".part", final)])
+    monkeypatch.setattr(cut.os, "replace", real)
+    assert any(".bak-" in b for b in seen) and not any(b.endswith(".bak") for b in seen)
+    assert Path(final).read_text(encoding="utf-8") == "new"
+    assert Path(final + ".bak").read_text(encoding="utf-8") == "the user's own backup"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.mp4", "a.mp4.bak"]
+    assert capsys.readouterr().err == ""
+
+
+def test_replace_together_names_a_backup_it_could_not_restore(tmp_path, monkeypatch, capsys):
+    finals = [str(tmp_path / "a.mp4"), str(tmp_path / "a.cuts.json")]
+    for f in finals:
+        Path(f).write_text("old", encoding="utf-8")
+        Path(f + ".part").write_text("new", encoding="utf-8")
+    real = cut.os.replace
+
+    def flaky(a, b):
+        if a.endswith(".cuts.json.part"):
+            raise OSError("disk full")
+        if ".bak-" in a and b.endswith("a.mp4"):  # the restore of a.mp4 fails too
+            raise OSError("locked")
+        return real(a, b)
+
+    monkeypatch.setattr(cut.os, "replace", flaky)
+    with pytest.raises(OSError):
+        cut.replace_together([(f + ".part", f) for f in finals])
+    monkeypatch.setattr(cut.os, "replace", real)
+    err = [x for x in capsys.readouterr().err.splitlines() if x.strip()]
+    left = [p for p in tmp_path.iterdir() if ".bak-" in p.name]
+    assert len(err) == 1 and "could not restore" in err[0] and len(left) == 1 and str(left[0]) in err[0], err
+    assert Path(finals[1]).read_text(encoding="utf-8") == "old"  # the other file was restored
+    # the next run lists the leftover backup next to its outputs
+    assert cut.stale_backups(finals) == [str(left[0])]
+    cut.warn_stale_backups(finals)
+    out = capsys.readouterr().out
+    assert "leftover backup" in out and str(left[0]) in out
+
+
+def test_frame_options_are_ms_and_behave_the_same_at_60_and_25_fps():
+    assert (cut.frames_for(240, 25), cut.frames_for(240, 60), cut.frames_for(120, 25), cut.frames_for(120, 60)) \
+        == (6, 15, 3, 8)
+    plans = {}
+    for fps in (25, 60):
+        o = cut.resolve_opts("lesson")
+        plans[fps] = [cut.plan_pieces(mm.words_doc(SPANS)["words"], {"keep": [[0, 0], [2, 3]], "exclude_ms": ex},
+                                      _db(), fps, o) for ex in ([[2300, 3150]], [[2420, 3150]])]
+        s = plans[fps][0]["settings"]
+        assert s["sliver_ms"] == 240 and s["pause_min_cut_ms"] == 120
+        assert s["sliver_frames"] == cut.frames_for(240, fps)
+    for fps in (25, 60):
+        tiny, kept = plans[fps]
+        # 180 ms and 70 ms remainders: dropped at both rates; a 300 ms remainder: kept at both
+        assert sorted(w["i"] for d in tiny["dropped_slivers"] for w in d["lost_words"]) == [2, 3], fps
+        assert 2 in [w["src_i"] for w in kept["words"]], fps
+        for p in kept["pieces"]:
+            assert p["frames"] * 1000 / fps >= 240, (fps, p)
+    # the deprecated frame options still work, in frames of the cut's fps
+    o = cut.resolve_opts("lesson", {"sliver_frames": 15})
+    p60 = cut.plan_pieces(mm.words_doc(SPANS)["words"], KEEP, _db(), 60, o)
+    assert p60["settings"]["sliver_frames"] == 15 and p60["settings"]["sliver_ms"] == 250
+
+
+def test_deprecated_frame_flags_print_a_note_and_conflict_with_the_ms_flags(tmp_path, home, base_clip):
+    src, words, kp = base_clip
+    r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "d", "--sliver-frames", "8", "--no-render")
+    assert r.returncode == 0, r.stderr
+    assert "--sliver-frames is deprecated" in r.stdout
+    c = json.loads(Path(f"{tmp_path / 'd'}.cuts.json").read_text(encoding="utf-8"))
+    assert c["settings"]["sliver_frames"] == 8 and c["settings"]["sliver_ms"] == 320
+    r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "e", "--sliver-ms", "300", "--no-render")
+    assert r.returncode == 0 and json.loads(Path(f"{tmp_path / 'e'}.cuts.json").read_text(
+        encoding="utf-8"))["settings"]["sliver_frames"] == 8  # 300 ms at 25 fps
+    r = run_cli("cut.py", src, words, kp, "--out", tmp_path / "f", "--sliver-ms", "300", "--sliver-frames", "8",
+                "--no-render")
+    assert r.returncode == 2 and "not both" in r.stderr

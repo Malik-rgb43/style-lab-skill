@@ -3,7 +3,8 @@
 
 Every pause of at least --min-pause-ms between two kept phrases (inside a piece or at a join
 between pieces) is closed so the next phrase's first sound starts right where the previous
-phrase's voice has died away (+ --gap-ms), like a clip stacked on the track above. The edges
+phrase's voice has died away (+ --gap-ms, at least 10 ms of room tone so the crossfade never
+lands on a voice), like a clip stacked on the track above. The edges
 are measured on the audio energy (10 ms slices against the local room tone), not taken from
 the aligner: the start is walked back and the end walked forward until 3 slices in a row are
 below the room tone + --soft-db (4 dB), so a soft breathy onset or a long decay is kept.
@@ -54,7 +55,8 @@ Usage:
 Reads <stem>.mp4, <stem>.cuts.json, <stem>.words.json (from cut.py; the source is cuts.json
 "source"); the mp4 must have the frame count cuts.json names (+-1), else exit 2. Writes <out>.mp4,
 <out>.cuts.json and <out>.words.json (words on the new timeline) as one set: under temp names, then
-moved into place together (an earlier set is restored if a move fails). cuts.json carries pieces,
+moved into place together (an earlier set is backed up as <file>.bak-<pid>-<n> and restored
+if a move fails; a leftover backup is listed at the start of the next run). cuts.json carries pieces,
 joins (each with type stack | keep | bridge, src_out/src_in and audio_xfade_ms [x0, x1], the
 crossfade on the output timeline), placeholders, edge_check, missing_check, added_check, edge_bad,
 voice_not_died_away, sound_in_pause and room_noise_warning. Read room_noise_warning: when it is
@@ -96,6 +98,7 @@ NOISE_NEAR_DB = 3.0   # a held join whose "sound" is within this of the soft thr
 SHORT_WIN_MS = 30     # the short edge-check window at a clip's first/last voice
 SHORT_DB = 0.5        # its tolerance (dB)
 EDGE_UNCOVERED_MS = XF_MIN_MS / 2 + 0.5  # voice not played at full level beyond this fails the edge
+STACK_ROOM_MS = 10.0  # room tone always left at a stack join (the crossfade sits in it, never on a voice)
 
 
 # ---------------------------------------------------------------- audio helpers
@@ -443,7 +446,7 @@ def plan(cuts, words_doc, src_db, opts):
                 continue
             off, kind = touching, "keep"
         else:
-            off = math.floor((s.on - (end_tl + opts["gap_ms"])) / fms + 1e-6)
+            off = math.floor((s.on - (end_tl + max(opts["gap_ms"], STACK_ROOM_MS))) / fms + 1e-6)
             if not same and not consecutive:
                 off = max(off, touching)
             kind = "stack"
@@ -887,6 +890,8 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
     (output audio read from outside every kept piece), edge_bad (all failures),
     voice_not_died_away and sound_in_pause (joins kept as the cut made them)."""
     stem, out_stem = _strip(stem), _strip(out_stem)
+    final = [out_stem + ".mp4", out_stem + ".cuts.json", out_stem + ".words.json"]
+    cut.warn_stale_backups(final)  # left by an interrupted earlier run
     if os.path.normcase(os.path.abspath(stem)) == os.path.normcase(os.path.abspath(out_stem)):
         raise ValueError("--out must differ from the input stem (the cut is read while the output is written)")
     if gap_ms < 0:
@@ -947,7 +952,6 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
           "duration_ms": int(frames * fms), "words": words}
     # all three files are written under temp names and moved into place together (an earlier set
     # is backed up first and restored if a move fails)
-    final = [out_stem + ".mp4", out_stem + ".cuts.json", out_stem + ".words.json"]
     temp = [out_stem + ".tmp.mp4", out_stem + ".tmp.cuts.json", out_stem + ".tmp.words.json"]
     try:
         render(pl, source, stem + ".mp4", temp[0], audio, crf)
@@ -975,7 +979,8 @@ def main(argv=None):
     ap.add_argument("--out", required=True, help="output stem (must differ from the input stem)")
     ap.add_argument("--min-pause-ms", type=int, default=250, help="close every pause at least this long")
     ap.add_argument("--no-placeholders", action="store_true", help="drop placeholders and close their joins")
-    ap.add_argument("--gap-ms", type=int, default=0, help="room tone left between a voice end and the next start")
+    ap.add_argument("--gap-ms", type=int, default=0,
+                    help="room tone left between a voice end and the next start (at least 10 ms is always left)")
     ap.add_argument("--soft-db", type=float, default=4.0,
                     help="edge = 3 slices below room tone + this, sound = 3 slices at or above it (dB)")
     ap.add_argument("--loud-db", type=float, default=10.0,

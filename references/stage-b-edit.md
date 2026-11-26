@@ -44,8 +44,10 @@ the script exits 3 naming the model, its size and `--allow-download`.
    48000 (24, 25, 30, 50, 60); otherwise (29.97, a variable rate) the preset's rate (lesson 25,
    reels and vsl 30) with a one-line note. Explicit flags override a preset, and `--fps` always
    wins: `--fps --lead-ms --tail-ms --inside-ms --merge-gap-ms
-   --pause-max-ms --pause-keep-ms --sentence-keep-ms --pause-min-cut-frames --pause-snap-ms
-   --end-air-ms --sliver-frames --xfade-ms --crf --excl-overlap --no-render`.
+   --pause-max-ms --pause-keep-ms --sentence-keep-ms --pause-min-cut-ms --pause-snap-ms
+   --end-air-ms --sliver-ms --xfade-ms --crf --excl-overlap --no-render`.
+   `--sliver-ms` (240) and `--pause-min-cut-ms` (120) are converted to frames at the cut's fps;
+   the old `--sliver-frames` and `--pause-min-cut-frames` still work but are deprecated.
    Outputs: `<stem>.mp4`, `<stem>.cuts.json`, `<stem>.words.json` (remapped to the cut timeline),
    and `placeholders.json` when keep.json has placeholders, moved into place together after the
    render. `--no-render` writes only the plan and renames an older `<stem>.mp4` to
@@ -61,7 +63,8 @@ the script exits 3 naming the model, its size and `--allow-download`.
    [--min-pause-ms 250] [--no-placeholders] [--gap-ms 0] [--soft-db 4] [--loud-db 10]
    [--check-db 0.05]` joins without dead air. Flags: `--min-pause-ms` closes every pause at least
    this long; `--no-placeholders` drops placeholders and closes their joins; `--gap-ms` room tone
-   left between a voice end and the next start; `--soft-db` sound and edges = room tone + this
+   left between a voice end and the next start (at least 10 ms is always left, so the crossfade
+   sits in room tone); `--soft-db` sound and edges = room tone + this
    (3 slices in a row); `--loud-db` any single slice this far above the room tone is sound (a
    click, a short consonant); `--check-db` edge check tolerance. Outputs
    `<out_stem>.mp4/.cuts.json/.words.json`, moved into place together; cuts.json carries
@@ -80,8 +83,8 @@ the script exits 3 naming the model, its size and `--allow-download`.
    [--allow-download]`, where the final stem is the tighten output for vsl and the cut stem
    otherwise. It re-transcribes the whole cut without VAD and diffs it against the expected words;
    writes `<stem>.check.words.json` (unless `--heard`) and `<stem>.check.txt`. On a tighten
-   output it judges each join on its crossfade window and skips the stack joins with a note
-   (tighten's edge check covers them; its `edge_bad` still fails the check). Exit 0 = clean,
+   output it judges every join (stack, keep, bridge) on its crossfade window, and tighten's
+   `edge_bad` items fail the check too. Exit 0 = clean,
    1 = items left, 2 = the mp4 does not match its cuts.json, 3 = missing package, model or
    ffmpeg. `--explain` takes `{"items": [{"match": "text in
    the item", "why": "reason", "t": seconds (optional)}]}`; explained items are listed but no

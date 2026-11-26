@@ -6,7 +6,7 @@ frame boundary of --fps, at the quietest 10 ms slices, never inside a word (it u
 force-aligned word edges from align.py). Rules:
   - in-point in the silence BEFORE a sentence, at least --inside-ms inside the silence
   - --lead-ms before the first word, --tail-ms after the last word
-  - spans whose gap is < --merge-gap-ms are merged; pieces shorter than --sliver-frames are dropped
+  - spans whose gap is < --merge-gap-ms are merged; pieces shorter than --sliver-ms are dropped
   - pauses inside a kept span longer than --pause-max-ms (and voiced gaps: fillers, hidden
     repeats) are shortened to about 2 x --pause-keep-ms, cut only on quiet frames (local room
     tone + 10 dB); a gap with no quiet frame is kept and listed in cuts.json long_gaps_kept
@@ -59,6 +59,8 @@ Exit: 0 done, 1 error (bad input, ffmpeg failed), 2 usage or a malformed keep.js
 3 ffmpeg missing.
 """
 import argparse
+import glob
+import itertools
 import json
 import math
 import os
@@ -82,9 +84,11 @@ SL = AR // 100  # 10 ms
 
 DEFAULTS = {
     "fps": 25, "lead_ms": 80, "tail_ms": 120, "inside_ms": 60, "merge_gap_ms": 250,
-    "pause_max_ms": 450, "pause_keep_ms": 150, "sentence_keep_ms": None, "pause_min_cut_frames": 3,
-    "pause_snap_ms": 100, "end_air_ms": None, "sliver_frames": 6, "xfade_ms": 15.0, "crf": 18,
+    "pause_max_ms": 450, "pause_keep_ms": 150, "sentence_keep_ms": None, "pause_min_cut_ms": 120,
+    "pause_snap_ms": 100, "end_air_ms": None, "sliver_ms": 240, "xfade_ms": 15.0, "crf": 18,
     "excl_overlap": False,
+    # deprecated aliases in frames of the cut's fps (they override the _ms values when given)
+    "pause_min_cut_frames": None, "sliver_frames": None,
 }
 PRESETS = {
     "lesson": {"fps": 25, "lead_ms": 80, "tail_ms": 120, "merge_gap_ms": 250,
@@ -96,7 +100,7 @@ PRESETS = {
 # voice decay is not clipped), then tighten.py + check_cut.py
 PRESETS["vsl"] = dict(PRESETS["reels"], tail_ms=200)
 SETTING_KEYS = ("lead_ms", "tail_ms", "inside_ms", "merge_gap_ms", "pause_max_ms", "pause_keep_ms",
-                "sentence_keep_ms", "pause_min_cut_frames", "pause_snap_ms", "sliver_frames", "xfade_ms",
+                "sentence_keep_ms", "pause_min_cut_ms", "pause_snap_ms", "sliver_ms", "xfade_ms",
                 "end_air_ms")
 PROTECT_FLAGS = ("low_score", "unaligned", "unaligned_script")
 QUIET_DB = 10.0        # quiet = local room-tone floor + 10 dB
@@ -268,32 +272,64 @@ def check_frames(mp4, cuts, cuts_path):
                        f"different runs; render the cut again")
 
 
+_BAK_SEQ = itertools.count(1)
+
+
+def _backup_name(final):
+    """a backup name no user file has: <final>.bak-<pid>-<n>."""
+    return f"{final}.bak-{os.getpid()}-{next(_BAK_SEQ)}"
+
+
+def stale_backups(finals):
+    """backups left by an interrupted replace_together next to these outputs (<final>.bak-*)."""
+    out = []
+    for final in finals:
+        final = str(final)
+        d = os.path.dirname(os.path.abspath(final)) or "."
+        out += sorted(glob.glob(os.path.join(glob.escape(d), glob.escape(os.path.basename(final)) + ".bak-*")))
+    return out
+
+
+def warn_stale_backups(finals):
+    """print one line per stale backup next to these outputs (they are never deleted for you)."""
+    for b in stale_backups(finals):
+        print(f"warning: leftover backup from an interrupted run: {b} (check it, then delete it)")
+
+
 def replace_together(pairs):
-    """Move every (tmp, final) pair into place as one set. Existing finals are first moved to
-    <final>.bak; if any step fails, the files already moved in are removed, the backups restored
-    and the temp files deleted, so the earlier set stays whole."""
+    """Move every (tmp, final) pair into place as one set. Existing finals are first moved to a
+    unique backup (<final>.bak-<pid>-<n>, so a user's own .bak file is never touched); if any step
+    fails, the files already moved in are removed, the backups restored and the temp files deleted,
+    so the earlier set stays whole. A backup that cannot be restored or removed is never dropped
+    silently: a one-line warning names the file left behind."""
     backups, moved = [], []
     try:
         for _, final in pairs:
             if os.path.exists(final):
-                os.replace(final, final + ".bak")
-                backups.append(final)
+                bak = _backup_name(final)
+                os.replace(final, bak)
+                backups.append((bak, final))
         for tmp, final in pairs:
             os.replace(tmp, final)
             moved.append(final)
     except BaseException:
         for final in moved:
             _remove(final)
-        for final in backups:
+        for bak, final in backups:
             try:
-                os.replace(final + ".bak", final)
-            except OSError:
-                pass
+                os.replace(bak, final)
+            except OSError as e:
+                print(f"warning: could not restore {final} from its backup ({e.strerror or e}): "
+                      f"the earlier file is {bak}", file=sys.stderr)
         for tmp, _ in pairs:
             _remove(tmp)
         raise
-    for final in backups:
-        _remove(final + ".bak")
+    for bak, final in backups:
+        try:
+            os.remove(bak)
+        except OSError as e:
+            print(f"warning: could not remove the backup {bak} ({e.strerror or e}); the new {final} "
+                  f"is in place, delete the backup by hand", file=sys.stderr)
 
 
 def _remove(path):
@@ -494,7 +530,7 @@ class _Planner:
         near_in = [f for f in Q if f * fms >= wb["start_ms"] - k - o.pause_snap_ms]
         fo = min(near_out, key=lambda f: (round(P.e(f)), abs(f * fms - wa["end_ms"] - k))) if near_out else min(Q)
         fi = min(near_in, key=lambda f: (round(P.e(f)), abs(f * fms - wb["start_ms"] + k))) if near_in else max(Q)
-        if fi - fo < o.pause_min_cut_frames:
+        if fi - fo < o.pause_min_cut_n:
             return None
         return fo, fi
 
@@ -641,7 +677,7 @@ class _Planner:
         return b > a and any(a <= self.byi[i]["start_ms"] < b for i in self.order if p["w0"] <= i <= p["w1"])
 
     def drop_and_merge(self, pieces):
-        sl = self.o.sliver_frames
+        sl = self.o.sliver_n
 
         def is_sliver(n, p):
             if p["f_out"] - p["f_in"] >= sl:
@@ -780,6 +816,11 @@ class _Planner:
         return soft
 
 
+def frames_for(ms, fps):
+    """the fewest whole frames at fps that last at least ms (0 ms = 0 frames)."""
+    return max(0, math.ceil(float(ms) * fps / 1000.0 - 1e-6))
+
+
 def validate_keep(keep):
     """Raise BadInput for a keep entry that is not [first word index, last word index] in order."""
     spans = keep.get("keep", []) if isinstance(keep, dict) else None
@@ -803,6 +844,13 @@ def plan_pieces(words, keep, audio_db, fps, opts, dur_ms=None):
     voiced_gaps, dropped_slivers, words (remapped), frames, duration_s and settings.
     A malformed or reversed keep entry raises BadInput naming the entry."""
     o = SimpleNamespace(**resolve_opts(None, dict(opts or {}, fps=fps)))
+    # the frame-counted rules are set in ms and converted at this cut's fps (the old frame options
+    # are deprecated aliases in frames of this fps)
+    if o.sliver_frames is not None:
+        o.sliver_ms = o.sliver_frames * 1000.0 / fps
+    if o.pause_min_cut_frames is not None:
+        o.pause_min_cut_ms = o.pause_min_cut_frames * 1000.0 / fps
+    o.sliver_n, o.pause_min_cut_n = frames_for(o.sliver_ms, fps), frames_for(o.pause_min_cut_ms, fps)
     db = np.asarray(audio_db, dtype=np.float64)
     full_ms = len(db) * 10
     dur_ms = full_ms if dur_ms is None else min(dur_ms, full_ms)
@@ -824,7 +872,8 @@ def plan_pieces(words, keep, audio_db, fps, opts, dur_ms=None):
     fms = pl.fms
     return {
         "fps": fps, "frames": total, "duration_s": round(total / fps, 3),
-        "settings": {k: getattr(o, k) for k in SETTING_KEYS},
+        "settings": dict({k: getattr(o, k) for k in SETTING_KEYS}, sliver_frames=o.sliver_n,
+                         pause_min_cut_frames=o.pause_min_cut_n),
         "pieces": out_pieces, "joins": joins, "placeholders": ph_out, "voiced_gaps": pl.voiced_log,
         "long_gaps_kept": pl.kept_long, "soft_joins": soft,
         "dropped_slivers": [{"src_in": p["f_in"] * fms / 1000, "src_out": p["f_out"] * fms / 1000,
@@ -1075,12 +1124,15 @@ def main(argv=None):
     ap.add_argument("--sentence-keep-ms", type=int,
                     help="air kept on each side of a shortened pause after a sentence end (. ? ! :); "
                          "default = --pause-keep-ms")
-    ap.add_argument("--pause-min-cut-frames", type=int, help="shorten a pause only if this many frames go")
+    ap.add_argument("--pause-min-cut-ms", type=int,
+                    help="shorten a pause only if at least this much goes (default 120)")
+    ap.add_argument("--pause-min-cut-frames", type=int, help="deprecated: use --pause-min-cut-ms")
     ap.add_argument("--pause-snap-ms", type=int,
                     help="how far past the kept air a shortened pause may snap to a quieter frame")
     ap.add_argument("--end-air-ms", type=int,
                     help="air after the last word of the whole cut (default: same rule as every out-point)")
-    ap.add_argument("--sliver-frames", type=int)
+    ap.add_argument("--sliver-ms", type=int, help="drop pieces shorter than this (default 240)")
+    ap.add_argument("--sliver-frames", type=int, help="deprecated: use --sliver-ms")
     ap.add_argument("--xfade-ms", type=float)
     ap.add_argument("--crf", type=int)
     ap.add_argument("--excl-overlap", action="store_true", default=None,
@@ -1094,12 +1146,22 @@ def main(argv=None):
     except MissingTool as e:
         print(str(e), file=sys.stderr)
         return 3
+    for old, new in (("sliver_frames", "sliver_ms"), ("pause_min_cut_frames", "pause_min_cut_ms")):
+        if getattr(a, old) is not None:
+            if getattr(a, new) is not None:
+                print(f"error: give --{new.replace('_', '-')} or --{old.replace('_', '-')}, not both",
+                      file=sys.stderr)
+                return 2
+            print(f"note: --{old.replace('_', '-')} is deprecated: use --{new.replace('_', '-')} "
+                  f"(frames of the cut's fps)")
     overrides = {k: getattr(a, k) for k in DEFAULTS}
     opts = resolve_opts(a.preset, overrides)
     if opts["fps"] <= 0 or AR % opts["fps"]:
         print(f"error: --fps must divide {AR} (e.g. 24, 25, 30, 50, 60)", file=sys.stderr)
         return 2
     stem = a.out[:-4] if a.out.endswith(".mp4") else a.out
+    warn_stale_backups([stem + ".mp4", stem + ".cuts.json", stem + ".words.json",
+                        os.path.join(os.path.dirname(os.path.abspath(stem)), "placeholders.json")])
     try:
         doc = _read_json(a.words, "words file")
         keep = _read_json(a.keep, "keep file")
