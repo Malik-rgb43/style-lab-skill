@@ -34,7 +34,7 @@ def _amp(db):
     return 10 ** (db / 20.0) * math.sqrt(2)
 
 
-def track(dur_ms, words, extra=(), noisy_room=False):
+def track(dur_ms, words, extra=(), noisy_room=False, drift_db=0.0):
     """words: (start, flat_end) at WORD_DB with a decaying tail; extra: (start, end, db) flat 700 Hz
     sound with 2 ms ramps and no tail (an unlisted word, a breath)."""
     n = int(dur_ms * SR / 1000)
@@ -54,6 +54,10 @@ def track(dur_ms, words, extra=(), noisy_room=False):
         g[1::2] = np.where(np.random.default_rng(3).random(len(g[1::2])) < 0.5, 5.0, 0.0)
         g[::20] = -5.0
         room = room * np.repeat(10 ** (g / 20), 480)[:n]
+    if drift_db:  # the room's level drifts +-drift_db over 0.7 s, plus 1 dB jitter on every slice
+        k = np.arange(n // 480 + 1)
+        g = drift_db * np.sin(2 * np.pi * k * 0.01 / 0.7) + np.random.default_rng(5).normal(0, 1.0, len(k))
+        room = room * np.repeat(10 ** (g / 20), 480)[:n]
     mono = room + _amp(WORD_DB) * env * np.sin(2 * np.pi * 400 * t)
     r2 = int(0.002 * SR)
     for a, b, db in extra:
@@ -72,8 +76,8 @@ def _write_wav(path, audio):
         wf.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
 
 
-def make_source(tmp, words, dur_ms=DUR, extra=(), noisy_room=False):
-    audio = track(dur_ms, words, extra, noisy_room)
+def make_source(tmp, words, dur_ms=DUR, extra=(), noisy_room=False, drift_db=0.0):
+    audio = track(dur_ms, words, extra, noisy_room, drift_db)
     wav = tmp / "src.wav"
     _write_wav(wav, audio)
     src = tmp / "src.mkv"
@@ -261,8 +265,9 @@ def test_decaying_tail_is_never_cut(straight_out):
     stem, out, res, audio = straight_out
     cuts = _read(out, ".cuts.json")
     edges = cuts["edge_check"]
-    assert len(edges) == 2 * sum(1 for p in cuts["pieces"] if p["w0"] is not None)
-    assert all(abs(e["diff_db"]) < 0.05 for e in edges), edges
+    assert len(edges) == 4 * sum(1 for p in cuts["pieces"] if p["w0"] is not None)  # start/end x 120/30 ms
+    assert all(e["ok"] and e["uncovered_ms"] <= 2.5 for e in edges), edges
+    assert all(abs(e["diff_db"]) < 0.05 for e in edges if e["win_ms"] == 120), edges
     assert cuts["edge_bad"] == [] and res["edge_bad"] == []
     # the whole of A, its tail included, is in the output at the source level
     src_db = slices_db(audio.mean(axis=1).astype(np.float64))
@@ -368,7 +373,9 @@ def test_cli_clipped_end_exits_1_and_names_the_piece(tmp_path):
     text = r.stdout + r.stderr
     assert "piece 0 end" in text and "A" in text, text
     bad = _read(str(tmp_path / "clip"), ".cuts.json")["edge_bad"]
-    assert [(e["piece"], e["edge"]) for e in bad] == [(0, "end")]
+    assert {(e["piece"], e["edge"]) for e in bad} == {(0, "end")}
+    # the clipped tail is reported in ms, apart from the dB sign: (nearly) the whole window is not played
+    assert all(e["uncovered_ms"] >= 0.9 * min(e["win_ms"], 100) for e in bad), bad
 
 
 def test_cli_usage_errors(tmp_path):
@@ -583,3 +590,73 @@ def test_gain_balance_without_gains_is_a_clean_error(straight, tmp_path):
     Path(str(bad) + ".mp4").write_bytes(Path(stem + ".mp4").read_bytes())
     r = run_cli("tighten.py", bad, "--out", tmp_path / "o")
     assert r.returncode == 1 and "gains" in r.stderr and "Traceback" not in r.stderr
+
+
+# ---------------------------------------------------------------- round 3
+
+def above_room(x):
+    """level of an added tone so that room tone + tone = room + x dB."""
+    return ROOM_DB + 10 * math.log10(10 ** (x / 10) - 1)
+
+
+def test_short_loud_click_holds_the_join(tmp_path, monkeypatch):
+    # a 20 ms click at -20 dBFS (35 dB above the room) on exactly 2 slices, alone in the pause
+    stem, _ = _one_piece(tmp_path, [A, (1900, 2400)], extra=[(1150, 1170, -20.0)],
+                         aligned=[("A", *A), ("B", 1900, 2400)])
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    assert res["frames"] == 90
+    assert [round(x["sound_at_ms"]) for x in res["sound_in_pause"]] == [1150]
+    assert res["edge_bad"] == []
+    monkeypatch.setattr(tighten, "_sound_between", lambda *a: [])  # forced: the audit must still see it
+    res = tighten.tighten(stem, str(tmp_path / "t2"))
+    miss = [e for e in res["edge_bad"] if e["edge"] == "missing"]
+    assert len(miss) == 1 and miss[0]["src_ms"][0] <= 1150 and miss[0]["src_ms"][1] >= 1170, res["edge_bad"]
+
+
+def test_drifting_room_still_closes_its_joins(tmp_path):
+    src, audio = make_source(tmp_path, [A, B], drift_db=3.0)
+    stem = make_cut(tmp_path, "cut", src, audio, [{"f_in": 0, "f_out": 90}], [("A", *A, 0), ("B", *B, 0)])
+    out = str(tmp_path / "t")
+    res = tighten.tighten(stem, out)
+    assert res["sound_in_pause"] == [] and res["voice_not_died_away"] == [] and res["room_noise_warning"] is None
+    assert [j["type"] for j in res["joins"]] == ["stack"]
+    assert res["edge_bad"] == []
+    # dead air left: B's onset vs A's tail reaching the room's nominal level (an analytic 198 ms after A)
+    cuts = _read(out, ".cuts.json")
+    pb = [p for p in cuts["pieces"] if p["text"] == "B"][0]
+    on_b = B[0] - (pb["f_in"] - pb["dst_f"]) * FMS
+    end_a = A[1] + TAU * (WORD_DB - ROOM_DB) / (20 * math.log10(math.e))
+    assert -40 <= on_b - end_a <= FMS + 10, (end_a, on_b)
+
+
+def test_soft_word_in_a_drifting_room_is_still_held(tmp_path):
+    src, audio = make_source(tmp_path, [A, (1900, 2400)], extra=[(1150, 1350, above_room(6))], drift_db=3.0)
+    stem = make_cut(tmp_path, "cut", src, audio, [{"f_in": 0, "f_out": 90}], [("A", *A, 0), ("B", 1900, 2400, 0)])
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    assert res["frames"] == 90
+    assert len(res["sound_in_pause"]) == 1 and 1150 <= res["sound_in_pause"][0]["sound_at_ms"] < 1350
+    assert res["edge_bad"] == []
+
+
+def test_room_noise_warning_when_holds_are_noise_like(tmp_path):
+    # a sound barely above the soft threshold (room + 5 dB) holds the only join: noise-like
+    stem, _ = _one_piece(tmp_path, [A, (1900, 2400)], extra=[(1150, 1350, above_room(5))],
+                         aligned=[("A", *A), ("B", 1900, 2400)])
+    r = run_cli("tighten.py", stem, "--out", tmp_path / "t")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "warning:" in r.stdout and "room-noise" in r.stdout
+    cuts = _read(str(tmp_path / "t"), ".cuts.json")
+    assert cuts["room_noise_warning"] and cuts["sound_in_pause"][0]["noise_like"] is True
+
+
+def test_short_window_catches_a_soft_onset_clipped_by_the_cut(tmp_path):
+    # a breath at room + 6 dB from 1840 ms before B (1900 ms); the cut's in-point (frame 56 = 1867 ms)
+    # is inside it. The 120 ms window is dominated by the loud word; the 30 ms one is not.
+    src, audio = make_source(tmp_path, [A, (1900, 2400)], extra=[(1840, 1900, above_room(6))])
+    stem = make_cut(tmp_path, "cut", src, audio, [{"f_in": 0, "f_out": 42}, {"f_in": 56, "f_out": 90}],
+                    [("A", *A, 0), ("B", 1900, 2400, 1)])
+    res = tighten.tighten(stem, str(tmp_path / "t"))
+    bad = [(e["piece"], e["edge"], e["win_ms"]) for e in res["edge_bad"]]
+    assert (1, "start", 30) in bad, res["edge_bad"]
+    row = [e for e in res["edge_bad"] if e["piece"] == 1 and e["edge"] == "start"][0]
+    assert row["uncovered_ms"] >= 20

@@ -11,9 +11,15 @@ below the room tone + --soft-db (4 dB), so a soft breathy onset or a long decay 
 A pause is only closed when it is safe to close:
   - both edges were found within the 400 ms search (a voice that never dies away is never cut
     into; the join is kept as the cut made it and listed in cuts.json voice_not_died_away)
-  - nothing in the pause is sound (3 slices in a row >= room tone + --soft-db, the same rule as
-    the edges, so a single noisy slice is not sound): an unlisted word, a laugh or a breath there
-    keeps the join as cut (listed in cuts.json sound_in_pause).
+  - nothing in the pause is sound (3 slices in a row >= the soft threshold, the same rule as the
+    edges, so a single noisy slice is not sound; or any single slice >= room tone + --loud-db,
+    10 dB, a click or a short consonant): an unlisted word, a laugh or a breath there keeps the
+    join as cut (listed in cuts.json sound_in_pause). When more than half the joins are held only
+    by sound near the room-noise level, a warning is printed and stored (room_noise_warning).
+
+The room tone is local: the median of the quiet slices within +-1.5 s, and the soft threshold is
+room + max(--soft-db, the room's own spread + 1.5 dB), so a room whose noise drifts still closes
+its joins while a soft word clearly above the room still holds them.
     At a join between pieces the cut's own air on both sides is checked too.
 
   - lip sync is exact: picture and sound of every clip share one offset in whole frames
@@ -25,9 +31,11 @@ A pause is only closed when it is safe to close:
     closes the join instead); the cut's own lead and end air are kept
 
 Checks (every time, on the in-memory output mix before encoding):
-  edge check: for every clip, the level of its first and last 120 ms of voice (true start/end,
-    measured without the cut's in/out points) vs the same span in the source; off by more than
-    --check-db (0.05 dB, i.e. not 0.0 dB) goes into edge_bad. A cut that clipped a word shows here.
+  edge check: for every clip, the level of its first and last 120 ms and 30 ms of voice (true
+    start/end, measured without the cut's in/out points) vs the same span in the source; off by
+    more than --check-db (0.05 dB) on 120 ms or 0.5 dB on 30 ms, or more than 2.5 ms of that voice
+    not played at full level by the clip (uncovered_ms; overlap_ms = ms under another clip, both
+    reported apart from the dB), goes into edge_bad. A cut that clipped a word shows here.
   missing audit: every stretch of the cut's timeline that is not in the output at full level and
     holds sound (the same 3-slice rule, overlapping it by >= 5 ms) goes into edge_bad (edge "missing").
   added audit: any output audio read from the source outside every kept piece (beyond the cut's
@@ -66,6 +74,16 @@ XF_MIN_MS = 4.0       # shortest crossfade where two clips meet
 BRIDGE_XF_MS = 10.0   # linear crossfade into/out of the cut's own audio around placeholders
 JOIN_XF_MS = 15.0     # crossfade at a join kept as the cut made it (same as cut.py)
 QUIET_RUN = 3         # slices in a row below the soft threshold = the voice has died away
+ROOM_WIN_MS = 1500    # the room level is measured on the quiet slices within +-1.5 s
+ROOM_CAND_DB = 8.0    # quiet slices: at most this far above the window's 10th percentile
+ROOM_CAP_DB = 6.0     # a local room level is never taken more than this above the whole file's
+SPREAD_MAD = 1.2      # spread = this x the median absolute deviation of the quiet slices
+REFINE_MIN_DB = 2.0   # the room level is re-measured on the slices at most max(this, spread) above it
+SPREAD_MARGIN_DB = 1.5  # the soft threshold sits this far above the room's spread
+NOISE_NEAR_DB = 3.0   # a held join whose "sound" is within this of the soft threshold is noise-like
+SHORT_WIN_MS = 30     # the short edge-check window at a clip's first/last voice
+SHORT_DB = 0.5        # its tolerance (dB)
+EDGE_UNCOVERED_MS = XF_MIN_MS / 2 + 0.5  # voice not played at full level beyond this fails the edge
 
 
 # ---------------------------------------------------------------- audio helpers
@@ -92,82 +110,125 @@ def take(audio, i0, n):
 
 
 class Energy:
-    """true edges on the 10 ms slice levels of the source.
+    """true edges on the 10 ms slice levels of the source, against the LOCAL room tone.
 
-    soft = local room tone (10th percentile over +-3 s) + soft_db: an edge is where QUIET_RUN
-    slices in a row are below it, sound is QUIET_RUN slices in a row at or above it."""
+    room(ms): the quiet slices within +-ROOM_WIN_MS (the slices at most ROOM_CAND_DB above the
+    window's 10th percentile): their median (the room level) and their spread (SPREAD_MAD x the
+    median absolute deviation, about the room's own 90th percentile above its median; about 0 in a
+    steady room, a few dB in a room whose noise drifts, and robust to a soft sound in the pause).
+    soft = room + max(soft_db, spread + SPREAD_MARGIN_DB): an edge is where QUIET_RUN slices in a
+      row are below it; QUIET_RUN slices in a row at or above it are sound.
+    loud = room + max(loud_db, spread + soft_db): any single slice at or above it is sound (a click,
+      a short consonant)."""
 
-    def __init__(self, db, search_ms, soft_db):
-        self.db, self.search_ms, self.soft_db = db, search_ms, soft_db
+    def __init__(self, db, search_ms, soft_db, loud_db=10.0):
+        self.db, self.search_ms, self.soft_db, self.loud_db = db, search_ms, soft_db, loud_db
+        self._room = {}
+        g = self.db[self.db <= np.percentile(self.db, 10) + ROOM_CAND_DB] if len(self.db) else np.zeros(1)
+        self.global_room = float(np.median(g))
 
     def at(self, j):
         return self.db[j] if 0 <= j < len(self.db) else -200.0
 
+    def room(self, ms):
+        """(room level dB, spread dB) of the quiet slices around ms (cached per 50 ms)."""
+        key = int(ms // 50)
+        if key not in self._room:
+            k, h = key * 5, ROOM_WIN_MS // 10
+            w = self.db[max(0, k - h): k + h]
+            if len(w) < 10:
+                w = self.db
+            q = w[w <= np.percentile(w, 10) + ROOM_CAND_DB]
+            med = float(np.median(q))
+            # robust spread: a soft word or breath that is a minority of the quiet slices must not
+            # raise it (a 90th percentile would, and then hide that very sound)
+            spread = SPREAD_MAD * float(np.median(np.abs(q - med)))
+            # the level is re-measured on the slices within the room's own spread of it, so a soft
+            # sound in the window (a few dB above the room) does not lift the room level either
+            q2 = q[q < med + max(REFINE_MIN_DB, spread)]
+            if len(q2) >= 10:
+                med = float(np.median(q2))
+            # a window with no room tone in it (continuous speech) must not raise the room level
+            self._room[key] = (min(med, self.global_room + ROOM_CAP_DB), spread)
+        return self._room[key]
+
     def floor(self, ms):
-        k = int(ms // 10)
-        w = self.db[max(0, k - 300): k + 300]
-        if not len(w):
-            w = self.db
-        return float(np.percentile(w, 10))
+        return self.room(ms)[0]
 
     def soft(self, ms):
-        return self.floor(ms) + self.soft_db
+        med, spread = self.room(ms)
+        return med + max(self.soft_db, spread + SPREAD_MARGIN_DB)
 
-    def _quiet(self, j, thr, step):
-        return all(self.at(j + step * i) < thr for i in range(QUIET_RUN))
+    def loud(self, ms):
+        med, spread = self.room(ms)
+        return med + max(self.loud_db, spread + self.soft_db)
+
+    def soft_at(self, j):
+        """the soft threshold of slice j, from the room around that slice (edges and the sound
+        check use the same per-slice thresholds, so a slice quiet for one is quiet for the other)"""
+        return self.soft(j * 10.0 + 5)
+
+    def loud_at(self, j):
+        return self.loud(j * 10.0 + 5)
+
+    def _quiet(self, j, step):
+        return all(self.at(j + step * i) < self.soft_at(j + step * i) for i in range(QUIET_RUN))
 
     def true_end(self, ms):
         """(end_ms, died): walk forward from the aligned word end until the voice has died away;
         died is False when it is still sounding at the search limit (end_ms is that limit)."""
-        thr, k = self.soft(ms), int(ms // 10)
+        k = int(ms // 10)
         for j in range(k, k + self.search_ms // 10):
-            if self._quiet(j, thr, 1):
+            if self._quiet(j, 1):
                 return j * 10.0, True
         return k * 10.0 + self.search_ms, False
 
     def true_start(self, ms):
         """(start_ms, found): walk back from the aligned word start to the first sound."""
-        thr, k = self.soft(ms), int(ms // 10)
-        if self._quiet(k, thr, 1):  # aligned start in room tone (a pinned retime): go to the first sound
+        k = int(ms // 10)
+        if self._quiet(k, 1):  # aligned start in room tone (a pinned retime): go to the first sound
             for j in range(k, k + 2 * self.search_ms // 10):
-                if all(self.at(j + i) >= thr for i in range(QUIET_RUN)):
+                if all(self.at(j + i) >= self.soft_at(j + i) for i in range(QUIET_RUN)):
                     k = j
                     break
             else:
                 return float(ms), False
         for j in range(k, k - self.search_ms // 10, -1):
-            if self._quiet(j, thr, -1):
+            if self._quiet(j, -1):
                 return (j + 1) * 10.0, True
         return k * 10.0 - self.search_ms, False
 
     def quiet_after(self, ms, limit):
-        thr, t = self.soft(ms), 0.0
-        while t < limit and self.at(int((ms + t) // 10)) < thr:
+        t = 0.0
+        while t < limit and self.at(int((ms + t) // 10)) < self.soft_at(int((ms + t) // 10)):
             t += 10
         return t
 
     def quiet_before(self, ms, limit):
-        thr, u = self.soft(ms), 0.0
-        while u < limit and self.at(int((ms - u - 10) // 10)) < thr:
+        u = 0.0
+        while u < limit and self.at(int((ms - u - 10) // 10)) < self.soft_at(int((ms - u - 10) // 10)):
             u += 10
         return u
 
     def loud_runs(self, a_ms, b_ms, min_overlap_ms=5.0):
         """sound = QUIET_RUN or more slices in a row >= the soft threshold (the same rule as the
-        edges, so a single noisy slice is not sound). Returns the runs that overlap [a, b) by at
-        least min_overlap_ms: [(run_start_ms, run_end_ms, loudest_db)]."""
+        edges, so a single noisy slice is not sound), or any run holding a slice >= the loud
+        threshold (a short click or consonant). Returns the runs that overlap [a, b) by at least
+        min_overlap_ms: [(run_start_ms, run_end_ms, loudest_db)]."""
         if b_ms - a_ms < min_overlap_ms:
             return []
-        thr = self.soft((a_ms + b_ms) / 2)
         j0, j1 = int(a_ms // 10) - QUIET_RUN, int(math.ceil(b_ms / 10)) + QUIET_RUN
         runs, start = [], None
         for j in range(j0, j1 + 1):
-            loud = j < j1 and self.at(j) >= thr
+            loud = j < j1 and self.at(j) >= self.soft_at(j)
             if loud and start is None:
                 start = j
             elif not loud and start is not None:
-                if j - start >= QUIET_RUN and min(b_ms, j * 10.0) - max(a_ms, start * 10.0) >= min_overlap_ms:
-                    runs.append((start * 10.0, j * 10.0, float(max(self.at(k) for k in range(start, j)))))
+                top = float(max(self.at(k) for k in range(start, j)))
+                hit = any(self.at(k) >= self.loud_at(k) for k in range(start, j))
+                if ((j - start >= QUIET_RUN or hit)
+                        and min(b_ms, j * 10.0) - max(a_ms, start * 10.0) >= min_overlap_ms):
+                    runs.append((start * 10.0, j * 10.0, top))
                 start = None
         return runs
 
@@ -295,7 +356,8 @@ def plan(cuts, words_doc, src_db, opts):
     """Pure placement: cut.py cuts.json + words.json + source slice levels -> timeline items."""
     fps = int(cuts["fps"])
     fms = 1000.0 / fps
-    E = Energy(np.asarray(src_db, dtype=np.float64), opts["search_ms"], opts.get("soft_db", 4.0))
+    E = Energy(np.asarray(src_db, dtype=np.float64), opts["search_ms"], opts.get("soft_db", 4.0),
+               opts.get("loud_db", 10.0))
     pieces = _pieces(cuts, fms)
     keep_ph = opts["keep_placeholders"]
     words = []
@@ -316,14 +378,20 @@ def plan(cuts, words_doc, src_db, opts):
 
     def held_voice(s, edge):
         ms = s.end_true if edge == "end" else s.on_true
+        # noise-like: the level over the search stays near the soft threshold (a noisy room, not a voice)
+        a, b = (ms - opts["search_ms"], ms) if edge == "end" else (ms, ms + opts["search_ms"])
+        lv = [E.at(j) for j in range(int(a // 10), int(b // 10))]
+        noise = bool(lv) and float(np.median(lv)) < E.soft(ms) + NOISE_NEAR_DB
         voice_held.append({"cut_piece": s.P["id"], "edge": edge, "src_ms": round(ms, 1),
-                           "words": _words_text(s.words, edge == "end"),
+                           "words": _words_text(s.words, edge == "end"), "noise_like": noise,
                            "why": f"the voice has not died away within {opts['search_ms']} ms of the word {edge}"})
+        return noise
 
     # ---- offsets (source frame - timeline frame), whole frames
     first = segs[0]
     first.off = first.P["old_off"] if lead_phs else first.P["f_in"]
     out, joins = [first], []
+    considered, noise_holds = 0, 0
     for s in segs[1:]:
         pv = out[-1]
         if pv.ph_after:
@@ -335,19 +403,25 @@ def plan(cuts, words_doc, src_db, opts):
         same, consecutive = s.P is pv.P, s.P["idx"] == pv.P["idx"] + 1
         end_tl = pv.end - pv.off * fms
         unchanged = s.P["old_off"] - (pv.P["old_off"] - pv.off)
-        hold = False
+        considered += 1
+        hold, noise = False, []
         if not pv.end_died:
-            held_voice(pv, "end")
+            noise.append(held_voice(pv, "end"))
             hold = True
         if not s.on_found:
-            held_voice(s, "start")
+            noise.append(held_voice(s, "start"))
             hold = True
         if not hold:
             for a, b, j_ms, db in _sound_between(E, pv, s):
+                nl = db < E.soft(j_ms) + NOISE_NEAR_DB and db < E.loud(j_ms)
                 sound_held.append({"cut_piece": sorted({pv.P["id"], s.P["id"]}), "src_ms": [round(a, 1), round(b, 1)],
                                    "sound_at_ms": j_ms, "db": round(db, 1), "thr_db": round(E.soft(j_ms), 1),
+                                   "room_db": round(E.floor(j_ms), 1), "noise_like": bool(nl),
                                    "before": _words_text(pv.words, True), "after": _words_text(s.words)})
+                noise.append(bool(nl))
                 hold = True
+        if hold and all(noise):
+            noise_holds += 1
         # pieces that touch on the timeline: s starts where pv's piece ends (a dropped room-tone
         # piece between them leaves no hole)
         touching = s.P["f_in"] - (pv.P["f_out"] - pv.off)
@@ -372,6 +446,11 @@ def plan(cuts, words_doc, src_db, opts):
         joins.append([kind, pv, s])
         out.append(s)
     segs = out
+    room_warning = None
+    if considered and noise_holds * 2 > considered:
+        room_warning = (f"{noise_holds} of {considered} joins were held only by sound near the room-noise level: "
+                        "the room may be noisy or drifting; check sound_in_pause / voice_not_died_away, "
+                        "or raise --soft-db")
     if not segs[0].on_found:
         held_voice(segs[0], "start")
     if not segs[-1].end_died:
@@ -469,7 +548,8 @@ def plan(cuts, words_doc, src_db, opts):
             raise RuntimeError(f"empty clip on the tightened timeline at frame {it['v0']}")
     return {"fps": fps, "fms": fms, "items": items, "bridges": bridges, "jinfo": jinfo, "pieces": pieces,
             "words": words, "frames": items[-1]["v1"], "old_frames": int(cuts["frames"]),
-            "dropped_air_pieces": dropped, "voice_not_died_away": voice_held, "sound_in_pause": sound_held, "E": E}
+            "dropped_air_pieces": dropped, "voice_not_died_away": voice_held, "sound_in_pause": sound_held, "E": E,
+            "room_noise_warning": room_warning}
 
 
 # ---------------------------------------------------------------- mix and checks
@@ -508,26 +588,50 @@ def mix(pl, src, old):
     return out
 
 
-def edge_check(pl, src, out, check_ms, check_db, ids):
-    """level of every clip's first/last check_ms of voice: output mix vs the same span of the source."""
+def _full_span(s):
+    """timeline span where clip s plays at full level (an equal-power or the cut's crossfade is not
+    full level; a linear crossfade against the cut's own audio of the same source is)."""
+    c0 = s.a0_tl if s.fi is None else (s.fi[1] if s.fi[0] == "lin" else s.fi[2])
+    c1 = s.a1_tl if s.fo is None else (s.fo[2] if s.fo[0] == "lin" else s.fo[1])
+    return c0, c1
+
+
+def _len_in(spans, t0, t1):
+    return sum(max(0.0, min(b, t1) - max(a, t0)) for a, b in _union(spans))
+
+
+def edge_check(pl, src, out, check_ms, check_db, ids, short_ms=SHORT_WIN_MS, short_db=SHORT_DB):
+    """every clip's first/last voice, output mix vs the same span of the source, in two windows:
+    check_ms (tolerance check_db) and short_ms (tolerance short_db; catches a soft onset or the last
+    decay clipped under a loud word, which the long window averages away).
+
+    Per row also: uncovered_ms = ms of the window where this clip does NOT play at full level
+    (clipped by its own in/out point or a crossfade; > EDGE_UNCOVERED_MS fails the row whatever
+    the dB), overlap_ms = ms of the window where another clip also sounds (stacked)."""
     fms = pl["fms"]
     src_ms = len(src) * 1000.0 / AR
+    segs = [it for it in pl["items"] if it["kind"] == "seg"]
     rows = []
-    for it in pl["items"]:
-        if it["kind"] != "seg":
-            continue
+    for it in segs:
         s = it["S"]
-        for edge, t0, t1 in (("start", s.on_true, s.on_true + check_ms), ("end", s.end_true - check_ms, s.end_true)):
-            t0, t1 = max(t0, 0.0), min(t1, src_ms)
-            if t1 <= t0:
-                continue
-            T0, T1 = t0 - s.off * fms, t1 - s.off * fms
-            lo, ls = level_db(out, T0, T1), level_db(src, t0, t1)
-            d = lo - ls
-            rows.append({"piece": ids[id(it)], "edge": edge, "dst_s": round(T0 / 1000 if edge == "start" else T1 / 1000, 3),
-                         "src_ms": round(t0 if edge == "start" else t1, 1), "out_db": round(lo, 2),
-                         "src_db": round(ls, 2), "diff_db": round(d, 2), "ok": abs(d) <= check_db,
-                         "words": _words_text(s.words, edge == "end"), "cut_piece": s.parts})
+        c0, c1 = _full_span(s)
+        others = [(o["S"].a0_tl, o["S"].a1_tl) for o in segs if o is not it]
+        for win, tol in ((check_ms, check_db), (short_ms, short_db)):
+            for edge, t0, t1 in (("start", s.on_true, s.on_true + win), ("end", s.end_true - win, s.end_true)):
+                t0, t1 = max(t0, 0.0), min(t1, src_ms)
+                if t1 <= t0:
+                    continue
+                T0, T1 = t0 - s.off * fms, t1 - s.off * fms
+                lo, ls = level_db(out, T0, T1), level_db(src, t0, t1)
+                d = lo - ls
+                unc = (T1 - T0) - _len_in([(c0, c1)], T0, T1)
+                ovl = _len_in(others, T0, T1)
+                rows.append({"piece": ids[id(it)], "edge": edge, "win_ms": win,
+                             "dst_s": round(T0 / 1000 if edge == "start" else T1 / 1000, 3),
+                             "src_ms": round(t0 if edge == "start" else t1, 1), "out_db": round(lo, 2),
+                             "src_db": round(ls, 2), "diff_db": round(d, 2), "uncovered_ms": round(unc, 1),
+                             "overlap_ms": round(ovl, 1), "ok": abs(d) <= tol and unc <= EDGE_UNCOVERED_MS,
+                             "words": _words_text(s.words, edge == "end"), "cut_piece": s.parts})
     return rows
 
 
@@ -745,7 +849,7 @@ def _records(pl, cuts):
     return pieces, joins, words, phs, ids
 
 
-def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=0, soft_db=4.0,
+def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=0, soft_db=4.0, loud_db=10.0,
             search_ms=400, check_ms=120, check_db=0.05, crf=18):
     """Close the join pauses of a cut.py cut; write <out>.mp4/.cuts.json/.words.json; return a summary.
 
@@ -783,7 +887,7 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
     src = apply_balance(load_audio(source), cuts)
     old = load_audio(stem + ".mp4")
     opts = {"min_pause_ms": min_pause_ms, "keep_placeholders": keep_placeholders, "gap_ms": gap_ms,
-            "soft_db": soft_db, "search_ms": search_ms}
+            "soft_db": soft_db, "loud_db": loud_db, "search_ms": search_ms}
     pl = plan(cuts, wdoc, slice_db(src.mean(axis=1)), opts)
     audio = mix(pl, src, old)
     pieces, joins, words, phs, ids = _records(pl, cuts)
@@ -799,7 +903,8 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
            "duration_s": round(frames / fps, 3), "duration_before_s": round(int(cuts["frames"]) / fps, 3),
            "settings": settings, "pieces": pieces, "joins": joins, "placeholders": phs,
            "dropped_air_pieces": pl["dropped_air_pieces"], "voice_not_died_away": pl["voice_not_died_away"],
-           "sound_in_pause": pl["sound_in_pause"], "edge_check": edges, "missing_check": missing,
+           "sound_in_pause": pl["sound_in_pause"], "room_noise_warning": pl["room_noise_warning"],
+           "edge_check": edges, "missing_check": missing,
            "added_check": added, "edge_bad": bad}
     for k in ("channel_balance", "channel_balance_db", "gains", "preset"):
         if k in cuts:
@@ -823,7 +928,8 @@ def tighten(stem, out_stem, min_pause_ms=250, keep_placeholders=True, *, gap_ms=
     return {"out": out_stem, "frames": frames, "duration_s": doc["duration_s"],
             "duration_before_s": doc["duration_before_s"], "pieces": len(pieces), "joins": joins,
             "placeholders": phs, "edge_check": edges, "missing_check": missing, "edge_bad": bad,
-            "voice_not_died_away": pl["voice_not_died_away"], "sound_in_pause": pl["sound_in_pause"]}
+            "voice_not_died_away": pl["voice_not_died_away"], "sound_in_pause": pl["sound_in_pause"],
+            "room_noise_warning": pl["room_noise_warning"]}
 
 
 # ---------------------------------------------------------------- CLI
@@ -838,7 +944,9 @@ def main(argv=None):
     ap.add_argument("--gap-ms", type=int, default=0, help="room tone left between a voice end and the next start")
     ap.add_argument("--soft-db", type=float, default=4.0,
                     help="edge = 3 slices below room tone + this, sound = 3 slices at or above it (dB)")
-    ap.add_argument("--check-db", type=float, default=0.05, help="edge check tolerance (dB)")
+    ap.add_argument("--loud-db", type=float, default=10.0,
+                    help="any single slice this far above the room tone is sound (a click, a consonant) (dB)")
+    ap.add_argument("--check-db", type=float, default=0.05, help="edge check tolerance, 120 ms window (dB)")
     a = ap.parse_args(argv)
     try:
         require_ffmpeg()
@@ -847,7 +955,7 @@ def main(argv=None):
         return 3
     try:
         res = tighten(a.stem, a.out, a.min_pause_ms, not a.no_placeholders, gap_ms=a.gap_ms,
-                      soft_db=a.soft_db, check_db=a.check_db)
+                      soft_db=a.soft_db, loud_db=a.loud_db, check_db=a.check_db)
     except cut.MissingTool as e:
         print(str(e), file=sys.stderr)
         return 3
@@ -863,6 +971,8 @@ def main(argv=None):
     for v in res["sound_in_pause"]:
         print(f"  sound in pause: cut piece {v['cut_piece']} at {v['sound_at_ms'] / 1000:.2f}s src ({v['db']:.1f} dB, "
               f"between '{v['before']}' and '{v['after']}'): pause kept as cut")
+    if res["room_noise_warning"]:
+        print(f"warning: {res['room_noise_warning']}")
     bad = res["edge_bad"]
     print(f"edge check: {len(res['edge_check'])} clip edges + missing audit, {len(bad)} problem(s)")
     for e in bad:
@@ -873,8 +983,9 @@ def main(argv=None):
             print(f"  MISSING: cut piece {e['cut_piece']} src {e['src_ms'][0] / 1000:.2f}-{e['src_ms'][1] / 1000:.2f}s "
                   f"is not in the output but has sound ({e['db']:.1f} dB at {e['sound_at_ms'] / 1000:.2f}s; {e['words']})")
         else:
-            print(f"  piece {e['piece']} {e['edge']} at {e['dst_s']:.2f}s ({e['words']}): {e['diff_db']:+.2f} dB vs the "
-                  f"source (cut piece {e['cut_piece']})")
+            print(f"  piece {e['piece']} {e['edge']} at {e['dst_s']:.2f}s ({e['words']}), {e['win_ms']} ms window: "
+                  f"{e['diff_db']:+.2f} dB vs the source, {e['uncovered_ms']:.0f} ms of voice not played at full "
+                  f"level, {e['overlap_ms']:.0f} ms under another clip (cut piece {e['cut_piece']})")
     print(f"wrote {res['out']}.mp4; next: check_cut.py {res['out']}")
     return 1 if bad else 0
 
