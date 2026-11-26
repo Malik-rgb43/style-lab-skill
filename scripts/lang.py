@@ -9,7 +9,7 @@ Commands:
     lang.py adapt <pack> --to <code> [--from-lang <code>] [--source-wps X] [--target-wps Y] [--font-dir DIR ...]
                                               write <pack>/adapt-<code>.json
 
-Exit codes: 0 ok, 2 bad input.
+Exit codes: 0 ok, 2 bad input, 3 a file could not be read or written (including a failed write).
 """
 import argparse
 import copy
@@ -33,19 +33,19 @@ DEFAULT_ELEMENTS = ("reading_order", "progress_bar", "arrow", "slide_in", "list_
 # (keywords, why). Matched as substrings of the normalised element name; KEEP rows win.
 KEEP_TABLE = [
     (("clock", "watch"), "a clock turns the same way in every language"),
-    (("axis", "axes", "chart", "charts", "graph", "plot"), "chart axes keep their direction (time and values are not text)"),
+    (("axis", "axes", "chart", "graph", "plot"), "chart axes keep their direction (time and values are not text)"),
     (("logo", "brand_mark", "wordmark"), "a logo is a fixed artwork"),
     (("code", "terminal", "console", "snippet"), "code is left to right in every language"),
-    (("digit", "digits", "number", "numbers", "numeral", "counter", "price"), "digits stay left to right"),
+    (("digit", "number", "numeral", "counter", "price"), "digits stay left to right"),
     (("timecode", "timestamp", "playhead", "scrub"), "video timecode runs left to right"),
 ]
 MIRROR_TABLE = [
     (("reading_order", "text_flow", "headline", "caption", "paragraph", "title"),
      "text block follows the reading direction"),
     (("progress",), "a progress bar fills along the reading direction"),
-    (("arrow", "arrows", "chevron", "pointer"), "an arrow that means forward or back follows the reading direction"),
+    (("arrow", "chevron", "pointer"), "an arrow that means forward or back follows the reading direction"),
     (("slide_in", "slide", "wipe", "swipe", "enter_from"), "motion enters from the side the reader starts on"),
-    (("list", "lists", "stepper", "steps", "menu"), "list order follows the reading direction"),
+    (("list", "stepper", "steps", "menu"), "list order follows the reading direction"),
 ]
 SIDE_FLIP = {"left": "right", "right": "left"}
 
@@ -123,7 +123,9 @@ def scale_timing(laws, ratio):
 
 # ---------------------------------------------------------------- mirror
 def _norm(s):
-    return re.sub(r"[^a-z0-9]+", "_", str(s).lower()).strip("_")
+    """camelCase, snake_case and kebab-case all become lower-case words joined by "_"."""
+    s = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", str(s))
+    return re.sub(r"[^a-z0-9]+", "_", s.lower()).strip("_")
 
 
 def mirror_plan(elements, target_dir="rtl", source_dir="ltr"):
@@ -163,9 +165,13 @@ def mirror_plan(elements, target_dir="rtl", source_dir="ltr"):
 
 
 def _has_kw(tokens, kw):
-    """True when the keyword's tokens appear as a contiguous run of whole tokens."""
+    """True when the keyword's words appear as a contiguous run of whole tokens (a trailing s/es on a token
+    is ignored), or when the keyword run together ("progressbar") equals one token."""
     k = kw.split("_")
-    return any(tokens[i:i + len(k)] == k for i in range(len(tokens) - len(k) + 1))
+    forms = [{t, t[:-1] if t.endswith("s") else t, t[:-2] if t.endswith("es") else t} for t in tokens]
+    if any(all(k[j] in forms[i + j] for j in range(len(k))) for i in range(len(tokens) - len(k) + 1)):
+        return True
+    return len(k) > 1 and any("".join(k) in f for f in forms)
 
 
 def _side(el):
@@ -185,17 +191,28 @@ def _has_digit(w):
     return bool(re.search(r"\d", str(w)))
 
 
+def _is_year(w):
+    return bool(re.fullmatch(r"[12]\d{3}", w))
+
+
+def _is_day(w):
+    m = re.fullmatch(r"(\d{1,2})(st|nd|rd|th)?", w)
+    return bool(m) and 1 <= int(m.group(1)) <= 31
+
+
 def find_triggers(words, profile):
     """Word triggers in `words` (list of str): [{i, j, kind, text}] with j exclusive (words[i:j]).
 
     kind is "number", "month" or "question". Multi-word profile entries match as phrases, longest first.
     One prefix letter from triggers.prefixes is stripped from the first word (he: בשלוש). Digits count as
-    numbers. Months in triggers.ambiguous (en: may, march) count only with a digit or year within 2 words."""
+    numbers. Months in triggers.ambiguous (en: may, march) count only with a year (1000-2999) within 2 words or a day (1-31) right next to them.
+    Words in triggers.not_numbers (he: השני, המאה) are never numbers; checked with the prefix still on."""
     tr = profile.get("triggers", {})
     prefixes = set(tr.get("prefixes", []))
     ambiguous = {a.lower() for a in tr.get("ambiguous", [])}
     qmarks = tr.get("question_marks", ["?"])
     entries = {}
+    not_numbers = set(tr.get("not_numbers", []))
     for kind, key in (("number", "number_words"), ("month", "months")):
         for e in tr.get(key, []):
             entries.setdefault(tuple(e.lower().split()), kind)
@@ -211,7 +228,7 @@ def find_triggers(words, profile):
     found, i = [], 0
     while i < n:
         hit = None
-        for L in range(min(maxlen, n - i), 0, -1):
+        for L in range(0 if clean[i] in not_numbers else min(maxlen, n - i), 0, -1):
             rest = tuple(clean[i + 1:i + L])
             for first in firsts(clean[i]):
                 kind = entries.get((first,) + rest)
@@ -220,11 +237,12 @@ def find_triggers(words, profile):
                     break
             if hit:
                 break
-        if hit is None and any(_has_digit(c) for c in firsts(clean[i])):
+        if hit is None and clean[i] not in not_numbers and any(_has_digit(c) for c in firsts(clean[i])):
             hit = (i + 1, "number", None)
         if hit and hit[1] == "month" and hit[2] and " ".join(hit[2]) in ambiguous:
-            near = list(range(max(0, i - 2), i)) + list(range(hit[0], min(n, hit[0] + 2)))
-            if not any(_has_digit(words[k]) for k in near):
+            def near(lo, hi):
+                return [clean[k] for k in list(range(max(0, i - lo), i)) + list(range(hit[0], min(n, hit[0] + hi)))]
+            if not (any(_is_year(w) for w in near(2, 2)) or any(_is_day(w) for w in near(1, 1))):
                 hit = None
         if hit:
             found.append({"i": i, "j": hit[0], "kind": hit[1], "text": " ".join(str(w) for w in words[i:hit[0]])})

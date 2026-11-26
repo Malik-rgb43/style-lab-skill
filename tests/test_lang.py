@@ -207,3 +207,19 @@ def test_adapt_input_errors(tmp_path):
     assert run_cli("lang.py", "adapt", pack, "--to", "he").returncode == 0
     out = json.loads((pack / "adapt-he.json").read_text(encoding="utf-8"))
     assert "font_metrics_source" in out["not_run"] or "font_metrics" in out["not_run"]
+
+
+def test_mirror_naming_styles_and_plurals():
+    names = ["progressBar", "progress_bar", "progress-bar", "slidein", "captions", "logos", "timecodes", "slideIn"]
+    got = {r["element"]: r["mirror"] for r in lang.mirror_plan(names)}
+    for k in ("progressBar", "progress_bar", "progress-bar", "slidein", "captions", "slideIn"):
+        assert got[k] is True, k
+    assert got["logos"] is False and got["timecodes"] is False
+
+
+def test_find_triggers_false_positives():
+    assert _kinds(["השני"], "he") == [] and _kinds(["המאה"], "he") == []
+    assert _kinds("שני אנשים".split(), "he") == [(0, 1, "number")]
+    assert _kinds("I may have 2 dogs".split(), "en") == [(3, 4, "number")]
+    assert _kinds("May 5".split(), "en") == [(0, 1, "month"), (1, 2, "number")]
+    assert _kinds("5 March".split(), "en") == [(0, 1, "number"), (1, 2, "month")]
