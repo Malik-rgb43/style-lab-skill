@@ -11,14 +11,15 @@ Claude writes one <pack>/analysis/<id>/creator.json per training video, followin
 references/creator-mind.md. The controlled vocabularies (parts, methods, message types, principles, elements,
 tools, the method x message-type fit table) live in assets/creator-vocab.json:
 
-  {schema "creator/1",
+  {schema "creator/2" (creator/1 files are reported with an upgrade message),
    story: {structure: [{part, t0, t1, words}], hook: {type, first_words_s, visual_device},
            open_loops: [{opened_t, closed_t|null, text}], audience_promise},
    visual_ideas: [{t0, t1, line, visual_only?, message, message_type, emotion, idea, translation, principle,
-                   why_this, alternatives: [2+ str], craft: {framing, motion, text_role, sound_role}, pattern?}],
+                   principle_note? (required when principle is other), why_this, alternatives: [2+ str], craft: {framing, motion, text_role, sound_role}, pattern?}],
    decisions: [{t, what, why, problem_solved, principle, principle_note?, alternative_rejected?, evidence}],
    retention: [{t, device, gap_s_since_last?}],
-   toolchain: [{element, likely_tool (one tool or a list = a pipeline), how, confidence 0..1, evidence}],
+   toolchain: [{element, likely_tool (one tool, or a list = a pipeline, order-insensitive), how, confidence 0..1,
+               evidence}],
    rules_of_thumb: [str]}
 
 `line` may be "" only with visual_only: true (a visual before any speech). gap_s_since_last is informative
@@ -27,14 +28,16 @@ only: synth computes every gap from the device times and the video's duration.
 Usage:
   creator.py check <pack>                       validate every analysis/<id>/creator.json
   creator.py candidates <pack> <id>             candidate device times (cuts, jumps, sfx, big text), JSON
-  creator.py merge-rules <pack> [--apply map.json]   near-duplicate rules of thumb (token Jaccard >= 0.6);
+  creator.py merge-rules <pack> [--kind rules|never|pattern|promise|device|all] [--apply map.json]
+                                                near-duplicate wordings (token Jaccard >= 0.6) of rules of thumb,
+                                                never-do items, patterns, audience promises or hook devices;
                                                 --apply rewrites them from {"old wording": "new wording"}
   creator.py synth <pack> [--train V01,V02 | --all] [--exclude V03]   write <pack>/creator-mind.json
   creator.py ideate <pack> --line "<line>" --type <message_type> [--used plan-used.json]   brief, JSON
 
 synth writes {schema "creator-mind/1", trained_on, held_out, dupes, ideation, story_template, hooks,
-open_loops, audience_promise, retention, principles, problems, never_do, toolchain, rules_of_thumb,
-checklist}. Numbers are {median, p10, p90, n, seen_in}; seen_in always counts videos. Shares are computed per
+open_loops, audience_promise, retention, principles, problems, never_do, principle_notes, toolchain,
+rules_of_thumb, checklist}. Numbers are {median, p10, p90, n, seen_in}; seen_in always counts videos. Shares are computed per
 video and macro-averaged (the pooled value is kept as pooled_share). Counted free text is normalised first:
 lowercase, punctuation stripped, whitespace collapsed. Videos with the same source sha256 (measure.json
 video.sha256) or near-identical thumbs (thumbs.json, mean Hamming <= 6 of 64 bits) count once.
@@ -59,13 +62,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import store  # noqa: E402
 
-SCHEMA = "creator/1"
+SCHEMA = "creator/2"
+OLD_SCHEMAS = ("creator/1",)
 MIND_SCHEMA = "creator-mind/1"
 VOCAB_PATH = Path(__file__).resolve().parent.parent / "assets" / "creator-vocab.json"
 RULE_SHARE = 0.30
 RARE_SHARE = 0.10          # a method under this macro share of the creator's ideas is "rarely used"
 DUP_HAMMING = 6
 STRUCTURE_TOL_S = 1.0
+STRUCTURE_START_S = 0.5     # boundaries this close to t=0 are the opening, never scored
+DEVICE_SHOT_RATIO = (0.5, 2.0)  # a cut is a device candidate when its shot is < 0.5x or > 2x the median shot
+NEVER_DO_MIN_SEEN = 2
 MERGE_JACCARD = 0.6
 BIG_TEXT_PCT = 8.0
 EXAMPLES_PER_METHOD = 6
@@ -164,9 +171,12 @@ def _story_of(doc):
 
 
 def tool_key(likely_tool):
-    """'ai_image+ai_i2v' for a pipeline list, the tool itself for one tool."""
+    """The tool itself, or a pipeline list joined with '+'. Order-insensitive: the items are sorted in the
+    vocab's tool order, so ["ai_i2v", "ai_image"] and ["ai_image", "ai_i2v"] are both 'ai_image+ai_i2v'."""
     if isinstance(likely_tool, list):
-        return "+".join(str(t) for t in likely_tool)
+        rank = {t: i for i, t in enumerate(TOOLS)}
+        items = sorted({str(t) for t in likely_tool}, key=lambda t: (rank.get(t, len(rank)), t))
+        return "+".join(items)
     return str(likely_tool) if likely_tool is not None else ""
 
 
@@ -220,6 +230,19 @@ def _span(d, p, errs):
         errs.append(f"{p}.t1: ends before t0")
 
 
+def _principle(d, p, errs, old=False):
+    """principle: an id from the vocab; principle_note: optional free text, required when principle is other."""
+    if "principle" not in d and old:
+        errs.append(f"{p}.principle: missing (upgrade: add principle)")
+    else:
+        _req_enum(d, "principle", PRINCIPLES, p, errs)
+    note = d.get("principle_note")
+    if note is not None and not isinstance(note, str):
+        errs.append(f"{p}.principle_note: must be a string")
+    elif d.get("principle") == "other" and not _str(note):
+        errs.append(f"{p}.principle_note: required when principle is 'other' (say what the principle is)")
+
+
 def validate(doc):
     """Schema errors of one creator.json as 'field: problem' strings (empty list = valid)."""
     if VOCAB_ERROR:
@@ -227,7 +250,11 @@ def validate(doc):
     errs = []
     if not isinstance(doc, dict):
         return ["(root): must be a JSON object"]
-    if doc.get("schema") != SCHEMA:
+    old = doc.get("schema") in OLD_SCHEMAS
+    if old:
+        errs.append(f"schema: {doc['schema']!r} is the old format. Upgrade: add principle (an id from "
+                    f"assets/creator-vocab.json) to every field listed below, then set schema to {SCHEMA!r}")
+    elif doc.get("schema") != SCHEMA:
         errs.append(f"schema: must be {SCHEMA!r}")
 
     story = doc.get("story")
@@ -265,7 +292,7 @@ def validate(doc):
             _req_str(v, k, p, errs)
         _req_enum(v, "translation", TRANSLATIONS, p, errs)
         _req_enum(v, "message_type", MESSAGE_TYPES, p, errs)
-        _req_enum(v, "principle", PRINCIPLES, p, errs)
+        _principle(v, p, errs, old)
         alts = v.get("alternatives")
         if "alternatives" not in v:
             errs.append(f"{p}.alternatives: missing")
@@ -285,10 +312,9 @@ def validate(doc):
         for k in ("what", "why"):
             _req_str(d, k, p, errs)
         _req_enum(d, "problem_solved", PROBLEMS, p, errs)
-        _req_enum(d, "principle", PRINCIPLES, p, errs)
-        for k in ("principle_note", "alternative_rejected"):
-            if d.get(k) is not None and not isinstance(d[k], str):
-                errs.append(f"{p}.{k}: must be a string")
+        _principle(d, p, errs, old)
+        if d.get("alternative_rejected") is not None and not isinstance(d["alternative_rejected"], str):
+            errs.append(f"{p}.alternative_rejected: must be a string")
         ev = d.get("evidence")
         evs = ev if isinstance(ev, list) else [ev]
         if "evidence" not in d:
@@ -517,6 +543,18 @@ def _decisions(docs):
     return principles, dict(problems.most_common()), never_do
 
 
+def _principle_notes(docs):
+    """Notes written where principle is "other": candidates Claude may promote into the vocab."""
+    pc = _Counted()
+    for vid, doc in docs.items():
+        for key in ("decisions", "visual_ideas"):
+            for d in _lst(doc, key):
+                if d.get("principle") == "other" and _str(d.get("principle_note")):
+                    pc.add(d["principle_note"], vid, {"from": key})
+    return [{"note": x["text"], "key": x["key"], "count": x["count"], "seen_in": x["seen_in"],
+             "videos": x["videos"], "from": x.get("from", {}), "status": x["status"]} for x in pc.ranked(len(docs))]
+
+
 def _toolchain(docs):
     """Per element: votes weighted by the stated confidence; consensus = the heaviest tool (pipeline),
     confidence = its weight / the element's total weight."""
@@ -666,7 +704,8 @@ def synth(analyses, held_out=None, dupes=None, durations=None):
             "ideation": _ideation(docs), "story_template": _story(docs), "hooks": _hooks(docs),
             "open_loops": _open_loops(docs), "audience_promise": _promises(docs),
             "retention": _retention(docs, durations), "principles": principles, "problems": problems,
-            "never_do": never_do, "toolchain": _toolchain(docs), "rules_of_thumb": _rules(docs)}
+            "never_do": never_do, "principle_notes": _principle_notes(docs), "toolchain": _toolchain(docs),
+            "rules_of_thumb": _rules(docs)}
     mind["checklist"] = checklist(mind)
     return mind
 
@@ -761,25 +800,38 @@ def _wild_card(ide, mt, exclude, used_methods, line):
     return tied[h % len(tied)], note
 
 
-def _used(used):
+def _used(used, message_type):
+    """(method counts of this message type's beats, example ids used anywhere in the plan). Entries without a
+    message_type still block their example, but do not count towards any type's method shares."""
     methods, ids = Counter(), set()
     for u in used or []:
         if isinstance(u, dict):
-            if u.get("method") in TRANSLATIONS:
+            if u.get("method") in TRANSLATIONS and u.get("message_type") == message_type:
                 methods[u["method"]] += 1
             if isinstance(u.get("example_id"), str):
                 ids.add(u["example_id"])
     return methods, ids
 
 
+def _never_do(mind):
+    """never_do items seen in at least 2 videos, or in at least 30 % of them."""
+    n = len(mind.get("trained_on") or [])
+    return [x for x in (mind.get("never_do") or []) if isinstance(x, dict)
+            and (x.get("seen_in", 0) >= NEVER_DO_MIN_SEEN or (n and x.get("seen_in", 0) / n >= RULE_SHARE - 1e-9))]
+
+
 def ideate(mind, line, message_type, used=None):
-    """The brief Claude uses to invent visuals for `line` the creator's way. used: [{method, example_id}]
-    already used in this plan; methods and examples are rotated so the plan does not repeat itself."""
+    """The brief Claude uses to invent visuals for `line` the creator's way.
+
+    used: [{message_type, method, example_id}] already chosen in this plan. Methods rotate by deficit against
+    the creator's share: with k beats of this message type so far, this beat is beat k + 1, a method's target is
+    share x (k + 1), and the method furthest below its target comes first. A creator who uses one method 83 %
+    of the time still gets it on about 5 beats of 6. Used examples are never offered again."""
     if message_type not in MESSAGE_TYPES:
         raise ValueError(f"message type {message_type!r} is not one of {'|'.join(MESSAGE_TYPES)}")
     mind = mind or {}
     ide = mind.get("ideation") or {}
-    used_methods, used_ids = _used(used)
+    used_methods, used_ids = _used(used, message_type)
     play = (ide.get("playbook") or {}).get(message_type)
     fallback = None
     if play and play.get("methods"):
@@ -793,15 +845,16 @@ def ideate(mind, line, message_type, used=None):
         methods = [{"method": m, **d, "principles": (ide.get("principles_by_method") or {}).get(m, {}),
                     "examples": allex.get(m, [])} for m, d in (ide.get("methods") or {}).items()]
     notes = []
-    ranked = sorted(range(len(methods)), key=lambda i: (used_methods.get(methods[i]["method"], 0), i))
-    rotated = [methods[i] for i in ranked]
-    top = rotated[:2]
+    beat = sum(used_methods.values()) + 1
+    deficit = {m["method"]: (m.get("share") or 0.0) * beat - used_methods.get(m["method"], 0) for m in methods}
+    ranked = sorted(range(len(methods)), key=lambda i: (-deficit[methods[i]["method"]], i))
+    top = [methods[i] for i in ranked][:2]
     skipped = [m["method"] for m in methods[:2] if m not in top]
     if skipped:
-        notes.append(f"already used in this plan, moved back: {', '.join(skipped)}")
+        notes.append(f"ahead of the creator's share in this plan, moved back: {', '.join(skipped)}")
     if methods and all(used_methods.get(m["method"], 0) for m in methods):
         notes.append(f"ran out: every method the creator uses for a {message_type} line is already used in this "
-                     "plan; the least used ones are offered again, so make the idea itself clearly new")
+                     "plan; methods now repeat in the creator's proportions, so make each idea clearly new")
     top_out = []
     for m in top:
         exs = [e for e in m.get("examples", []) if e.get("example_id") not in used_ids]
@@ -859,10 +912,12 @@ def ideate(mind, line, message_type, used=None):
             "emotions": (play or {}).get("emotions", {}),
             "patterns": [{"pattern": p["pattern"], "seen_in": p["seen_in"], "methods": p.get("methods", {})}
                          for p in pats[:5]],
-            "never_do": [{"avoid": x["avoid"], "seen_in": x["seen_in"]} for x in (mind.get("never_do") or [])[:5]],
+            "never_do": [{"avoid": x["avoid"], "seen_in": x["seen_in"]} for x in _never_do(mind)[:5]],
             "craft_notes": craft_notes, "rule": rule,
-            "rotation": {"used_methods": dict(used_methods), "used_examples": len(used_ids), "notes": notes},
-            "record_when_chosen": "add {method, example_id} of the chosen idea to the plan's used list",
+            "rotation": {"beat_of_type": beat, "used_methods": dict(used_methods),
+                         "deficit": {m: round(d, 4) for m, d in deficit.items()}, "used_examples": len(used_ids),
+                         "notes": notes},
+            "record_when_chosen": "add {message_type, method, example_id} of the chosen idea to the plan's used list",
             "for_each_idea": ["idea (concrete: object, action, framing)", "translation method", "principle",
                               "why it serves the message better than a literal shot",
                               "craft: framing, motion, text_role, sound_role"]}
@@ -881,9 +936,12 @@ def candidates(measure, sound=None):
     prev = 0.0
     for c in cuts:
         before = c["t"] - prev
+        ratio = before / med if med else None
+        lo, hi = DEVICE_SHOT_RATIO
         d = {"t": round(float(c["t"]), 3), "source": "jump" if c.get("kind") == "jump" else "cut",
              "kind": c.get("kind"), "shot_before_s": round(before, 3),
-             "vs_median_shot": round(before / med, 2) if med else None}
+             "vs_median_shot": round(ratio, 2) if ratio is not None else None,
+             "passes_shot_ratio": bool(ratio is not None and (ratio < lo or ratio > hi))}
         out.append(d)
         if c.get("kind") != "jump":
             prev = c["t"]
@@ -905,29 +963,58 @@ def candidates(measure, sound=None):
     out.sort(key=lambda d: (d["t"], d["source"]))
     v = m.get("video") if isinstance(m.get("video"), dict) else {}
     return {"duration_s": v.get("duration_s"), "median_shot_s": med, "candidates": out,
-            "rule": "a device resets attention beyond the style's normal cutting rhythm; a regular cut at about "
-                    "the median shot length (vs_median_shot near 1) is not a device. Classify each candidate, and "
-                    "add devices the measurements cannot see (an open loop, a reveal in the words)."}
+            "device_shot_ratio": list(DEVICE_SHOT_RATIO),
+            "rule": "a device resets attention beyond the style's normal cutting rhythm. A cut is a device only when "
+                    f"its shot is under {DEVICE_SHOT_RATIO[0]}x or over {DEVICE_SHOT_RATIO[1]}x the median shot "
+                    "(passes_shot_ratio) or when it brings a new visual idea. Classify each candidate, and add "
+                    "devices the measurements cannot see (an open loop, a reveal in the words)."}
 
 
-# ---------------------------------------------------------------- rules of thumb merging
+# ---------------------------------------------------------------- merging free-text wordings
 
-def _jaccard(a, b):
-    return len(a & b) / len(a | b) if a | b else 0.0
+MERGE_KINDS = ("rules", "never", "pattern", "promise", "device")
 
 
-def similar_rules(docs, threshold=MERGE_JACCARD):
-    """Clusters of near-duplicate rules (token Jaccard >= threshold) over {id: doc}. Each cluster lists the
-    wordings with their videos and suggests the most used wording."""
-    rules = {}
+def _kind_slots(doc, kind):
+    """[(container, key)] holding the free-text values of `kind` in one creator.json."""
+    if not isinstance(doc, dict):
+        return []
+    story = _story_of(doc)
+    if kind == "rules":
+        rules = doc.get("rules_of_thumb")
+        return [(rules, i) for i in range(len(rules))] if isinstance(rules, list) else []
+    if kind == "never":
+        return [(d, "alternative_rejected") for d in _lst(doc, "decisions")]
+    if kind == "pattern":
+        return [(v, "pattern") for v in _lst(doc, "visual_ideas")]
+    if kind == "promise":
+        return [(story, "audience_promise")] if story else []
+    if kind == "device":
+        h = story.get("hook")
+        return [(h, "visual_device")] if isinstance(h, dict) else []
+    raise ValueError(f"unknown kind {kind!r}: one of {'|'.join(MERGE_KINDS)}|all")
+
+
+def _kind_texts(doc, kind):
+    out = []
+    for c, k in _kind_slots(doc, kind):
+        v = c[k] if isinstance(c, list) else c.get(k)
+        if isinstance(v, str) and norm_text(v):
+            out.append(v)
+    return out
+
+
+def similar_texts(docs, kind="rules", threshold=MERGE_JACCARD):
+    """Clusters of near-duplicate wordings of one kind (token Jaccard >= threshold) over {id: doc}. Each cluster
+    lists the wordings with their videos and suggests the most used wording."""
+    items = {}
     for vid, doc in docs.items():
-        for r in doc.get("rules_of_thumb") or [] if isinstance(doc, dict) else []:
-            k = norm_text(r) if isinstance(r, str) else ""
-            if k:
-                it = rules.setdefault(k, {"text": r.strip(), "key": k, "videos": []})
-                if vid not in it["videos"]:
-                    it["videos"].append(vid)
-    keys = sorted(rules)
+        for t in _kind_texts(doc, kind):
+            k = norm_text(t)
+            it = items.setdefault(k, {"text": t.strip(), "key": k, "videos": []})
+            if vid not in it["videos"]:
+                it["videos"].append(vid)
+    keys = sorted(items)
     toks = {k: set(k.split()) for k in keys}
     parent = {k: k for k in keys}
 
@@ -942,7 +1029,7 @@ def similar_rules(docs, threshold=MERGE_JACCARD):
                 parent[find(a)] = find(b)
     groups = {}
     for k in keys:
-        groups.setdefault(find(k), []).append(rules[k])
+        groups.setdefault(find(k), []).append(items[k])
     clusters = []
     for g in groups.values():
         if len(g) < 2:
@@ -953,22 +1040,36 @@ def similar_rules(docs, threshold=MERGE_JACCARD):
     return clusters
 
 
-def apply_rule_map(doc, mapping):
-    """Rewrite doc's rules_of_thumb from {old wording: new wording} (matched after normalising), dropping
-    duplicates inside the video. Returns the number of rules changed."""
+def similar_rules(docs, threshold=MERGE_JACCARD):
+    return similar_texts(docs, "rules", threshold)
+
+
+def _jaccard(a, b):
+    return len(a & b) / len(a | b) if a | b else 0.0
+
+
+def apply_map(doc, mapping, kind="rules"):
+    """Rewrite the wordings of `kind` from {old wording: new wording} (matched after normalising). Rules of
+    thumb are de-duplicated inside the video. Returns the number of values changed."""
     nm = {norm_text(k): v.strip() for k, v in mapping.items()}
-    out, seen, changed = [], set(), 0
-    for r in doc.get("rules_of_thumb") or []:
-        if not isinstance(r, str):
-            continue
-        new = nm.get(norm_text(r), r)
-        changed += new != r
-        k = norm_text(new)
-        if k and k not in seen:
-            seen.add(k)
-            out.append(new)
-    doc["rules_of_thumb"] = out
+    changed = 0
+    for c, k in _kind_slots(doc, kind):
+        v = c[k] if isinstance(c, list) else c.get(k)
+        if isinstance(v, str) and norm_text(v) in nm and nm[norm_text(v)] != v:
+            c[k] = nm[norm_text(v)]
+            changed += 1
+    if kind == "rules" and isinstance(doc.get("rules_of_thumb"), list):
+        out, seen = [], set()
+        for r in doc["rules_of_thumb"]:
+            if isinstance(r, str) and norm_text(r) and norm_text(r) not in seen:
+                seen.add(norm_text(r))
+                out.append(r)
+        doc["rules_of_thumb"] = out
     return changed
+
+
+def apply_rule_map(doc, mapping):
+    return apply_map(doc, mapping, "rules")
 
 
 # ---------------------------------------------------------------- hold-out scoring (called by prove.py)
@@ -981,11 +1082,12 @@ def _boundaries(structure):
 def score_structure(pred, actual, tol_s=STRUCTURE_TOL_S):
     """Score predicted story parts against the actual ones. Each part's start is a boundary labelled with the
     part; a predicted boundary matches an actual one of the same part within tol_s (nearest first,
-    one-to-one). The opening boundary (the first part's start, at the video's start) is not scored: it would
-    be a free match. Returns {precision, recall, f1, overall_f1, tp, n_pred, n_actual, timing_mae_s,
+    one-to-one). Boundaries within STRUCTURE_START_S (0.5 s) of t=0 are the opening and are not scored: they
+    would be a free match. Returns {precision, recall, f1, overall_f1, tp, n_pred, n_actual, timing_mae_s,
     abs_err_sum, order_match, first_part_match} (keys compatible with prove.pool_scores)."""
     p_all, a_all = _boundaries(pred), _boundaries(actual)
-    p, a = p_all[1:], a_all[1:]
+    p = [b for b in p_all if b[0] >= STRUCTURE_START_S]
+    a = [b for b in a_all if b[0] >= STRUCTURE_START_S]
     pairs = sorted((abs(pt - at), i, j) for i, (pt, pp) in enumerate(p) for j, (at, ap) in enumerate(a)
                    if pp == ap and abs(pt - at) <= tol_s + 1e-9)
     used_p, used_a, errs = set(), set(), []
@@ -1150,16 +1252,33 @@ def cmd_candidates(a):
     return 0
 
 
+def _kind_maps(mapping, kinds):
+    """{kind: {old: new}} from a flat map (applied to every selected kind) or a map nested by kind."""
+    if not isinstance(mapping, dict) or not mapping:
+        raise BadInput('--apply: the map must be {"old wording": "new wording"} or {kind: {...}}')
+    if all(isinstance(v, dict) for v in mapping.values()):
+        unknown = [k for k in mapping if k not in MERGE_KINDS]
+        if unknown:
+            raise BadInput(f"--apply: unknown kind {', '.join(unknown)} (one of {'|'.join(MERGE_KINDS)})")
+        out = {k: v for k, v in mapping.items() if k in kinds}
+    else:
+        out = {k: mapping for k in kinds}
+    for m in out.values():
+        if not all(isinstance(k, str) and _str(v) for k, v in m.items()):
+            raise BadInput('--apply: every entry must be "old wording": "new wording"')
+    return out
+
+
 def cmd_merge_rules(a):
     files = creator_files(a.pack)
+    kinds = list(MERGE_KINDS) if a.kind == "all" else [a.kind]
     if a.apply:
         try:
             mapping = _load_json(a.apply)
         except (OSError, ValueError) as e:
             raise BadInput(f"--apply: cannot read the map ({type(e).__name__})")
-        if not isinstance(mapping, dict) or not all(isinstance(k, str) and _str(v) for k, v in mapping.items()):
-            raise BadInput('--apply: the map must be {"old wording": "new wording", ...}')
-        changed, bad = 0, []
+        maps = _kind_maps(mapping, kinds)
+        changed, bad = Counter(), []
         for vid, f in files.items():
             try:
                 doc = _load_json(f)
@@ -1169,11 +1288,15 @@ def cmd_merge_rules(a):
             if not isinstance(doc, dict):
                 bad.append(vid)
                 continue
-            n = apply_rule_map(doc, mapping)
+            n = 0
+            for kind, m in maps.items():
+                c = apply_map(doc, m, kind)
+                changed[kind] += c
+                n += c
             if n:
                 store.write_json(f, doc)
-                changed += n
-        print(f"rules_of_thumb: {changed} rule(s) rewritten" + (f"; unreadable: {', '.join(bad)}" if bad else ""))
+        done = ", ".join(f"{k} {changed[k]}" for k in maps) or "nothing"
+        print(f"rewritten: {done}" + (f"; unreadable: {', '.join(bad)}" if bad else ""))
         return 1 if bad else 0
     docs = {}
     for vid, f in files.items():
@@ -1181,10 +1304,14 @@ def cmd_merge_rules(a):
             docs[vid] = _load_json(f)
         except (OSError, ValueError):
             print(f"{vid}/creator.json: (file): not valid JSON", file=sys.stderr)
-    clusters = similar_rules(docs)
-    _dump({"threshold": MERGE_JACCARD, "clusters": clusters,
-           "next": "write {\"old wording\": \"new wording\"} for each cluster to a map.json and run "
-                   "creator.py merge-rules <pack> --apply map.json" if clusters else "nothing to merge"})
+    found = {k: similar_texts(docs, k) for k in kinds}
+    nxt = ("write {\"old wording\": \"new wording\"} for each cluster to a map.json (nested by kind with --kind all) "
+           "and run creator.py merge-rules <pack> --kind <kind> --apply map.json"
+           if any(found.values()) else "nothing to merge")
+    if a.kind == "all":
+        _dump({"threshold": MERGE_JACCARD, "kinds": found, "next": nxt})
+    else:
+        _dump({"kind": a.kind, "threshold": MERGE_JACCARD, "clusters": found[a.kind], "next": nxt})
     return 0
 
 
@@ -1229,7 +1356,7 @@ def cmd_ideate(a):
         except (OSError, ValueError) as e:
             raise BadInput(f"--used: cannot read the list ({type(e).__name__})")
         if not isinstance(used, list):
-            raise BadInput("--used: must be a JSON list of {method, example_id}")
+            raise BadInput("--used: must be a JSON list of {message_type, method, example_id}")
     _dump(ideate(mind, a.line, a.type, used))
     return 0
 
@@ -1243,9 +1370,12 @@ def main(argv=None):
     cd = sub.add_parser("candidates", help="candidate device times for one video (JSON)")
     cd.add_argument("pack")
     cd.add_argument("id")
-    mr = sub.add_parser("merge-rules", help="list near-duplicate rules of thumb, or --apply a rewrite map")
+    mr = sub.add_parser("merge-rules", help="list near-duplicate wordings, or --apply a rewrite map")
     mr.add_argument("pack")
-    mr.add_argument("--apply", help='JSON map {"old wording": "new wording"}')
+    mr.add_argument("--kind", default="rules", choices=list(MERGE_KINDS) + ["all"],
+                    help="rules (rules_of_thumb), never (alternative_rejected), pattern, promise "
+                         "(audience_promise), device (hook.visual_device) or all; default rules")
+    mr.add_argument("--apply", help='JSON map {"old wording": "new wording"} (or {kind: {...}} with --kind all)')
     s = sub.add_parser("synth", help="write <pack>/creator-mind.json")
     s.add_argument("pack")
     g = s.add_mutually_exclusive_group()
@@ -1256,7 +1386,7 @@ def main(argv=None):
     i.add_argument("pack")
     i.add_argument("--line", required=True, help="the spoken line under the visual")
     i.add_argument("--type", required=True, choices=MESSAGE_TYPES or None, help="message type of the line")
-    i.add_argument("--used", help="JSON list of {method, example_id} already used in this plan")
+    i.add_argument("--used", help="JSON list of {message_type, method, example_id} already chosen in this plan")
     a = ap.parse_args(argv)
     try:
         if VOCAB_ERROR:

@@ -5,10 +5,12 @@ is about WHY. Above all it is about how the creator came up with each visual ide
 the viewer to get from it. With that, a new video gets new visuals built in the creator's way of thinking,
 not copies of their moves.
 
-You write one `analysis/<id>/creator.json` per training video. Do it after you have read the keyframe
-sheets, the transcript and `measure.json`, `motion.json`, `sound.json` and the look. Then:
-1. `creator.py check <pack>` validates the files.
-2. `creator.py merge-rules <pack>` unifies the wording of rules of thumb.
+You write one `analysis/<id>/creator.json` (schema `creator/2`) per training video. Do it after you
+have read the keyframe sheets, the transcript and `measure.json`, `motion.json`, `sound.json` and the
+look. Then:
+1. `creator.py check <pack>` validates the files. A `creator/1` file is reported with an upgrade
+   message that names every field needing a `principle`; add them and set the schema to `creator/2`.
+2. `creator.py merge-rules <pack> --kind all` unifies the wording of every counted free-text list.
 3. `creator.py synth <pack>` builds `creator-mind.json`.
 
 Every visual beat of a new plan then runs through `creator.py ideate` and the checklist.
@@ -28,7 +30,13 @@ habit twice under two names.
 - **Use the controlled vocabularies in `assets/creator-vocab.json`.** They cover parts, hook types,
   translation methods, message types, problems, devices, evidence, toolchain elements and tools, and
   about 25 principles, each with a one-line meaning. `check` rejects anything outside them. When no
-  principle fits, use `other` and say what you mean in `principle_note`.
+  principle fits, use `other` and say what you mean in `principle_note` (required with `other`, on a
+  visual idea or a decision). Synth lists these notes under `principle_notes` with `seen_in`. A note
+  seen in several videos is a principle the vocab is missing: propose adding it to the vocab.
+- **Five free-text lists are counted across videos:** rules of thumb, never-do items
+  (`alternative_rejected`), patterns, audience promises and hook visual devices. Two wordings of one
+  thing split its count. `creator.py merge-rules <pack> --kind all` finds near-duplicates in all five
+  (§6).
 - **One moment can appear in three lists, and each answers a different question.** Take a giant coin
   that slams in with a hit at 12.4 s:
   - `visual_ideas`: what the picture *says*. The message, the method, why this idea.
@@ -107,7 +115,8 @@ of framing that carries meaning, and a cutaway. For each one, ask these question
 
 5. **Which principle does the idea serve?** Put one id from the vocab in `principle`, for example
    `concretize_the_abstract`, `scale_for_magnitude` or `prove_with_the_real_thing`. Synth links methods
-   to principles through this field, and ideate returns them.
+   to principles through this field, and ideate returns them. If none fits, write `other` and say the
+   principle in `principle_note`.
 6. **Why this idea, and not a literal shot?** In `why_this`, say what the figure does that a literal
    shot could not: "size makes the number felt", "the viewer sees the gap before they hear it", "a
    familiar object makes an abstract tool concrete". When the creator chose `literal`, say why literal
@@ -255,9 +264,11 @@ list.
 ## 4. Retention devices
 
 **A device is a change that resets attention beyond the style's normal cutting rhythm.** A regular cut
-at about the median shot length is the style's heartbeat, not a device. Something is a device when it
+at about the median shot length is the style's heartbeat, not a device. **A cut counts as a device only
+when its shot is shorter than 0.5× or longer than 2× the style's median shot length, or when it brings
+a new visual idea** (`DEVICE_SHOT_RATIO = (0.5, 2.0)` in creator.py). Something is a device when it
 breaks the expectation the rhythm has set:
-- a cut much earlier or later than the median shot;
+- a cut that passes that ratio;
 - a new layout, colour or scale;
 - a reveal, a text slam or a sound hit;
 - a tempo change;
@@ -270,9 +281,11 @@ each with its source:
 - `sound.json` sfx;
 - big text boxes, `h_pct` 8 or more.
 
-Classify each candidate: is it a device, and which one? Then add the devices the measurements cannot
-see, such as an open loop or a reveal in the words. A cut with `vs_median_shot` near 1 is usually not a
-device.
+Each cut carries `passes_shot_ratio`, which is true when its shot is outside 0.5×-2× the median.
+Classify each candidate: is it a device, and which one?
+- A cut with `passes_shot_ratio: false` is a device only if it brings a new visual idea, and then it
+  also has a `visual_ideas` entry.
+- Add the devices the measurements cannot see, such as an open loop or a reveal in the words.
 
 Write a `retention` entry per device with `t` and `device`:
 - `pattern_interrupt`: a sudden change of framing, colour or layout;
@@ -294,11 +307,13 @@ planner checks every new beat against that number.
 ## 5. Toolchain: inferred from evidence, never guessed
 
 For each kind of element, say how it was probably made.
-- `element` is one of: broll, ai_still, ai_video, kinetic_text, caption, prop, ui, map, chart,
-  transition, sfx, music, voice, other.
+- `element` is one of: a_roll, broll, ai_still, ai_video, kinetic_text, title_card, caption, prop,
+  3d_object, ui, map, chart, transition, sfx, music, voice, other.
 - `likely_tool` is one tool, or a list for a pipeline (for example `["ai_image", "ai_i2v"]`). The tools
-  are: after_effects, premiere, capcut, davinci, html_motion, blender, ai_image, ai_i2v, ai_video, stock,
-  screen_capture, other.
+  are: live_action (footage the creator shot), after_effects, premiere, capcut, davinci, html_motion,
+  3d_render, ai_image, ai_i2v, ai_video, stock, screen_capture, other. A pipeline is order-insensitive:
+  synth sorts its items, so `["ai_i2v", "ai_image"]` and `["ai_image", "ai_i2v"]` are one vote. Put
+  the order of the steps in `how`.
 - `how` gives the steps, for example "still generated, then animated with a slow push".
 - `confidence` is from 0 to 1. Synth weights each video's vote by it.
 
@@ -307,12 +322,13 @@ that rule it *out*:
 
 | tool | rules it in (seen) | rules it out (seen) |
 |---|---|---|
+| `live_action` | real lens behaviour (focus breathing, rolling shutter, natural motion blur); the speaker's own room, hands or product; continuity across shots | morphing details; a perfectly clean synthetic subject with no sensor noise |
 | `ai_image` + `ai_i2v` / `ai_video` | fingers or text morphing; edges melting; physics that drifts; a subject's details changing between frames; a single slow camera move over a still | real text that stays sharp and readable through motion; the same object identical in two shots from different angles |
 | `stock` | a generic subject with no tie to the speaker; a grade or resolution that breaks from the rest; the same clip found in other creators' videos (only if you actually found it) | the speaker's own room, hands or product in the shot |
 | `after_effects` | layered depth with parallax, keyframed eases with motion blur, expression wiggle, track mattes | the motion matches a template preset frame by frame (see capcut) |
 | `capcut` (template) | only with file evidence: a template or project file, an export watermark, or the identical animation in a reference you can open | no file evidence (then do not name it; write `after_effects` or `other` with low confidence) |
 | `html_motion` | pixel-crisp UI and type, CSS-like easing, a perfectly flat colour | film grain or blur baked into the type |
-| `blender` | real reflections, shadows and depth of field on a 3D object; a clean turntable | a flat 2D shape with a drop shadow |
+| `3d_render` | real reflections, shadows and depth of field on a 3D object; a clean turntable | a flat 2D shape with a drop shadow |
 | `screen_capture` | a real cursor, real UI chrome, compression on scrolling text | a UI that is too clean, with no cursor jitter (probably `html_motion`) |
 | `premiere` / `davinci` | only from file evidence (a project file, a named export) or a signature effect you can name | anything else: cut, zoom and grade are possible in every editor |
 
@@ -342,11 +358,20 @@ existing rules when you mean the same rule. Synth normalises rules (lowercase, p
 whitespace collapsed) and counts them with `seen_in`. A rule seen in 30 % or more of the videos is a
 rule candidate; below that it is an option.
 
-**Before synth, run `creator.py merge-rules <pack>`.**
-1. It lists clusters of near-duplicate rules across videos (token Jaccard 0.6 or more), each with a
-   suggested wording.
-2. Decide which wordings mean the same rule. Write a map `{"old wording": "unified wording", ...}`.
-3. Run `creator.py merge-rules <pack> --apply map.json`. It rewrites the files.
+**Before synth, run `creator.py merge-rules <pack> --kind all`.**
+1. It lists clusters of near-duplicate wordings across videos (token Jaccard 0.6 or more), each with a
+   suggested wording. It covers the five counted lists:
+   - `rules`: rules of thumb;
+   - `never`: `alternative_rejected`;
+   - `pattern`: visual-idea patterns;
+   - `promise`: `audience_promise`;
+   - `device`: `hook.visual_device`.
+
+   `--kind <one of them>` limits it to one list.
+2. Decide which wordings mean the same thing. Write a map, either flat for one kind,
+   `{"old wording": "unified wording", ...}`, or nested by kind for `--kind all`,
+   `{"never": {...}, "pattern": {...}}`.
+3. Run `creator.py merge-rules <pack> --kind <kind|all> --apply map.json`. It rewrites the files.
 4. Run `merge-rules` again until it lists nothing you would merge.
 
 ---
@@ -354,7 +379,7 @@ rule candidate; below that it is an option.
 ## 7. From creator.json to the style
 
 1. `creator.py check <pack>`. Fix every reported `<id>/creator.json: <field>` line until it exits 0.
-2. `creator.py merge-rules <pack>`, then `--apply` as in §6.
+2. `creator.py merge-rules <pack> --kind all`, then `--apply` as in §6.
 3. `creator.py synth <pack> --train <ids> --exclude <hold-out ids>`. This writes `creator-mind.json`.
    Shares are computed per video and then averaged across videos, so one long video cannot dominate.
    The pooled value is kept as `pooled_share`, and `seen_in` always counts videos. The file holds:
@@ -372,6 +397,7 @@ rule candidate; below that it is an option.
    - `retention`, including `never_more_than_s`;
    - ranked `principles` and `problems`;
    - `never_do`;
+   - `principle_notes`: notes from `principle: other`, to promote into the vocab;
    - `toolchain` consensus per element;
    - `rules_of_thumb` with `seen_in`;
    - `checklist`.
@@ -400,17 +426,24 @@ rule candidate; below that it is an option.
    - the relevant rules of thumb;
    - the target emotions;
    - the recurring patterns;
-   - the never-do items;
+   - the never-do items seen in 2 or more videos, or in 30 % or more of them;
    - the why-patterns and the craft notes;
    - the rule: write 3 ideas, 2 in the creator's top methods and 1 wild card.
 
    The wild card is a method that fits the message type (the vocab's fit table) and that the creator
-   rarely uses. `plan-used.json` is the list of `{method, example_id}` already chosen in this plan.
-   Ideate moves used methods back, drops used examples, and says when it runs out. After you choose an
-   idea, add its entry to that list. Then answer the `checklist` questions for the beat. Take the
+   rarely uses.
+
+   `plan-used.json` is the list of `{message_type, method, example_id}` already chosen in this plan.
+   Methods rotate by **deficit against the creator's share**, counted per message type. With k beats of
+   this type so far, this is beat k + 1, and each method's target is share × (k + 1). The method furthest
+   below its target comes first. So a creator who uses `scale_shift` 83 % of the time still gets
+   `scale_shift` on about 5 beats of 6, and the rest go to their other methods in proportion. Used
+   reference examples are never offered again, and the brief says when the examples or the methods have
+   run out. After you choose an idea, add its entry to the list. Then answer the `checklist` questions
+   for the beat. Take the
    method, never the reference idea itself: a new video must pass the style's checks AND feel new next
    to the references.
 6. Hold-out: `creator.score_structure(pred, actual)` scores a predicted part structure against a
-   held-out video. A part boundary matches within 1.0 s; the opening boundary is not scored, because it
-   would be a free match. The result is the F1 and the timing error. `creator.retention_events()` turns
+   held-out video. A part boundary matches within 1.0 s. Boundaries within 0.5 s of t=0 are the
+   opening and are not scored, because they would be a free match. The result is the F1 and the timing error. `creator.retention_events()` turns
    predicted devices into events for `prove.py holdout`.

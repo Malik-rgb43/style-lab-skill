@@ -33,7 +33,7 @@ def make_doc(order=PARTS, devices=(2.0, 5.0, 9.0, 13.0, 17.0), ideas=None, tool=
         t += 4.0
     retention = [{"t": d, "device": "pattern_interrupt", "gap_s_since_last": 99.0} for d in devices]
     return {
-        "schema": "creator/1",
+        "schema": "creator/2",
         "story": {"structure": structure,
                   "hook": {"type": "question", "first_words_s": 0.4, "visual_device": "Object in hand"},
                   "open_loops": [{"opened_t": 0.5, "closed_t": 14.0, "text": "what is in the box"}],
@@ -112,6 +112,40 @@ def test_vocab_enums_checked():
     ok["decisions"][0]["principle_note"] = "free text is still allowed here"
     ok["toolchain"][0]["likely_tool"] = "stock"
     assert creator.validate(ok) == []
+    for tool in ("live_action", "3d_render"):
+        ok["toolchain"][0]["likely_tool"] = tool
+        assert creator.validate(ok) == [], tool
+    for el in ("title_card", "3d_object", "a_roll"):
+        ok["toolchain"][0]["element"] = el
+        assert creator.validate(ok) == [], el
+    ok["toolchain"][0]["likely_tool"] = "blender"
+    assert any("likely_tool" in e for e in creator.validate(ok))
+    assert "before_after" in creator.FIT["emotion"]
+
+
+def test_principle_note_required_for_other_and_collected():
+    doc = make_doc()
+    doc["visual_ideas"][0]["principle"] = "other"
+    assert any("visual_ideas[0].principle_note" in e for e in creator.validate(doc))
+    doc["visual_ideas"][0]["principle_note"] = "Echo the first frame at the end"
+    assert creator.validate(doc) == []
+    other = make_doc(principle="other")
+    other["decisions"][0]["principle_note"] = "echo the first frame at the end!"
+    notes = creator.synth({"V01": doc, "V02": other})["principle_notes"]
+    assert notes[0]["key"] == "echo the first frame at the end"
+    assert notes[0]["seen_in"] == 2 and notes[0]["from"] == {"visual_ideas": 1, "decisions": 1}
+
+
+def test_check_reports_creator_1_upgrade(tmp_path):
+    old = make_doc()
+    old["schema"] = "creator/1"
+    del old["visual_ideas"][0]["principle"]
+    pack = write_pack(tmp_path, {"V01": old})
+    r = run_cli("creator.py", "check", pack)
+    assert r.returncode == 1
+    out = r.stdout + r.stderr
+    assert "V01/creator.json: schema" in out and "creator/2" in out and "Upgrade: add principle" in out
+    assert "V01/creator.json: visual_ideas[0].principle: missing (upgrade: add principle)" in out
 
 
 def test_visual_only_line():
@@ -163,6 +197,43 @@ def test_merge_rules_similar_and_apply(tmp_path):
     assert run_cli("creator.py", "merge-rules", pack, "--apply", bad).returncode == 2
 
 
+def test_merge_rules_other_kinds(tmp_path):
+    a, b = make_doc(rejected="no music under the confession part"), make_doc(rejected="no music under the confession")
+    a["story"]["audience_promise"] = "you will learn one simple trick"
+    a["story"]["hook"]["visual_device"] = "object held up to the lens"
+    b["story"]["hook"]["visual_device"] = "an object held up to the lens"
+    a["visual_ideas"][0]["pattern"] = "everyday object at giant scale"
+    b["visual_ideas"][0]["pattern"] = "everyday object at a giant scale"
+    docs = {"V01": a, "V02": b}
+    for kind in ("never", "pattern", "promise", "device"):
+        assert len(creator.similar_texts(docs, kind)) == 1, kind
+    pack = write_pack(tmp_path, docs)
+    r = run_cli("creator.py", "merge-rules", pack, "--kind", "all")
+    assert r.returncode == 0, r.stdout + r.stderr
+    found = json.loads(r.stdout)["kinds"]
+    assert set(found) == {"rules", "never", "pattern", "promise", "device"}
+    assert found["rules"] == [] and len(found["device"]) == 1
+    m = tmp_path / "map.json"
+    m.write_text(json.dumps({
+        "never": {"no music under the confession part": "no music under the confession"},
+        "device": {"an object held up to the lens": "object held up to the lens"},
+        "pattern": {"everyday object at a giant scale": "everyday object at giant scale"},
+        "promise": {"you will learn one simple trick": "You will learn one trick"}}), encoding="utf-8")
+    r = run_cli("creator.py", "merge-rules", pack, "--kind", "all", "--apply", m)
+    assert r.returncode == 0, r.stdout + r.stderr
+    v1 = json.loads((pack / "analysis" / "V01" / "creator.json").read_text(encoding="utf-8"))
+    v2 = json.loads((pack / "analysis" / "V02" / "creator.json").read_text(encoding="utf-8"))
+    assert v1["decisions"][0]["alternative_rejected"] == "no music under the confession"
+    assert v2["story"]["hook"]["visual_device"] == "object held up to the lens"
+    assert v2["visual_ideas"][0]["pattern"] == "everyday object at giant scale"
+    assert v1["story"]["audience_promise"] == "You will learn one trick"
+    r = run_cli("creator.py", "merge-rules", pack, "--kind", "all")
+    assert all(v == [] for v in json.loads(r.stdout)["kinds"].values())
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"colours": {"a": "b"}}), encoding="utf-8")
+    assert run_cli("creator.py", "merge-rules", pack, "--kind", "all", "--apply", bad).returncode == 2
+
+
 # ---------------------------------------------------------------- candidates
 
 def test_candidates_from_measure_and_sound(tmp_path):
@@ -181,6 +252,9 @@ def test_candidates_from_measure_and_sound(tmp_path):
     assert src == [(2.0, "cut"), (4.0, "cut"), (4.05, "sfx"), (5.0, "big_text"), (7.0, "jump"), (10.0, "cut")]
     last = [c for c in out["candidates"] if c["t"] == 10.0][0]
     assert last["shot_before_s"] == 6.0 and last["vs_median_shot"] == 3.0
+    assert creator.DEVICE_SHOT_RATIO == (0.5, 2.0)
+    passes = {c["t"]: c["passes_shot_ratio"] for c in out["candidates"] if c["source"] in ("cut", "jump")}
+    assert passes == {2.0: False, 4.0: False, 7.0: False, 10.0: True}
     assert "median shot" in out["rule"]
 
     pack = tmp_path / "pack"
@@ -293,7 +367,7 @@ def test_rules_of_thumb_seen_in():
 
 def test_toolchain_consensus():
     docs = {"V01": make_doc(tool=("broll", PIPE, 0.7)),
-            "V02": make_doc(tool=("broll", PIPE, 0.7)),
+            "V02": make_doc(tool=("broll", list(reversed(PIPE)), 0.7)),     # order does not matter
             "V03": make_doc(tool=("broll", PIPE, 0.7)),
             "V04": make_doc(tool=("broll", "stock", 0.7))}
     b = creator.synth(docs)["toolchain"]["broll"]
@@ -301,6 +375,7 @@ def test_toolchain_consensus():
     assert b["confidence"] == pytest.approx(0.75)
     assert b["seen_in"] == 4
     assert {v["tool"]: v["videos"] for v in b["votes"]}["stock"] == 1
+    assert creator.tool_key(["ai_i2v", "ai_image"]) == creator.tool_key(["ai_image", "ai_i2v"]) == "ai_image+ai_i2v"
 
 
 def test_toolchain_weighted_by_stated_confidence():
@@ -415,16 +490,46 @@ def test_ideate_wild_card_fits_message_type():
 def test_ideate_rotates_used_methods_and_examples():
     mind = creator.synth(_ideation_docs())
     first = creator.ideate(mind, "a line", "number")
-    used = [{"method": "scale_shift", "example_id": e["example_id"]}
+    used = [{"message_type": "number", "method": "scale_shift", "example_id": e["example_id"]}
             for e in mind["ideation"]["playbook"]["number"]["methods"][0]["examples"]]
     b = creator.ideate(mind, "a line", "number", used=used)
     assert [m["method"] for m in b["top_methods"]] == ["data_viz", "scale_shift"]
     assert b["top_methods"][1]["examples"] == []
     assert any("ran out of reference examples for scale_shift" in n for n in b["rotation"]["notes"])
     assert first["top_methods"][0]["examples"]
-    both = used + [{"method": "data_viz", "example_id": "V02@15"}]
+    both = used + [{"message_type": "number", "method": "data_viz", "example_id": "V02@15"}]
     c = creator.ideate(mind, "a line", "number", used=both)
     assert any(n.startswith("ran out: every method") for n in c["rotation"]["notes"])
+    # entries of another message type do not move this type's methods
+    other = [{"message_type": "claim", "method": "scale_shift", "example_id": "x"}] * 3
+    assert creator.ideate(mind, "a line", "number", used=other)["top_methods"][0]["method"] == "scale_shift"
+
+
+def test_ideate_deficit_rotation_keeps_the_creators_proportions():
+    mind = creator.synth(_ideation_docs())          # number: scale_shift 0.833, data_viz 0.167 (macro)
+    used, picks = [], []
+    for beat in range(6):
+        b = creator.ideate(mind, f"number line {beat}", "number", used=used)
+        m = b["top_methods"][0]
+        ex = m["examples"][0]["example_id"] if m["examples"] else None
+        picks.append(m["method"])
+        used.append({"message_type": "number", "method": m["method"], "example_id": ex})
+        assert b["rotation"]["beat_of_type"] == beat + 1
+    assert picks.count("scale_shift") == 5 and picks.count("data_viz") == 1
+    assert picks[:2] == ["scale_shift", "scale_shift"]
+    ids = [u["example_id"] for u in used if u["example_id"]]
+    assert len(ids) == len(set(ids))               # no reference example offered twice
+
+
+def test_ideate_never_do_needs_support():
+    docs = {f"V0{i}": make_doc(rejected=f"one-off refusal {i}") for i in range(1, 6)}
+    docs["V01"]["decisions"].append(dict(docs["V01"]["decisions"][0], alternative_rejected="a shared refusal"))
+    docs["V02"]["decisions"].append(dict(docs["V02"]["decisions"][0], alternative_rejected="a shared refusal"))
+    mind = creator.synth(docs)
+    nd = [x["avoid"] for x in creator.ideate(mind, "x", "number")["never_do"]]
+    assert nd == ["a shared refusal"]               # seen once in 5 videos (20 %) is not passed on
+    one = creator.synth({"V01": make_doc(rejected="a single video refusal")})
+    assert [x["avoid"] for x in creator.ideate(one, "x", "number")["never_do"]] == ["a single video refusal"]
 
 
 def test_ideate_cli(tmp_path):
@@ -434,12 +539,14 @@ def test_ideate_cli(tmp_path):
     mind = json.loads((pack / "creator-mind.json").read_text(encoding="utf-8"))
     assert mind["schema"] == "creator-mind/1"
     used = tmp_path / "used.json"
-    used.write_text(json.dumps([{"method": "scale_shift", "example_id": "V01@1"}]), encoding="utf-8")
+    used.write_text(json.dumps([{"message_type": "number", "method": "scale_shift", "example_id": "V01@1"}]),
+                    encoding="utf-8")
     r = run_cli("creator.py", "ideate", pack, "--line", "פי שלושה מהר יותר", "--type", "number", "--used", used)
     assert r.returncode == 0, r.stdout + r.stderr
     brief = json.loads(r.stdout)
     assert brief["line"] == "פי שלושה מהר יותר"
-    assert brief["top_methods"][0]["method"] == "data_viz"
+    assert brief["top_methods"][0]["method"] == "scale_shift"         # still furthest below its share
+    assert "V01@1" not in [e["example_id"] for e in brief["top_methods"][0]["examples"]]
     r = run_cli("creator.py", "ideate", tmp_path / "nopack", "--line", "x", "--type", "number")
     assert r.returncode == 2
 
@@ -488,6 +595,10 @@ def test_score_structure():
     assert creator.score_structure(pred, actual, tol_s=2.0)["tp"] == 2
     perfect = creator.score_structure(copy.deepcopy(actual), actual)
     assert perfect["overall_f1"] == pytest.approx(1.0) and perfect["order_match"] is True
+    late = creator.score_structure([{"part": "hook", "t0": 2.0, "t1": 5.0}], [{"part": "hook", "t0": 2.4, "t1": 5.0}])
+    assert late["tp"] == 1 and late["n_pred"] == 1     # a first boundary away from t=0 is scored
+    near = creator.score_structure([{"part": "hook", "t0": 0.3, "t1": 5.0}], [{"part": "hook", "t0": 0.0, "t1": 5.0}])
+    assert near["n_pred"] == 0 and near["n_actual"] == 0
     only_hook = creator.score_structure([{"part": "hook", "t0": 0.0, "t1": 22.0}], actual)
     assert only_hook["tp"] == 0 and only_hook["overall_f1"] == 0.0     # no free match for the start
     empty = creator.score_structure([], [])
