@@ -1,9 +1,36 @@
 # Tools: the defaults and what to do without them
 
-At the start, check what is installed (ffmpeg, Python, faster-whisper, Node + HyperFrames,
-Blender, an image model, a browser) and say in one line what you will use. If a step's tool is
-missing, say which step is blocked and what to install. Never install or download without the
-user's yes, and never skip a step silently.
+## The connections check (Stage 0): `scripts/doctor.py`
+Never guess what is installed. At the start of every session that uses the skill:
+```
+python scripts/doctor.py                 # local checks in parallel, prints the table per stage
+python scripts/doctor.py --deep          # also probes torch CUDA (slow); use before the cut stage
+python scripts/doctor.py --json          # the same map as JSON
+python scripts/doctor.py session --set higgsfield=ok --note "MCP, paid credits"
+python scripts/doctor.py session --set pexels=ok --set pixabay=ok --note "MCP, free stock"
+python scripts/doctor.py session --set figma=missing
+python scripts/doctor.py session --clear # forget the session block
+```
+The local part checks binaries (ffmpeg, ffprobe, node, blender, yt-dlp, gh; Blender also from
+`BLENDER_PATH` and the usual install folders), HyperFrames (bounded, non-interactive), Python
+modules (numpy, cv2, torch, torchaudio, faster_whisper, PIL) and env keys (RunPod; presence
+only, a value is never printed or stored). Each missing item carries an install hint.
+
+The session part is yours: look at your own tool list and skills and record each MCP server or
+skill a step could use (Higgsfield, Pexels, Pixabay, Pinterest, Figma, Blender MCP, After
+Effects / Premiere, Metricool for real view data, Playwright or a browser, image models,
+video-analysis skills). `--set` can repeat in one call, but one `--note` covers the whole call,
+so group by note. The map is saved in `~/.claude/style-lab/capabilities.json` (schema in
+`references/store-schema.md`); a later local run keeps the session block.
+
+Stages in the map (`STAGES` in `doctor.py`) and their Hebrew names for the table:
+`train` אימון, `train_profile` פרופיל, `cut` חיתוך, `frames` פריימים, `build` בנייה, `3d`
+תלת-ממד, `cloud_asr` תמלול בענן (paid), `publish` פרסום. Show the user one short Hebrew table:
+per stage what will be used, what is missing (and the hint to add it), and what costs money
+(cloud ASR, Higgsfield or other generation credits, paid image models, stock). Every later step
+picks its tool only from this map. If a step's tool is missing, say which step is blocked and
+what to install. Never install or download without the user's yes, and never skip a step
+silently.
 
 ## Required
 - **ffmpeg / ffprobe** on PATH: frames, cuts, proxies, audio. Nothing works without it.

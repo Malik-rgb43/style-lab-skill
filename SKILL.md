@@ -1,6 +1,6 @@
 ---
 name: style-lab
-description: Learns a video editing style from reference videos or a description, then edits your footage in it with an edit plan and review rounds. Use when the user wants to train, save, learn or apply a reusable editing style: style-lab, editing style, סגנון עריכה, תלמד את הסגנון, תאמן סגנון. For a one-off "make mine like this reference" use reference-style-matching instead.
+description: Learns a video editing style from reference videos or a description, keeps styles and clients (a brand profile with logo, fonts and a palette built from one colour) in one global store, and edits footage in a chosen style for a chosen client with an edit plan and review rounds. Starts every session with a connections check. Use when the user wants to train, save, learn or apply a reusable editing style, or add a client and its palette: style-lab, editing style, client, palette, סגנון עריכה, תלמד את הסגנון, תאמן סגנון, לקוח, לקוח חדש, פלטת צבעים. For a one-off "make mine like this reference" use reference-style-matching instead.
 ---
 
 # style-lab
@@ -42,55 +42,64 @@ measured and every design choice gets a "why".
   body at -0.04em, Consolas for code, white / black / violet). The reference's layout, motion
   and structure are kept; its fonts and colours are swapped for the brand. The user can keep the
   reference's own look for a style, or put their own brand in `~/.claude/style-lab/brand.md`.
+  A chosen client's palette and fonts replace the brand for that edit (Clients below).
 - **Build engine:** HyperFrames (HTML to video). Without it: `references/tools-and-fallbacks.md`.
 - **Transcription:** local faster-whisper; Hebrew with a local ivrit-ai model. Cloud (RunPod)
   only with the user's OK, because it costs money.
 - **Images / 3D:** optional, only when a beat needs them, and only with the user's OK if paid.
 - **Format:** 9:16, 1080x1920, 30 fps, unless the user says otherwise. Never assume the caption
-  language: ask (or no captions).
-Check what is installed first (ffmpeg, Python, faster-whisper, Node + HyperFrames, Blender,
-an image model) and say what you will use. A missing tool blocks its step: say which and what
-to install; never skip a step silently, never download without a yes.
+  language: ask (or no captions). What is installed comes from Stage 0, never from a guess.
 
-## Your styles (several named styles side by side)
-Each style has a **name the user chooses** (Hebrew is fine), a latin slug, a one-line
-description, its own style pack and its own style skill `style-<slug>`. All are listed in one
-registry, `~/.claude/style-lab/styles.json`, managed with `scripts/styles.py`:
-```
-python scripts/styles.py list                       # styles you can pick from
-python scripts/styles.py add <slug> --name "<name>" --pack <project>/styles/<slug> --description "..."
-python scripts/styles.py show <slug or name>
-python scripts/styles.py set <slug> name="<new name>" status=ready aliases="..." theme=light
-python scripts/styles.py check                      # every pack and skill still exists
-```
-Status: `training` during phase A, `ready` after A5 (only ready styles are offered for editing),
-`archived` to hide one. `remove` deletes the registry entry only, never files. Each style also
-records `fonts` / `colors` (`brand` or `reference`) and `theme` (`dark`, `light` or `both`; one
-video can still be "the other theme").
+## Stage 0: connections check (every session, before anything else)
+"שלב 0: בדיקת חיבורים", once at the start of every session that uses this skill.
+1. `python scripts/doctor.py` checks local tools in parallel (ffmpeg, Python packages, torch,
+   Node + HyperFrames, Blender, yt-dlp, gh; env keys such as RunPod for presence only) and writes
+   `~/.claude/style-lab/capabilities.json`. `--deep` also probes torch CUDA (slow; for the cut).
+2. Record what your tool list and skills show (Higgsfield, Pexels, Pixabay, Pinterest, Figma,
+   Blender MCP, After Effects / Premiere, Metricool, Playwright, image models, video-analysis
+   skills), one call per note: `doctor.py session --set higgsfield=ok --note "paid credits"`.
+3. Show one short Hebrew table: per stage what will be used, what is missing and how to add it,
+   what costs money. Later steps pick tools only from this map; a missing tool blocks its step
+   (say what to install, never download without a yes). See `references/tools-and-fallbacks.md`.
 
+## The global store: styles and clients
+Everything the user makes lives in `~/.claude/style-lab/` (`STYLE_LAB_HOME` overrides it), so
+updating the skill never wipes it. Layout and every field: `references/store-schema.md`.
+**Styles.** Each has a **name the user chooses** (Hebrew is fine), a latin slug (made from the
+name if not given), a description, a pack and a style skill `style-<slug>`, in `styles.json`:
+```
+python scripts/styles.py {list | show <slug or name> | check | migrate}   # one per call; migrate = v1 -> v2 + dated .bak
+python scripts/styles.py add [<slug>] --name "<name>" --pack <folder> --description "..." [--kind trained|described|derived] [--aspect 9:16|16:9|1:1|4:5]
+python scripts/styles.py set <slug> name="<new name>" status=ready aliases="..." theme=light version=2
+```
+Status `training` (phase A), `ready` (after A5; only these are offered), `archived`; `remove`
+drops the entry only. Also `fonts`/`colors` (`brand`|`reference`), `theme`, `kind`, `aspect`,
+`version` (bump on rule changes), `rules_count`. New packs: `~/.claude/style-lab/styles/<slug>/`.
+**Clients** (a brand any style can wear): name, logo, fonts, brand colours, a picked palette
+(פלטת צבעים), theme, dos and don'ts, linked styles (one default); the style gives layout and
+motion, the client colours, fonts and logo. "לקוח חדש", a new brand, a logo, a colour or a
+website → `references/stage-c-client.md`; palettes: `references/palette.md`.
+```
+python scripts/clients.py {list | show <client>}                         # one per call
+python scripts/clients.py add --name "<name>" --color "#RRGGBB" [--industry ..] [--tone ..] [--theme dark|light|both]
+python scripts/clients.py palette <client> [--pick monochrome|analogous|accent]   # 3 proposals, save one
+python scripts/clients.py link <client> <style> --default
+```
 **Which phase?** "new style / ליצור סגנון / ללמד סגנון" → phase A. "edit / make a video /
-תערוך" → phase B. "change / rename / improve style X" → `styles.py set`, and for rule changes
-edit that style's STYLE.md and skill.
-
-## Where things live
+תערוך" → phase B. "לקוח חדש / פלטת צבעים" → stage C. "change / rename / improve style X" →
+`styles.py set`, and for rule changes edit that style's STYLE.md and skill.
+**Where things live:**
 ```
-<project>/styles/<slug>/            the style pack
-  refs/  sources.md                 reference videos (local study copies, never published)
-  analysis/                         per-video transcripts, contact sheets, notes
-  board/  board.json  board.html  thumbs/
-  library/<V01-A06 title>/          still.png  strip.jpg  clip.mp4  notes.md  (+ index.json)
-  animations.json                   the breakdown (input to the library script)
-  STYLE.md                          numbered rules, tokens, categories, motion, sound, review rules
-  kit/                              optional tested components for the build engine
-<project>/edits/<clip>/             one folder per edit
-  raw/  words.json  edit_ready.mp4  edit_ready.words.json  plan.json  plan.html
-  build/  assets/  renders/  revisions.md  SOURCES.md
+<pack>/  refs/ sources.md  analysis/  board/ (board.json board.html thumbs/)  animations.json
+         library/<V01-A06 title>/  STYLE.md (numbered rules, tokens, motion, sound)  kit/
+<project>/edits/<clip>/  raw/ words.json edit_ready.mp4 edit_ready.words.json plan.json
+         plan.html build/ assets/ renders/ revisions.md SOURCES.md
 ~/.claude/skills/style-<slug>/SKILL.md   the generated style skill
-~/.claude/style-lab/styles.json          the registry
 ```
-Scripts (local, free): `styles.py`, `transcribe_words.py`, `transcribe_cloud_ivrit.py` (paid,
-optional), `cut_silences.py`, `verify_cut.py`, `word_edges.py`, `build_reference_library.py`.
-Pages: `assets/board-template.html`, `assets/plan-template.html`, `assets/review-template.html`.
+`refs/` videos are local study copies, never published. Scripts (local, free): `doctor.py`,
+`styles.py`, `clients.py`, `palette.py`, `store.py`, `transcribe_words.py`, `cut_silences.py`,
+`verify_cut.py`, `word_edges.py`, `build_reference_library.py`; `transcribe_cloud_ivrit.py` is
+paid. Pages: `assets/{board,plan,review}-template.html`.
 
 ---
 
@@ -159,10 +168,12 @@ name and that a new session will list it.
 ## Phase B: edit a clip in a trained style
 Use the strongest model and effort available.
 
-### B0. Choose the style
-`styles.py list`. If the user named one, use it; otherwise ask, with the ready styles as options
-(one ready style: say which you will use). None ready: offer phase A. Load `style-<slug>` and
-write the choice into `plan.json` so every round uses the same style.
+### B0. Choose the client and the style
+`clients.py list`, `styles.py list`. Ask who the video is for: a client (its default linked style
+is the first suggestion; a new client: stage C first) or none (brand defaults). Then the style:
+the one the user named, else ask with the ready styles as options (one: say which); none ready:
+offer phase A. Load `style-<slug>`, read `clients.py show <client>` (palette, fonts, logo, dos /
+don'ts) and write both into `plan.json` so every round uses the same client and style.
 
 ### B1. Transcript and cut
 1. `transcribe_words.py raw.mp4 --out words.json` (Hebrew: `--language he --model <ivrit-ai folder>`).
@@ -230,6 +241,8 @@ sound the user is licensed to use. **Final render only on the owner's explicit O
 - `references/craft-rules.md`: the way of thinking and the rules that survived real review rounds (composition, motion, speaker, captions, cuts, sound, sources, build hygiene). Read before B2 and B4.
 - `references/review-loop.md`: drafts, the review room page, reading notes, rounds, global rules, final.
 - `references/pitfalls.md`: real bugs and their fixes (tween resets, in-composition cuts, short full-face moves, SFX fatigue …). Read before B4.
+- `references/store-schema.md`: the store, `styles.json` v2, `client.json`, `capabilities.json`.
+- `references/stage-c-client.md` (a client in chat) and `references/palette.md` (three palettes, roles, checks).
 - `references/tools-and-fallbacks.md`: what each step needs, local vs cloud, building without HyperFrames, optional 3D and image generation.
 - `references/board-and-plan-spec.md`: `board.json` and `plan.json` schemas and how to publish the pages.
 - `references/style-skill-template.md`: the template for the generated style skill (A5).
