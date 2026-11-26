@@ -115,3 +115,93 @@ def test_clients_lookup_failure_does_not_crash(home, monkeypatch, capsys):
     assert styles.main() == 0
     out = capsys.readouterr()
     assert "gabi-organic" in out.out and "warning" in out.err
+
+
+def _seed_styles(home, styles):
+    home.mkdir(parents=True, exist_ok=True)
+    rows = [{"slug": s, "name": n, "aliases": al, "pack": str(home), "status": "training"} for s, n, al in styles]
+    (home / "styles.json").write_text(json.dumps({"version": 2, "styles": rows}), encoding="utf-8")
+
+
+def _slugs(home):
+    return [s["slug"] for s in json.loads((home / "styles.json").read_text(encoding="utf-8"))["styles"]]
+
+
+def test_find_prefers_slug_over_alias(home):
+    # aaa carries the alias "bbb"; `remove bbb` must remove the style whose slug is bbb
+    _seed_styles(home, [("aaa", "Alpha", ["bbb"]), ("bbb", "Beta", [])])
+    r = run_cli("styles.py", "remove", "bbb")
+    assert r.returncode == 0, r.stderr
+    assert _slugs(home) == ["aaa"]
+
+
+def test_find_prefers_name_over_alias():
+    import styles
+    data = {"styles": [{"slug": "aaa", "name": "Alpha", "aliases": ["Zed"]},
+                       {"slug": "ccc", "name": "Zed", "aliases": []}]}
+    assert styles.find(data, "zed")["slug"] == "ccc"
+    assert styles.find(data, "AAA")["slug"] == "aaa"
+
+
+def test_alias_collision_rejected(home, tmp_path):
+    run_cli("styles.py", "add", "aaa", "--name", "Alpha", "--pack", tmp_path)
+    run_cli("styles.py", "add", "bbb", "--name", "Beta", "--pack", tmp_path)
+    run_cli("styles.py", "set", "bbb", "aliases=bee")
+    for bad in ("bbb", "beta", "BEE"):
+        r = run_cli("styles.py", "set", "aaa", f"aliases=ok,{bad}")
+        assert r.returncode == 1 and "already" in r.stderr and "Traceback" not in r.stderr, bad
+    d = json.loads((home / "styles.json").read_text(encoding="utf-8"))
+    assert d["styles"][0]["aliases"] == []
+    assert run_cli("styles.py", "set", "aaa", "aliases=alpha,a1").returncode == 0  # own name is fine
+    r = run_cli("styles.py", "set", "bbb", "aliases=a1")
+    assert r.returncode == 1 and "already" in r.stderr
+
+
+def test_empty_name_rejected(home, tmp_path):
+    r = run_cli("styles.py", "add", "--name", "  ", "--pack", tmp_path)
+    assert r.returncode == 1 and "name" in r.stderr
+    assert not (home / "styles.json").exists()
+    run_cli("styles.py", "add", "aaa", "--name", "Alpha", "--pack", tmp_path)
+    r = run_cli("styles.py", "set", "aaa", "name=")
+    assert r.returncode == 1 and "name" in r.stderr
+    assert json.loads((home / "styles.json").read_text(encoding="utf-8"))["styles"][0]["name"] == "Alpha"
+
+
+def _dangling_setup(home, tmp_path):
+    run_cli("styles.py", "add", "aaa", "--name", "Alpha", "--pack", tmp_path, "--status", "ready")
+    run_cli("styles.py", "add", "bbb", "--name", "Beta", "--pack", tmp_path)
+    assert run_cli("clients.py", "add", "--name", "Demo Shop").returncode == 0
+    assert run_cli("clients.py", "link", "demo-shop", "aaa").returncode == 0
+    assert run_cli("clients.py", "link", "demo-shop", "bbb").returncode == 0
+
+
+def test_remove_reports_linked_clients(home, tmp_path):
+    _dangling_setup(home, tmp_path)
+    r = run_cli("styles.py", "remove", "aaa")
+    assert r.returncode == 0 and "1 client(s) still link to it" in r.stdout
+    run_cli("styles.py", "add", "ccc", "--name", "Gamma", "--pack", tmp_path)
+    r = run_cli("styles.py", "remove", "ccc")
+    assert r.returncode == 0 and "still link" not in r.stdout
+
+
+def test_list_and_check_report_dangling_links(home, tmp_path):
+    _dangling_setup(home, tmp_path)
+    run_cli("styles.py", "remove", "aaa")
+    line = "dangling: client Demo Shop -> style aaa (missing style)"
+    r = run_cli("styles.py", "list")
+    assert r.returncode == 0 and line in r.stderr.splitlines() and line not in r.stdout
+    assert r.stdout.strip().splitlines()[0].startswith("bbb\t")
+    r = run_cli("styles.py", "check")
+    assert r.returncode == 0 and line in r.stdout.splitlines()  # a dangling link alone does not fail
+    assert "ok" not in r.stdout.splitlines()
+    run_cli("styles.py", "remove", "bbb")
+    r = run_cli("styles.py", "list")
+    assert "no styles yet" in r.stdout and "style bbb (missing style)" in r.stderr
+
+
+def test_check_still_fails_on_missing_ready_path(home, tmp_path):
+    _dangling_setup(home, tmp_path)
+    run_cli("styles.py", "remove", "bbb")
+    run_cli("styles.py", "set", "aaa", f"pack={tmp_path / 'gone'}")
+    r = run_cli("styles.py", "check")
+    assert r.returncode == 1 and "dangling: client Demo Shop -> style bbb (missing style)" in r.stdout

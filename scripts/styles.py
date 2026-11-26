@@ -88,13 +88,45 @@ def today():
 
 
 def find(data, key):
-    """Match by slug, display name or alias, case-insensitive."""
+    """Match by slug, then display name, then alias (each across all styles), case-insensitive."""
     k = key.strip().lower()
-    for s in data["styles"]:
-        names = [s["slug"], s.get("name", "")] + s.get("aliases", [])
-        if k in (n.lower() for n in names if n):
-            return s
+    if not k:
+        return None
+    for names in (lambda s: [s["slug"]], lambda s: [s.get("name") or ""], lambda s: s.get("aliases", [])):
+        for s in data["styles"]:
+            if k in (n.strip().lower() for n in names(s) if n):
+                return s
     return None
+
+
+def _alias_clash(data, s, aliases):
+    """(alias, other slug) for the first alias that is another style's slug, name or alias, else None."""
+    for a in aliases:
+        other = find(data, a)
+        if other is not None and other is not s:
+            return a, other["slug"]
+    return None
+
+
+def dangling_links(data):
+    """(client name, style slug) for every client link to a style missing from the registry."""
+    try:
+        import clients
+    except ModuleNotFoundError as e:
+        if e.name != "clients":
+            raise
+        return []
+    known = {s["slug"] for s in data["styles"]}
+    try:
+        links = clients.all_links()
+    except Exception as e:  # e.g. corrupt clients.json: report nothing, do not crash
+        print(f"warning: could not read client links: {e}", file=sys.stderr)
+        return []
+    return [(name, slug) for name, slug in links if slug not in known]
+
+
+def _dangling_lines(data):
+    return [f"dangling: client {name} -> style {slug} (missing style)" for name, slug in dangling_links(data)]
 
 
 def clients_for(slug):
@@ -119,17 +151,22 @@ def cmd_list(data, args):
     rows = [s for s in data["styles"] if args.all or s.get("status") != "archived"]
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
-        return 0
-    if not rows:
+    elif not rows:
         print("no styles yet")
-        return 0
-    for s in rows:
-        print(f"{s['slug']}\t{s.get('name','')}\t{s.get('status','')}\t{s.get('description','')}"
-              f"	clients:{', '.join(_client_names(s['slug']))}")
+    else:
+        for s in rows:
+            print(f"{s['slug']}\t{s.get('name','')}\t{s.get('status','')}\t{s.get('description','')}"
+                  f"\tclients:{', '.join(_client_names(s['slug']))}")
+    for line in _dangling_lines(data):  # stderr keeps the rows (and --json) clean for parsing
+        print(line, file=sys.stderr)
     return 0
 
 
 def cmd_add(data, args):
+    args.name = args.name.strip()
+    if not args.name:
+        print("name must not be empty", file=sys.stderr)
+        return 1
     if not args.slug:
         args.slug = store.slugify(args.name, {x["slug"] for x in data["styles"]})
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", args.slug):
@@ -210,11 +247,22 @@ def cmd_set(data, args):
                 return 1
             v = int(v)
         if k == "name":
+            v = v.strip()
+            if not v:
+                print("name must not be empty", file=sys.stderr)
+                return 1
             other = find(data, v)
             if other and other is not s:
                 print(f"another style is already called {v!r}", file=sys.stderr)
                 return 1
-        s[k] = [a.strip() for a in v.split(",") if a.strip()] if k == "aliases" else v
+        if k == "aliases":
+            v = [a.strip() for a in v.split(",") if a.strip()]
+            clash = _alias_clash(data, s, v)
+            if clash:
+                print(f"alias {clash[0]!r} is already the slug, name or alias of style {clash[1]!r}",
+                      file=sys.stderr)
+                return 1
+        s[k] = v
     s["updated"] = today()
     print(f"updated {s['slug']}")
     return None
@@ -227,6 +275,10 @@ def cmd_remove(data, args):
         return 1
     data["styles"].remove(s)
     print(f"removed {s['slug']} from the registry (files untouched: {s['pack']})")
+    n = len(clients_for(s["slug"]))
+    if n:
+        print(f"{n} client(s) still link to it (shown as missing style; "
+              f"`clients.py unlink <client> {s['slug']}` removes a link)")
     return None
 
 
@@ -238,8 +290,16 @@ def cmd_check(data, args):
                 level = "missing" if s.get("status") == "ready" else "not yet"
                 print(f"{s['slug']}: {key} {level}: {s[key]}")
                 bad += level == "missing"
-    print("ok" if not bad else f"{bad} missing path(s) on ready styles")
-    return 1 if bad else 0
+    dangling = _dangling_lines(data)
+    for line in dangling:
+        print(line)
+    if not bad and not dangling:
+        print("ok")
+    if bad:
+        print(f"{bad} missing path(s) on ready styles")
+    if dangling:
+        print(f"{len(dangling)} dangling client link(s)")
+    return 1 if bad else 0  # a dangling link is reported, never fatal
 
 
 def cmd_migrate(args):

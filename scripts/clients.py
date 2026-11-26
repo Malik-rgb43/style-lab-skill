@@ -67,14 +67,19 @@ def load_registry():
 
 
 def _find_entry(reg, key):
-    """Registry entry by slug, name or alias, case-insensitive."""
+    """Registry entry by slug, then name, then alias (each across all clients), case-insensitive."""
     k = key.strip().lower()
+    if not k:
+        return None
     for e in reg["clients"]:
-        if k in (e["slug"].lower(), e.get("name", "").lower()):
+        if k == e["slug"].lower():
+            return e
+    for e in reg["clients"]:
+        if k == (e.get("name") or "").strip().lower():
             return e
     for e in reg["clients"]:
         c = store.read_json(profile_path(e["slug"]), None)
-        if c and k in (a.lower() for a in c.get("aliases", [])):
+        if c and k in (a.strip().lower() for a in c.get("aliases", [])):
             return e
     return None
 
@@ -87,6 +92,16 @@ def load_client(key):
 def save_client(c):
     c["updated"] = today()
     store.write_json(profile_path(c["slug"]), c)
+
+
+def all_links():
+    """(client name, style slug) for every style link of every registered client."""
+    out = []
+    for e in load_registry()["clients"]:
+        c = store.read_json(profile_path(e["slug"]), None) or {}
+        for s in c.get("styles", []):
+            out.append((c.get("name") or e["slug"], s["slug"]))
+    return out
 
 
 def linked_clients(style_slug):
@@ -107,6 +122,9 @@ def _styles():
 # ---- writers run inside the registry lock; return None on success or an exit code (nothing is written then).
 
 def cmd_add(reg, args):
+    args.name = args.name.strip()
+    if not args.name:
+        return _fail("name must not be empty")
     try:
         colors = [parse_hex(c) for c in args.color]
     except ValueError as e:
@@ -146,6 +164,7 @@ def cmd_set(reg, args):
     e, c = _get(reg, args.key)
     if not c:
         return 1
+    old_first = (c.get("brand_colors") or [None])[0]
     for pair in args.pairs:
         if "=" not in pair:
             return _fail(f"expected field=value, got {pair!r}")
@@ -162,10 +181,19 @@ def cmd_set(reg, args):
                 c[k] = [parse_hex(x) for x in items]
             except ValueError as ex:
                 return _fail(str(ex))
+        elif k == "aliases":
+            for a in items:
+                o = _find_entry(reg, a)
+                if o and o["slug"] != c["slug"]:
+                    return _fail(f"alias {a!r} is already the slug, name or alias of client {o['slug']!r}")
+            c[k] = items
         elif k in LIST_FIELDS:
             c[k] = items
         elif k in TEXT_FIELDS:
             if k == "name":
+                v = v.strip()
+                if not v:
+                    return _fail("name must not be empty")
                 o = _find_entry(reg, v)
                 if o and o["slug"] != c["slug"]:
                     return _fail(f"another client is already called {v!r}")
@@ -176,6 +204,12 @@ def cmd_set(reg, args):
     save_client(c)
     e["name"] = c["name"]
     print(f"updated {c['slug']}")
+    pal = c.get("palette") or {}
+    first = (c.get("brand_colors") or [None])[0]
+    if pal and first != old_first and first != pal.get("source_hex"):
+        kind = pal.get("kind", "<kind>")
+        print(f"note: the saved {kind} palette was made from {pal.get('source_hex')}; rerun "
+              f"`clients.py palette {c['slug']} --pick {kind}` to rebuild it from the new first brand colour")
 
 
 def cmd_link(reg, args):
@@ -229,8 +263,18 @@ def cmd_restore(reg, args):
     c = store.read_json(profile_path(slug), None)
     if not c:
         return _fail(f"no client folder for {slug!r} at {profile_path(slug).parent}")
-    reg["clients"].append({"slug": c["slug"], "name": c.get("name", slug), "dir": f"clients/{c['slug']}"})
-    print(f"restored {c['slug']} ({c.get('name', '')})")
+    if c.get("slug") != slug:  # a copied or renamed folder: the folder name is the truth
+        print(f"note: the profile said slug {c.get('slug')!r}; rewritten to the folder name {slug!r}")
+        c["slug"] = slug
+        save_client(c)
+    name = c.get("name") or slug
+    reg["clients"].append({"slug": slug, "name": name, "dir": f"clients/{slug}"})
+    print(f"restored {slug} ({name})")
+    twin = next((x for x in reg["clients"] if x["slug"] != slug
+                 and (x.get("name") or "").strip().lower() == name.strip().lower()), None)
+    if twin:
+        print(f"note: client {twin['slug']!r} has the same name; rename one with "
+              f"`clients.py set {slug} name=<new name>`")
 
 
 def cmd_list(args):
