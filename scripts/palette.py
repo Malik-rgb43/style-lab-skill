@@ -448,11 +448,11 @@ def format_proposals(ps):
         c = p["checks"]
         lines.append(f"== {p['kind']}  brand {p['brand']}  accent {p['accent']}  "
                      f"{'PASS' if c['pass'] else 'FAIL'}")
-        lines.append(f"   {'role':<15} {'light':<9} {'dark':<9}")
+        lines.append(f"   {'role':<18} {'light':<9} {'dark':<9}")
         for k in ROLE_KEYS:
-            lines.append(f"   {k:<15} {p['roles']['light'][k]:<9} {p['roles']['dark'][k]:<9}")
+            lines.append(f"   {k:<18} {p['roles']['light'][k]:<9} {p['roles']['dark'][k]:<9}")
         for k in ("caption", "cta", "highlight", "accent_text"):
-            lines.append(f"   {k + ' label':<15} {p['labels']['light'][k]:<9} {p['labels']['dark'][k]:<9}")
+            lines.append(f"   {k + ' label':<18} {p['labels']['light'][k]:<9} {p['labels']['dark'][k]:<9}")
         lines.append("   checks: " + "  ".join(f"{k} {v}" for k, v in c.items() if k != "pass"))
         lines.append("")
     return "\n".join(lines)

@@ -18,7 +18,7 @@ MENTIONS = (
     "template-src",
     "Private extras",
 )
-TEXT_EXT = {".md", ".py", ".html", ".json", ".txt"}
+TEXT_EXT = {".md", ".py", ".html", ".json", ".txt", ".js", ".css", ".yml", ".yaml", ".svg", ".toml"}
 SKIP = {"scripts/publish_guard.py", "tests/test_publish_guard.py"}
 SKIP_DIRS = {".git", ".superpowers", "__pycache__", ".pytest_cache"}
 

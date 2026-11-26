@@ -235,3 +235,10 @@ def test_brand_shape_bar_in_pass(monkeypatch):
     assert c["brand_on_background"] < 3.0 and c["pass"] is False
     others = {k: bar for k, bar in palette.CHECK_BARS.items() if k != "brand_on_background"}
     assert c["one_accent"] and all(c[k] >= bar for k, bar in others.items())  # only the brand bar fails
+
+
+def test_table_columns_align():
+    text = palette.format_proposals(palette.proposals("#008754")[:1])
+    rows = [ln for ln in text.splitlines() if ln.startswith("   ") and not ln.startswith("   checks")]
+    assert any("accent_text label" in ln for ln in rows)
+    assert len({ln.index("#") for ln in rows if "#" in ln}) == 1

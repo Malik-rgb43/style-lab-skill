@@ -16,3 +16,9 @@ def test_guard_detects_private(tmp_path):
 def test_guard_detects_private_mention(tmp_path):
     (tmp_path / "SKILL.md").write_text("see references/private-notes.md", encoding="utf-8")
     assert find_mentions(tmp_path) == ["SKILL.md: private-notes.md"]
+
+
+def test_guard_scans_js_css_yaml_svg_toml(tmp_path):
+    for ext in (".js", ".css", ".yml", ".yaml", ".svg", ".toml"):
+        (tmp_path / f"a{ext}").write_text("see private-notes.md", encoding="utf-8")
+    assert len(find_mentions(tmp_path)) == 6
