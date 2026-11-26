@@ -149,3 +149,147 @@ def test_reject_refuses_rule(home):
     r = run_cli("lessons.py", "reject", "L0001")
     assert r.returncode == 1 and "use a later retire command for rules" in r.stderr
     assert reg(home)["lessons"][0]["status"] == "rule"
+
+
+# ---------- Task 3: effective rules, exceptions, conflicts ----------
+
+def mkrule(layer, text, *extra, scope="", approve=True):
+    r = run_cli("lessons.py", "add", "--text", text, "--measurable", f"m {text}", "--layer", layer,
+                "--scope", scope, "--project", "proj-a", "--video", "v1", *extra)
+    assert r.returncode == 0, r.stderr
+    lid = reg_ids()[-1]
+    if approve:
+        r = run_cli("lessons.py", "approve", lid, "--one-note", "--yes-no-conflict")
+        assert r.returncode == 0, r.stderr
+    return lid
+
+
+def reg_ids():
+    import conftest  # noqa: F401
+    from lessons import registry_path
+    return [x["id"] for x in json.loads(registry_path().read_text(encoding="utf-8"))["lessons"]]
+
+
+def mkclient(name="Acme"):
+    r = run_cli("clients.py", "add", "--name", name)
+    assert r.returncode == 0, r.stderr
+
+
+def rules_json(*extra):
+    r = run_cli("lessons.py", "rules", "--json", *extra)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def mkstyle_md(tmp_path, name="Test Style"):
+    pack = tmp_path / "pack"
+    pack.mkdir(exist_ok=True)
+    (pack / "STYLE.md").write_text("# Test style\n", encoding="utf-8")
+    r = run_cli("styles.py", "add", "--name", name, "--pack", pack)
+    assert r.returncode == 0, r.stderr
+
+
+def test_effective_order(home, tmp_path):
+    mkstyle_md(tmp_path)
+    mkclient()
+    c1 = mkrule("craft", "c one", "--kind", "taste")
+    s1 = mkrule("style", "s one", "--target", "test-style")
+    k1 = mkrule("client", "k one", "--target", "acme")
+    c2 = mkrule("craft", "c two", "--kind", "quality")
+    rows = rules_json("--style", "test-style", "--client", "acme")
+    assert [r["id"] for r in rows] == [c1, c2, s1, k1]
+    assert [r["layer"] for r in rows] == ["craft", "craft", "style", "client"]
+    assert [r["rule_no"] for r in rows] == [1, 2, 1, 1]
+    assert [r["id"] for r in rules_json()] == [c1, c2]
+    assert [r["id"] for r in rules_json("--style", "test-style")] == [c1, c2, s1]
+    r = run_cli("lessons.py", "rules", "--style", "nope")
+    assert r.returncode == 1 and "no style" in r.stderr
+
+
+def test_rules_table_hebrew(home):
+    mkrule("craft", HE, "--kind", "taste", scope="פתיחה")
+    r = run_cli("lessons.py", "rules")
+    assert r.returncode == 0, r.stderr
+    assert "L0001" in r.stdout and "פתיחה" in r.stdout and "overridden" in r.stdout
+
+
+def test_quality_exception_refused(home, tmp_path):
+    mkstyle_md(tmp_path)
+    q = mkrule("craft", "q one", "--kind", "quality")
+    r = run_cli("lessons.py", "exception", "--style", "test-style", "--craft", q,
+                "--measurable", "m", "--reason", "because")
+    assert r.returncode == 1 and "quality" in r.stderr
+    assert len(reg_ids()) == 1
+    cand = mkrule("craft", "c cand", "--kind", "taste", approve=False)
+    r = run_cli("lessons.py", "exception", "--style", "test-style", "--craft", cand,
+                "--measurable", "m", "--reason", "because")
+    assert r.returncode == 1 and "not a craft rule" in r.stderr
+
+
+def test_taste_exception_needs_reason(home, tmp_path):
+    mkstyle_md(tmp_path)
+    t = mkrule("craft", "t one", "--kind", "taste")
+    r = run_cli("lessons.py", "exception", "--style", "test-style", "--craft", t, "--measurable", "m")
+    assert r.returncode == 1 and "reason" in r.stderr
+    r = run_cli("lessons.py", "exception", "--style", "test-style", "--craft", t, "--measurable", "m",
+                "--reason", "   ")
+    assert r.returncode == 1
+    r = run_cli("lessons.py", "exception", "--style", "test-style", "--craft", t,
+                "--measurable", "slow ease allowed", "--reason", "calm lessons")
+    assert r.returncode == 0, r.stderr
+    ex = reg_ids()[-1]
+    x = reg(home)["lessons"][-1]
+    assert x["status"] == "candidate" and x["layer"] == "style" and x["exception_of"] == t
+    assert x["reason"] == "calm lessons"
+    assert run_cli("lessons.py", "approve", ex, "--one-note").returncode == 0
+    rows = rules_json("--style", "test-style")
+    assert [r["overridden_by"] for r in rows] == [ex, None]
+    assert rows[1]["exception_of"] == t
+    assert rules_json()[0]["overridden_by"] is None  # other styles are unaffected
+    r = run_cli("lessons.py", "rules", "--style", "test-style")
+    assert f"exception to {t}: calm lessons" in r.stdout
+    style_md = (tmp_path / "pack" / "STYLE.md").read_text(encoding="utf-8")
+    assert f"(exception to {t}: calm lessons)" in style_md
+
+
+def test_conflict_blocks_approve(home):
+    a = mkrule("craft", "first", "--kind", "taste", scope="opening captions")
+    b = mkrule("craft", "second", "--kind", "taste", scope="captions fade", approve=False)
+    r = run_cli("lessons.py", "conflicts", b)
+    assert r.returncode == 0 and a in r.stdout
+    r = run_cli("lessons.py", "approve", b, "--one-note")
+    assert r.returncode == 1 and a in r.stdout and "--yes-no-conflict" in r.stderr
+    assert reg(home)["lessons"][1]["status"] == "candidate"
+    r = run_cli("lessons.py", "approve", b, "--one-note", "--yes-no-conflict")
+    assert r.returncode == 0, r.stderr
+    assert reg(home)["lessons"][1]["status"] == "rule"
+
+
+def test_no_conflict_without_shared_scope(home, tmp_path):
+    mkstyle_md(tmp_path)
+    mkrule("craft", "first", "--kind", "taste", scope="opening")
+    s = mkrule("style", "s", "--target", "test-style", scope="ending", approve=False)
+    r = run_cli("lessons.py", "approve", s, "--one-note")
+    assert r.returncode == 0, r.stderr
+    # a style lesson sees craft rules (lower layer); a craft lesson never sees style rules
+    c = mkrule("craft", "third", "--kind", "taste", scope="ending", approve=False)
+    r = run_cli("lessons.py", "conflicts", c)
+    assert r.returncode == 0 and "no possible conflicts" in r.stdout
+    s2 = mkrule("style", "s2", "--target", "test-style", scope="opening ending", approve=False)
+    r = run_cli("lessons.py", "conflicts", s2)
+    assert "L0001" in r.stdout and s in r.stdout
+
+
+def test_exception_conflicts_only_with_siblings(home, tmp_path):
+    mkstyle_md(tmp_path)
+    t = mkrule("craft", "t", "--kind", "taste", scope="easing")
+    run_cli("lessons.py", "exception", "--style", "test-style", "--craft", t, "--measurable", "m1",
+            "--reason", "r1")
+    e1 = reg_ids()[-1]
+    run_cli("lessons.py", "exception", "--style", "test-style", "--craft", t, "--measurable", "m2",
+            "--reason", "r2")
+    e2 = reg_ids()[-1]
+    assert run_cli("lessons.py", "approve", e1, "--one-note", "--yes-no-conflict").returncode == 0
+    r = run_cli("lessons.py", "conflicts", e2)
+    assert e1 in r.stdout
+    assert run_cli("lessons.py", "approve", e2, "--one-note").returncode == 1

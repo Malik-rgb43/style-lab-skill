@@ -141,7 +141,7 @@ def test_second_promotion_reuses_block(home, tmp_path):
     a = proposed_style_lesson()
     assert run_cli("lessons.py", "approve", a).returncode == 0
     b = proposed_style_lesson(text="zoom is slow", measurable="push-in lasts >= 1.5 s")
-    r = run_cli("lessons.py", "approve", b)
+    r = run_cli("lessons.py", "approve", b, "--yes-no-conflict")
     assert r.returncode == 0, r.stderr
     text = style_md.read_bytes().decode("utf-8")
     assert text.count(START) == 1 and text.count(END) == 1
@@ -160,7 +160,7 @@ def test_hand_edit_between_promotions_survives(home, tmp_path):
     edited = edited.replace(b"- hand rule one", b"- hand rule one, edited")
     style_md.write_bytes(edited)
     b = proposed_style_lesson(text="zoom is slow", measurable="push-in lasts >= 1.5 s")
-    assert run_cli("lessons.py", "approve", b).returncode == 0
+    assert run_cli("lessons.py", "approve", b, "--yes-no-conflict").returncode == 0
     after = style_md.read_bytes()
     assert strip_block(after) == strip_block(edited)
     assert "טקסט יד חדש" in after.decode("utf-8") and b"hand rule one, edited" in after
@@ -313,7 +313,7 @@ def test_style_registry_counts_and_version(home, tmp_path):
     assert run_cli("lessons.py", "approve", a).returncode == 0
     assert entry()["rules_count"] == 1 and entry()["version"] == 2
     b = proposed_style_lesson(text="zoom is slow", measurable="push-in lasts >= 1.5 s")
-    assert run_cli("lessons.py", "approve", b).returncode == 0
+    assert run_cli("lessons.py", "approve", b, "--yes-no-conflict").returncode == 0
     assert entry()["rules_count"] == 2 and entry()["version"] == 3
     # a render with nothing new changes no file and no version
     assert run_cli("lessons.py", "render", "--layer", "style", "--target", "test-style").returncode == 0

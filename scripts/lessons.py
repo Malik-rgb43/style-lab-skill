@@ -13,8 +13,18 @@ Commands:
                                                on a rule only text/measurable/scope, re-rendered)
     lessons.py reject <id> [--reason ..]          (not for rules or merged lessons)
     lessons.py match <id> --project P --video V [--t S] [--round N] [--note ..] [--before ..] [--after ..]
-    lessons.py approve <id> [--one-note]          (owner yes: proposed -> rule, then render;
-                                                   a candidate with one note needs --one-note)
+    lessons.py approve <id> [--one-note] [--yes-no-conflict]
+                                                  (owner yes: proposed -> rule, then render; a candidate
+                                                   with one note needs --one-note; possibly conflicting
+                                                   rules are printed first and, when any, approve exits 1
+                                                   unless --yes-no-conflict)
+    lessons.py rules [--style S] [--client C] [--json]
+                                                  (every rule that applies, craft then style then client;
+                                                   a taste craft rule a style overrides is marked)
+    lessons.py exception --style S --craft <id> --measurable .. --reason ..
+                                                  (style-layer candidate that overrides a TASTE craft
+                                                   rule; quality rules cannot be overridden)
+    lessons.py conflicts <id>                     (structural candidates for Claude to judge)
     lessons.py merge <src> <into>                 (moves evidence; src becomes merged)
     lessons.py render --layer craft|style|client [--target T]
     lessons.py settings [auto_promote=true|false]
@@ -400,6 +410,96 @@ def merge(src_id, into_id, warnings=None):
     return out
 
 
+# ---------- effective rules, exceptions, conflicts ----------
+
+def effective_rules(style=None, client=None):
+    """Every rule lesson that applies to (style, client), ordered craft, style, client (by rule_no).
+    Each item has overridden_by = id of a rule exception of this style that overrides a taste craft
+    rule, else None. Overridden rules stay listed, marked. style/client are slugs."""
+    rules = [x for x in load()["lessons"] if x["status"] == "rule"]
+
+    def layer(name, target):
+        return sorted((x for x in rules if x["layer"] == name and x["target"] == target),
+                      key=lambda x: x["rule_no"] or 0)
+
+    craft = layer("craft", None)
+    sty = layer("style", style) if style else []
+    cli = layer("client", client) if client else []
+    over = {}
+    for e in sty:
+        if e.get("exception_of"):
+            over.setdefault(e["exception_of"], e["id"])
+    out = []
+    for x in craft + sty + cli:
+        by = over.get(x["id"]) if x["layer"] == "craft" and x.get("kind") == "taste" else None
+        out.append({"layer": x["layer"], "target": x["target"], "rule_no": x["rule_no"], "id": x["id"],
+                    "measurable": x["measurable"], "scope": x["scope"], "kind": x.get("kind"),
+                    "exception_of": x.get("exception_of"), "reason": x.get("reason") or "",
+                    "overridden_by": by})
+    return out
+
+
+def add_exception(style_slug, craft_id, measurable, reason):
+    """A style may override a TASTE craft rule, with a written reason. Creates a style-layer
+    candidate lesson with exception_of=craft_id (approve it like any other). Raises ValueError."""
+    if not (reason or "").strip():
+        raise ValueError("an exception needs a written --reason")
+    if not (measurable or "").strip():
+        raise ValueError("an exception needs a --measurable reading")
+    out = {}
+
+    def fn(data):
+        slug, _ = _resolve("style", style_slug, None)
+        c = _find(data, craft_id)
+        if not c:
+            raise ValueError(f"no lesson {craft_id!r}")
+        if c["layer"] != "craft" or c["status"] != "rule":
+            raise ValueError(f"{craft_id} is not a craft rule (layer {c['layer']}, status {c['status']}): "
+                             f"only an approved craft rule can have an exception")
+        if c.get("kind") != "taste":
+            raise ValueError(f"{craft_id} is a {c.get('kind')} rule: only taste rules can be overridden")
+        e = _make_evidence({"note": reason.strip()})
+        lesson = {"id": f"L{data['next_id']:04d}", "text": f"Exception to {craft_id} for style {slug}: {reason.strip()}",
+                  "measurable": measurable.strip(), "layer": "style", "target": slug, "kind": None,
+                  "scope": c["scope"], "evidence": [e], "status": "candidate", "merged_into": None,
+                  "rule_no": None, "exception_of": craft_id, "reason": reason.strip(), "created": today(),
+                  "updated": today(), "promoted": None}
+        data["next_id"] += 1
+        data["lessons"].append(lesson)
+        out.update(lesson)
+
+    store.update_json(registry_path(), _empty(), fn)
+    return out
+
+
+def _words(text):
+    return set(re.findall(r"\w{4,}", norm(text)))
+
+
+def conflicts(lesson_id):
+    """Rules that might clash with this lesson, for Claude to judge. Structural only: a rule in the
+    same layer (same target) or a lower layer (craft < style < client) that shares a scope word of
+    4+ letters, or another exception to the same craft rule. Raises ValueError."""
+    data = load()
+    x = _find(data, lesson_id)
+    if not x:
+        raise ValueError(f"no lesson {lesson_id!r}")
+    rank = LAYERS.index(x["layer"])
+    mine = _words(x["scope"])
+    out = []
+    for r in data["lessons"]:
+        if r["status"] != "rule" or r["id"] == x["id"]:
+            continue
+        rr = LAYERS.index(r["layer"])
+        if rr > rank or (rr == rank and r["target"] != x["target"]):
+            continue
+        same_exc = bool(x.get("exception_of")) and x.get("exception_of") == r.get("exception_of")
+        if (mine & _words(r["scope"])) or same_exc:
+            out.append({"id": r["id"], "layer": r["layer"], "measurable": r["measurable"],
+                        "scope": r["scope"]})
+    return out
+
+
 # ---------- rendering ----------
 
 def _clean(text):
@@ -664,8 +764,80 @@ def cmd_match(args):
     return 0
 
 
+def _slug(kind, name):
+    if not name:
+        return None
+    if kind == "style":
+        import styles
+        s = styles.find(styles.load_registry(), name)
+    else:
+        import clients
+        s = clients.load_client(name)
+    if not s:
+        raise ValueError(f"no {kind} {name!r}")
+    return s["slug"]
+
+
+def cmd_rules(args):
+    try:
+        rows = effective_rules(_slug("style", args.style), _slug("client", args.client))
+    except ValueError as e:
+        return _fail(str(e))
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    if not rows:
+        print("no rules")
+        return 0
+    head = ["layer", "no.", "id", "rule", "scope", "kind", "overridden"]
+    table = [[r["layer"], str(r["rule_no"]), r["id"], _clean(r["measurable"]), _clean(r["scope"]) or "everywhere",
+              r["kind"] or "-", r["overridden_by"] or "-"] for r in rows]
+    w = [max(len(row[i]) for row in [head] + table) for i in range(len(head))]
+    for row in [head] + table:
+        print("  ".join(c.ljust(w[i]) for i, c in enumerate(row)).rstrip())
+    for r in rows:
+        if r["exception_of"]:
+            print(f"{r['id']}: exception to {r['exception_of']}: {_clean(r['reason'])}")
+    return 0
+
+
+def cmd_exception(args):
+    try:
+        x = add_exception(args.style, args.craft, args.measurable, args.reason)
+    except ValueError as e:
+        return _fail(str(e))
+    print(f"added {x['id']} (style {x['target']}, {x['status']}, exception to {x['exception_of']})")
+    return 0
+
+
+def _print_conflicts(items):
+    for c in items:
+        print(f"{c['id']}\t{c['layer']}\t{c['measurable']}\t{c['scope'] or 'everywhere'}")
+
+
+def cmd_conflicts(args):
+    try:
+        items = conflicts(args.id)
+    except ValueError as e:
+        return _fail(str(e))
+    if not items:
+        print("no possible conflicts")
+    _print_conflicts(items)
+    return 0
+
+
 def cmd_approve(args):
     warnings = []
+    try:
+        items = conflicts(args.id)
+    except ValueError:
+        items = []  # unknown lesson: approve() below gives the error
+    if items:
+        print(f"possible conflicts for {args.id} (judge each: same rule, or different?):")
+        _print_conflicts(items)
+        if not args.yes_no_conflict:
+            return _fail(f"{len(items)} possibly conflicting rule(s); if none conflicts, "
+                         f"approve again with --yes-no-conflict")
     try:
         x = approve(args.id, warnings, one_note=args.one_note)
     except store.LockTimeout:
@@ -763,6 +935,13 @@ def _main(argv=None):
     a = sub.add_parser("approve"); a.add_argument("id")
     a.add_argument("--one-note", dest="one_note", action="store_true",
                    help="owner yes for a candidate that has only one note so far")
+    a.add_argument("--yes-no-conflict", dest="yes_no_conflict", action="store_true",
+                   help="the listed possible conflicts were judged: none conflicts")
+    a = sub.add_parser("rules"); a.add_argument("--style"); a.add_argument("--client")
+    a.add_argument("--json", action="store_true")
+    a = sub.add_parser("exception"); a.add_argument("--style", required=True)
+    a.add_argument("--craft", required=True); a.add_argument("--measurable"); a.add_argument("--reason")
+    a = sub.add_parser("conflicts"); a.add_argument("id")
     a = sub.add_parser("merge"); a.add_argument("src"); a.add_argument("into")
     a = sub.add_parser("render"); a.add_argument("--layer", required=True, choices=("craft", "style", "client"))
     a.add_argument("--target")
@@ -777,7 +956,8 @@ def _main(argv=None):
     if args.cmd == "show":
         return cmd_show(args)
     simple = {"match": cmd_match, "approve": cmd_approve, "merge": cmd_merge, "render": cmd_render,
-              "settings": cmd_settings}
+              "settings": cmd_settings, "rules": cmd_rules, "exception": cmd_exception,
+              "conflicts": cmd_conflicts}
     if args.cmd in simple:
         return simple[args.cmd](args)
     return _locked(_edit if args.cmd == "edit" else _reject, args)
