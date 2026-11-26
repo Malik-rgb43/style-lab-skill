@@ -284,3 +284,41 @@ def test_doctor_style_and_recipe_check_agree():
         rows, _p, _f = assets_log.check_recipes(
             [{"kind": "k", "how": "code", "tools": [{"capability": cap, "level": "required"}]}], caps)
         assert rows[0]["ready"] == doctor.resolve(cap, caps)["ok"]
+
+
+def test_ink_polarity_heavy_ink_and_inverted(tmp_path):
+    import numpy as np
+    g = np.full((100, 100), 255, dtype=np.uint8)
+    g[12:88, 12:88] = 0           # heavy ink block (58% of the frame)
+    g[40:60, 40:60] = 255         # counter
+    m = font_match.binarise(g)
+    assert m[30, 30] and not m[0, 0]
+    inv = font_match.binarise(255 - g)
+    assert inv[30 - 2, 30 - 2] and not inv[0, 0]
+
+
+def test_dt_scipy_and_loops_agree():
+    import numpy as np
+    pytest.importorskip("scipy")
+    rng = np.random.default_rng(1)
+    m = rng.random((14, 17)) > 0.93
+    m[3, 3] = True
+    assert np.array_equal(font_match._dt_scipy(m), font_match._dt_loops(m))
+
+
+def test_recipe_first_add_without_how_writes_nothing(tmp_path):
+    pack = tmp_path / "pack"
+    r = run_cli("assets_log.py", "recipe", "add", pack, "--kind", "k")
+    assert r.returncode == 2 and "--how" in r.stderr
+    assert not (pack / "recipes.json").exists()
+
+
+def test_sound_libraries_resolve_from_settings(home):
+    import doctor
+    assert not doctor.resolve("sound_libraries", {"local": {}, "session": {}})["ok"]
+    assert run_cli("assets_log.py", "sound-lib", "add", "l", "D:/s").returncode == 0
+    res = doctor.resolve("sound_libraries", {"local": {}, "session": {}})
+    assert res == {"ok": True, "via": "settings"}
+    rows, _p, _f = assets_log.check_recipes(
+        [{"kind": "k", "tools": [{"capability": "sound_libraries", "level": "required"}]}], {})
+    assert rows[0]["ready"]

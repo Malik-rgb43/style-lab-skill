@@ -306,6 +306,8 @@ def resolve(cap, caps):
     """Is capability `cap` available in the map? Returns {ok, via}. Single source of truth for
     `doctor.py --style` and `assets_log.py recipe check`. Aliases match whole name tokens only."""
     c = str(cap).strip().lower()
+    if c == "sound_libraries" and store.settings().get("sound_libraries"):
+        return {"ok": True, "via": "settings"}
     ok = {}
     for blk in ("local", "session"):
         blkd = (caps or {}).get(blk)

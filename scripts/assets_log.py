@@ -220,7 +220,6 @@ def cmd_recipe_add(a):
         return die(f"--how must be one of {HOWS}")
     if a.test and a.test not in TEST_STATUS:
         return die(f"--test must be one of {TEST_STATUS}")
-    err = []
 
     def fn(d):
         if not isinstance(d.get("recipes", []), list):
@@ -229,8 +228,7 @@ def cmd_recipe_add(a):
         r = next((x for x in recs if isinstance(x, dict) and x.get("kind") == a.kind), None)
         if r is None:
             if not a.how:
-                err.append(f"first add of recipe {a.kind} needs --how {'|'.join(HOWS)}")
-                return
+                raise ValueError(f"first add of recipe {a.kind} needs --how {'|'.join(HOWS)}")
             r = new_recipe(a.kind)
             recs.append(r)
         if a.how:
@@ -258,8 +256,6 @@ def cmd_recipe_add(a):
         if a.evidence:
             r["source_evidence"] = list(dict.fromkeys(r["source_evidence"] + a.evidence))
     store.update_json(Path(a.pack) / "recipes.json", {"recipes": []}, fn)
-    if err:
-        return die(err[0])
     print(f"recipe {a.kind} saved")
     return 0
 

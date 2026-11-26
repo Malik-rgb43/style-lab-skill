@@ -103,19 +103,46 @@ def edges(mask):
     return inner & ~all_n
 
 
+def _near(mask, r=2):
+    """True within r pixels (box) of a True pixel."""
+    import numpy as np
+    h, w = mask.shape
+    p = np.pad(mask, r)
+    out = np.zeros_like(mask)
+    for dy in range(2 * r + 1):
+        for dx in range(2 * r + 1):
+            out |= p[dy:dy + h, dx:dx + w]
+    return out
+
+
+def pick_ink(dark):
+    """Which side is the ink. The side owning the frame border is the background (a crop is
+    taken around the text). Otherwise the ink is the side whose pixels sit mostly next to
+    edges (share of its pixels within 2 px of a boundary); area never decides."""
+    import numpy as np
+    light = ~dark
+    ring = np.zeros_like(dark)
+    ring[0, :] = ring[-1, :] = ring[:, 0] = ring[:, -1] = True
+    dark_ring = (dark & ring).sum() / max(1, ring.sum())
+    if dark_ring >= 0.8:
+        return light
+    if dark_ring <= 0.2:
+        return dark
+    near = _near(edges(dark) | edges(light))
+
+    def share(m):
+        n = int(m.sum())
+        return (m & near).sum() / n if n else 0.0
+    return dark if share(dark) >= share(light) else light
+
+
 def binarise(gray, border=BORDER):
-    """Ink mask: strip a border, Otsu threshold, ink = the side with the higher edge density."""
+    """Ink mask: strip a border, Otsu threshold, then pick the ink side (see pick_ink)."""
     import numpy as np
     g = np.asarray(gray)
     if border and min(g.shape) > 2 * border + 2:
         g = g[border:-border, border:-border]
-    dark = g <= otsu_threshold(g)
-    light = ~dark
-
-    def density(m):
-        n = int(m.sum())
-        return edges(m).sum() / n if n else 0.0
-    return dark if density(dark) >= density(light) else light
+    return pick_ink(g <= otsu_threshold(g))
 
 
 def ink_crop(mask):
@@ -139,47 +166,49 @@ def normalise(mask, height=NORM_H):
     return np.asarray(im) > 127
 
 
-def chamfer_dt(points_mask):
-    """Distance (pixels) to the nearest True pixel. scipy when importable, pure loops otherwise."""
-    import numpy as np
-    try:
-        from scipy.ndimage import distance_transform_cdt
-        return distance_transform_cdt(~points_mask, metric="chessboard").astype(float) \
-            if points_mask.any() else np.full(points_mask.shape, 1e6)
-    except ImportError:
-        return _chamfer_loops(points_mask)
+def _dt_scipy(points_mask):
+    from scipy.ndimage import distance_transform_cdt
+    return distance_transform_cdt(~points_mask, metric="chessboard").astype(float)
 
 
-def _chamfer_loops(points_mask):
+def _dt_loops(points_mask):
+    """Chessboard distance, two passes (same metric as the scipy path)."""
     import numpy as np
     h, w = points_mask.shape
-    INF = 10 ** 6
-    d = np.where(points_mask, 0, INF).astype(np.int64)
+    d = np.where(points_mask, 0, 10 ** 6).astype(np.int64)
     for y in range(h):
         for x in range(w):
             v = d[y, x]
             if y > 0:
-                v = min(v, d[y - 1, x] + 3)
+                v = min(v, d[y - 1, x] + 1)
                 if x > 0:
-                    v = min(v, d[y - 1, x - 1] + 4)
+                    v = min(v, d[y - 1, x - 1] + 1)
                 if x < w - 1:
-                    v = min(v, d[y - 1, x + 1] + 4)
+                    v = min(v, d[y - 1, x + 1] + 1)
             if x > 0:
-                v = min(v, d[y, x - 1] + 3)
+                v = min(v, d[y, x - 1] + 1)
             d[y, x] = v
     for y in range(h - 1, -1, -1):
         for x in range(w - 1, -1, -1):
             v = d[y, x]
             if y < h - 1:
-                v = min(v, d[y + 1, x] + 3)
+                v = min(v, d[y + 1, x] + 1)
                 if x > 0:
-                    v = min(v, d[y + 1, x - 1] + 4)
+                    v = min(v, d[y + 1, x - 1] + 1)
                 if x < w - 1:
-                    v = min(v, d[y + 1, x + 1] + 4)
+                    v = min(v, d[y + 1, x + 1] + 1)
             if x < w - 1:
-                v = min(v, d[y, x + 1] + 3)
+                v = min(v, d[y, x + 1] + 1)
             d[y, x] = v
-    return d / 3.0
+    return d.astype(float)
+
+
+def chamfer_dt(points_mask):
+    """Chessboard distance (pixels) to the nearest True pixel; scipy when importable, loops otherwise."""
+    try:
+        return _dt_scipy(points_mask)
+    except ImportError:
+        return _dt_loops(points_mask)
 
 
 def chamfer_score(a, b):
