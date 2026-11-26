@@ -14,6 +14,13 @@ Output: {schema, source:{kind:"code", path_hint:<basename>}, type:{levels, scale
 colour:{roles}, motion:{eases, durations}, sound:{files}}. Levels are clustered by font size
 (sizes within 10 % share a level) and ordered from the largest to the smallest.
 
+Layer entries: {source, ref} and, for a code layer, path_hint (basename of the project folder; the ref
+is stored as an absolute path). Task 5 takes only the layers whose source is "code" from tokens.json and
+calls tokens_match_layer(entry, tokens), refusing a mismatch. A non-refs source needs a ref.
+
+Known limits: rules inside @media (and other at-rules) are flattened, the media condition is ignored;
+eases/durations that are variables are reported as unresolved, never guessed.
+
 Exit: 0 ok, 2 bad input (missing project, bad --set), 1 other error.
 """
 import argparse
@@ -258,7 +265,7 @@ def _style_data(page, css):
 
 def _uses(selectors, page):
     n = sum(1 for el in page.elements if any(_matches(s, el) for s in selectors))
-    return max(1, n)
+    return n
 
 
 # --------------------------------------------------------------------- type
@@ -402,8 +409,96 @@ def _pct(vals, p):
     return round(s[lo] + (s[hi] - s[lo]) * (k - lo), 3)
 
 
+_LEGACY = re.compile(r"^Power([0-4])\.ease(In|Out|InOut)$")
+_TL_ASSIGN = re.compile(r"([\w$.]+)\s*=\s*gsap\.timeline\s*\(")
+
+
+def _strip_js_comments(t):
+    """Remove // and /* */ comments; strings (and so URLs inside them) are left alone."""
+    out, i, n, q = [], 0, len(t), None
+    while i < n:
+        c = t[i]
+        if q:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(t[i + 1])
+                i += 1
+            elif c == q:
+                q = None
+        elif c in "\"'`":
+            q = c
+            out.append(c)
+        elif t.startswith("//", i):
+            while i < n and t[i] != "\n":
+                i += 1
+            continue
+        elif t.startswith("/*", i):
+            j = t.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            out.append(" ")
+            continue
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _legacy_ease(s):
+    """'Power3.easeOut' -> 'power3.out'; Power0 is linear ('none'); anything else is returned as is."""
+    m = _LEGACY.match(s.strip())
+    if not m:
+        return s
+    if m.group(1) == "0":
+        return "none"
+    return f"power{m.group(1)}." + {"In": "in", "Out": "out", "InOut": "inOut"}[m.group(2)]
+
+
+def _obj_get(obj, key):
+    """Raw text of a top-level key's value in an object literal, or None."""
+    body = obj.strip()
+    if body.startswith("{"):
+        body = body[1:-1]
+    for a in _top_args(body):
+        m = re.match(r"[\"']?([\w$]+)[\"']?\s*:\s*(.*)$", a, re.S)
+        if m and m.group(1) == key:
+            return m.group(2).strip()
+    return None
+
+
+def _read_ease(raw):
+    """-> (name or None). None means present but not readable."""
+    if raw is None:
+        return None
+    m = re.fullmatch(r"([\"'])(.*)\1", raw, re.S)
+    if m:
+        return _legacy_ease(m.group(2))
+    if _LEGACY.match(raw):
+        return _legacy_ease(raw)
+    return None
+
+
+def _read_dur(raw):
+    if raw is not None and re.fullmatch(r"[\d.]+", raw):
+        return float(raw)
+    return None
+
+
+def _timeline_defaults(js):
+    out = {}
+    for m in _TL_ASSIGN.finditer(js):
+        end = _balanced(js, m.end() - 1)
+        if end is None:
+            continue
+        args = _top_args(js[m.end():end - 1])
+        d = _obj_get(args[0], "defaults") if args and args[0].startswith("{") else None
+        out[m.group(1)] = d if d and d.startswith("{") else None
+    return out
+
+
 def _motion_tokens(js):
+    js = _strip_js_comments(js)
     customs = {m.group(2): m.group(4) for m in _CUSTOM.finditer(js)}
+    tls = _timeline_defaults(js)
     groups, durations = {}, []
     for m in _CALL.finditer(js):
         end = _balanced(js, m.end() - 1)
@@ -413,33 +508,79 @@ def _motion_tokens(js):
         method = m.group(1)
         if method == "set" or len(args) < 2:
             continue
-        obj = next((a for a in reversed(args) if a.startswith("{")), None)
-        if obj is None:
-            continue
-        dm = re.search(r"\bduration\s*:\s*([\d.]+)", obj)
-        if dm:
-            dur = float(dm.group(1))
-        elif len(args) > 2 and re.fullmatch(r"[\d.]+", args[1]):
-            dur = float(args[1])
+        objs = [a for a in args[1:] if a.startswith("{")]
+        if method == "fromTo":
+            if len(objs) < 2:
+                continue
+            obj, props_src = objs[1], objs
         else:
-            dur = 0.5  # GSAP default
-        em = re.search(r"\bease\s*:\s*([\"'])(.*?)\1", obj)
-        ease = em.group(2) if em else "power1.out"  # GSAP default
-        props = [k for k in _top_keys(obj) if k not in _RESERVED]
-        if method == "fromTo" and len(args) >= 3 and args[-2].startswith("{"):
-            props += [k for k in _top_keys(args[-2]) if k not in _RESERVED]
-        key = ("custom", customs[ease]) if ease in customs else ("name", ease)
-        g = groups.setdefault(key, {"durs": [], "props": set(), "label": ease})
-        g["durs"].append(dur)
+            if not objs:
+                continue
+            obj, props_src = objs[0], objs[:1]
+        rm = re.search(r"([\w$.]+)\s*$", js[:m.start()])
+        recv = rm.group(1) if rm else None
+        if recv in tls:
+            dflt = tls[recv]
+        elif recv != "gsap" and len(tls) == 1:
+            dflt = next(iter(tls.values()))
+        else:
+            dflt = None
+        props = []
+        for o in props_src:
+            props += [k for k in _top_keys(o) if k not in _RESERVED]
+
+        used_default = False
+        raw_e = _obj_get(obj, "ease")
+        if raw_e is None and dflt:
+            raw_e = _obj_get(dflt, "ease")
+        if raw_e is None:
+            ease, e_unres, used_default = "power1.out", False, True
+        else:
+            ease = _read_ease(raw_e)
+            e_unres = ease is None
+        raw_d = _obj_get(obj, "duration")
+        if raw_d is None and len(args) > 2 and re.fullmatch(r"[\d.]+", args[1]):
+            raw_d = args[1]
+        if raw_d is None and dflt:
+            raw_d = _obj_get(dflt, "duration")
+        if raw_d is None:
+            dur, d_unres, used_default = 0.5, False, True
+        else:
+            dur = _read_dur(raw_d)
+            d_unres = dur is None
+
+        if e_unres:
+            key = ("unresolved", None)
+        elif ease in customs:
+            key = ("custom", customs[ease])
+        else:
+            key = ("name", ease)
+        g = groups.setdefault(key, {"durs": [], "props": set(), "label": ease, "d_unres": False,
+                                    "default": False, "n": 0})
+        g["n"] += 1
         g["props"].update(props)
-        durations.append(dur)
+        g["default"] = g["default"] or used_default
+        if d_unres:
+            g["d_unres"] = True
+        else:
+            g["durs"].append(dur)
+            durations.append(dur)
     eases = []
     for (kind, val), g in groups.items():
-        item = {"custom_ease": val, "label": g["label"]} if kind == "custom" else {"name": val}
-        item.update({"duration_s": round(statistics.median(g["durs"]), 3), "uses": len(g["durs"]),
-                     "props": sorted(g["props"])})
+        if kind == "custom":
+            item = {"custom_ease": val, "label": g["label"]}
+        else:
+            item = {"name": val}
+        if kind == "unresolved":
+            item["unresolved"] = "ease"
+        elif g["d_unres"]:
+            item["unresolved"] = "duration"
+        if g["default"]:
+            item["default"] = True
+        item.update({"duration_s": round(statistics.median(g["durs"]), 3) if g["durs"] else None,
+                     "uses": g["n"], "props": sorted(g["props"])})
         eases.append(item)
-    eases.sort(key=lambda e: (-e["uses"], e.get("name") or e.get("custom_ease")))
+    eases.sort(key=lambda e: (-e["uses"], e.get("name") or e.get("custom_ease") or ""))
     return {"eases": eases,
             "durations": {"median": _pct(durations, 0.5), "p10": _pct(durations, 0.1),
                           "p90": _pct(durations, 0.9), "n": len(durations)}}
@@ -476,12 +617,32 @@ def read_project(directory):
             "sound": _sound_tokens(page)}
 
 
+def tokens_match_layer(layer_entry, tokens):
+    """True when a code layer entry and a tokens.json come from the same project (equal path_hint).
+
+    Task 5 takes only the layers whose source is "code" from tokens.json, and refuses a mismatch.
+    """
+    try:
+        hint = layer_entry.get("path_hint")
+        return bool(hint) and layer_entry.get("source") == "code" and hint == tokens["source"]["path_hint"]
+    except (AttributeError, KeyError, TypeError):
+        return False
+
+
 def read_layers(pack):
     data = store.read_json(Path(pack) / "layers.json", {})
+    if not isinstance(data, dict):
+        raise ValueError("layers.json is not an object")
     out = {l: {"source": "refs", "ref": ""} for l in LAYERS}
     for l in LAYERS:
-        if isinstance(data.get(l), dict):
-            out[l].update({k: data[l][k] for k in ("source", "ref") if k in data[l]})
+        if l not in data:
+            continue
+        e = data[l]
+        if not isinstance(e, dict):
+            raise ValueError(f"layers.json: entry {l!r} is not an object")
+        if e.get("source", "refs") not in SOURCES:
+            raise ValueError(f"layers.json: unknown source {e.get('source')!r} for {l!r}")
+        out[l].update({k: e[k] for k in ("source", "ref", "path_hint") if k in e})
     return out
 
 
@@ -490,10 +651,19 @@ def set_layer_source(pack, layer, source, ref=""):
         raise ValueError(f"unknown layer {layer!r}; use one of {', '.join(LAYERS)}")
     if source not in SOURCES:
         raise ValueError(f"unknown source {source!r}; use one of {', '.join(SOURCES)}")
+    ref = (ref or "").strip()
+    if source != "refs" and not ref:
+        raise ValueError(f"source {source!r} needs a ref (use {layer}={source}:<ref>)")
+    entry = {"source": source, "ref": ref}
+    if source == "code":
+        rp = Path(ref).resolve()
+        if rp.is_file():
+            rp = rp.parent
+        entry = {"source": source, "ref": str(rp), "path_hint": rp.name}
     p = Path(pack) / "layers.json"
     with store.lock(p):
         data = read_layers(pack)
-        data[layer] = {"source": source, "ref": ref or ""}
+        data[layer] = entry
         store.write_json(p, data)
     return data
 
