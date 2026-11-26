@@ -8,7 +8,9 @@ from conftest import run_cli
 
 ROLE_KEYS = {"background", "surface", "text", "muted", "brand", "brand_deep", "tint", "accent", "highlight",
              "caption_pill", "cta"}
-CHECK_KEYS = {"text_on_background", "text_on_surface", "cta_text", "accent_vs_brand_cvd", "pass"}
+CHECK_KEYS = {"text_on_background", "text_on_surface", "muted_on_background", "caption_text", "cta_text",
+              "text_on_highlight", "accent_large_text", "accent_vs_brand_cvd", "one_accent", "pass"}
+FIXTURES = ["#008754", "#7C5CFF", "#E11D48", "#111111", "#FFD400"]
 
 
 def test_parse_hex_forms():
@@ -59,15 +61,23 @@ def test_accent_rule():
     assert abs(hue(palette.accent_for("#E11D48")) - 250) < 3  # warm brand -> blue
 
 
+def test_neutral_brands_get_blue_accent():
+    hues = [palette.hex_to_oklch(palette.accent_for(h))[2] for h in ("#FFFFFF", "#808080", "#000000", "#111111")]
+    assert all(abs(h - 250) < 3 for h in hues), hues
+    assert len({palette.accent_for(h) for h in ("#FFFFFF", "#808080", "#000000")}) == 1
+
+
 def test_proposals_shape():
     ps = palette.proposals("#008754")
     assert [p["kind"] for p in ps] == ["monochrome", "analogous", "accent"]
     for p in ps:
-        assert set(p) == {"kind", "brand", "ramp", "neutrals", "accent", "roles", "checks"}
+        assert set(p) == {"kind", "brand", "ramp", "neutrals", "accent", "roles", "labels", "checks"}
         assert p["brand"] == "#008754"
-        assert set(p["roles"]) == {"dark", "light"}
+        assert set(p["roles"]) == set(p["labels"]) == {"dark", "light"}
         for theme in p["roles"].values():
             assert set(theme) == ROLE_KEYS
+        for lab in p["labels"].values():
+            assert set(lab) == {"caption", "cta", "highlight"}
         assert set(p["checks"]) == CHECK_KEYS
 
 
@@ -82,16 +92,58 @@ def test_teal_fixture():
     assert de(light["background"], "#F5F6F1") <= 12
 
 
-@pytest.mark.parametrize("h", ["#008754", "#7C5CFF", "#E11D48", "#111111", "#FFD400"])
+def _verify(p):
+    """Recompute every bar from the stored roles and labels, per theme (never trust the reported numbers)."""
+    c, ct = p["checks"], palette.contrast
+    assert c["pass"] is True, (p["brand"], p["kind"], c)
+    for t in ("light", "dark"):
+        r, lab = p["roles"][t], p["labels"][t]
+        where = (p["brand"], p["kind"], t)
+        assert ct(r["text"], r["background"]) >= 4.5 and ct(r["text"], r["surface"]) >= 4.5, where
+        assert ct(r["muted"], r["background"]) >= 4.5, where
+        assert ct(lab["caption"], r["caption_pill"]) >= 4.5, where
+        assert ct(lab["cta"], r["cta"]) >= 4.5, where
+        assert ct(lab["highlight"], r["highlight"]) >= 4.5, where
+        assert ct(r["accent"], r["background"]) >= 3.0, where
+        assert palette.cvd_delta(r["accent"], r["brand"]) >= 10, where
+        assert palette.delta_e2000(r["accent"], r["brand"]) >= 20, where
+        for k in ("caption", "cta", "highlight"):
+            assert lab[k] in (r["text"], r["background"], "#FFFFFF", "#000000"), where
+        assert ct(r["text"], r["background"]) >= c["text_on_background"] - 0.01, where
+
+
+@pytest.mark.parametrize("h", FIXTURES)
 def test_all_proposals_pass_checks(h):
     for p in palette.proposals(h):
-        c = p["checks"]
-        assert c["pass"] is True, (h, p["kind"], c)
-        # never reported falsely: recompute from the roles
-        for theme in p["roles"].values():
-            assert palette.contrast(theme["text"], theme["background"]) >= c["text_on_background"] - 0.01
-            assert palette.contrast(theme["text"], theme["surface"]) >= c["text_on_surface"] - 0.01
-        assert palette.cvd_delta(p["accent"], p["brand"]) >= 10
+        _verify(p)
+
+
+def test_random_brands_pass_per_theme():
+    rnd = random.Random(2026)
+    brands = FIXTURES + ["#" + "".join(f"{rnd.randrange(256):02X}" for _ in range(3)) for _ in range(300)]
+    for h in brands:
+        for p in palette.proposals(h):
+            _verify(p)
+
+
+def test_cvd_uses_theme_brand():
+    # regression: the light theme moves a yellow brand darker; the accent must clear that colour, not the input
+    for h in ("#FFD400", "#7FC102"):
+        for p in palette.proposals(h):
+            for t in ("light", "dark"):
+                r = p["roles"][t]
+                assert palette.cvd_delta(r["accent"], r["brand"]) >= 10, (h, p["kind"], t)
+            assert p["checks"]["accent_vs_brand_cvd"] == pytest.approx(
+                min(palette.cvd_delta(p["roles"][t]["accent"], p["roles"][t]["brand"]) for t in ("light", "dark")),
+                abs=0.01)
+
+
+def test_one_accent_flags_hue_drift():
+    p = palette.proposals("#008754")[2]
+    r = dict(p["roles"]["light"])
+    assert palette._one_accent(r, palette.hex_to_oklch("#008754")[2], 0.128)
+    r["tint"] = "#D04080"  # a second loud hue outside accent/highlight/cta
+    assert not palette._one_accent(r, palette.hex_to_oklch("#008754")[2], 0.128)
 
 
 def test_cli_prints_and_json(home):

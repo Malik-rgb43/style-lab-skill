@@ -29,6 +29,10 @@ MIN_TEXT = 4.5     # every text ratio in checks
 MIN_CVD = 10.0     # accent vs brand, CIEDE2000 under deuteranopia
 TEXT_TARGET = 7.0  # text is built for AAA; nudged in L when it misses
 SHAPE_MIN = 3.0    # brand role vs background (WCAG non-text contrast)
+LARGE_TEXT = 3.0   # accent as large headline words on the background
+ONE_ACCENT_DE = 20.0   # one_accent: accent vs brand CIEDE2000 at least this
+ONE_ACCENT_HUE = 40.0  # one_accent: non-accent roles (C >= 0.02) within this many degrees of the brand hue
+NEUTRAL_BRAND_C = 0.02  # brands under this OKLCH chroma are neutral: accent hue 250, hue noise ignored
 
 # ---- Final role table (tuned on the owner's teal set; Task 7 copies it into references/palette.md).
 # Ramp step -> (OKLCH L, chroma as a factor of the brand chroma). Hue = brand hue; steps darker than 500
@@ -60,9 +64,12 @@ ROLE_TABLE = {
     "cta":          ("cta",          "cta"),
 }
 # Per kind: accent = monochrome ramp 300 (ramp 800 for light brands) | analogous neighbour hue at brand L |
-# accent rule colour; CTA fill = brand | the accent | the accent. Accent moves in L until CVD dE >= 10 and the CTA
-# until its label (white or light-theme text, whichever is higher) reaches 4.5. Caption pill carries white
-# caption text (>= 4.5). Checks report the worse of the two themes.
+# accent rule colour; CTA fill = brand | the theme accent | the theme accent.
+# Bars, held per theme by moving L (accent: L first, then hue in 10 degree steps):
+#   text >= 7:1 on background and surface; muted >= 4.5 on background; brand role >= 3:1 on background;
+#   theme accent vs theme brand: deuteranopia dE >= 10 and dE >= 20, and >= 3:1 on background (large text);
+#   cta, highlight and caption_pill: best label (theme text, background, white or black) >= 4.5.
+# Labels are stored per theme in `labels`; checks report the worse of the two themes.
 
 
 # ---------------------------------------------------------------- parsing
@@ -260,9 +267,11 @@ def is_cool(H):
 
 
 def accent_for(h):
-    """Accent rule: cool brand hue [90, 270) -> warm orange (hue 50), else blue (hue 250); L 0.70, C 0.16."""
-    _, _, H = hex_to_oklch(h)
-    return oklch_to_hex(ACCENT_L, ACCENT_C, ACCENT_WARM_H if is_cool(H) else ACCENT_COOL_H)
+    """Accent rule: cool brand hue [90, 270) -> warm orange (hue 50), else blue (hue 250); L 0.70, C 0.16.
+    Neutral brands (C < 0.02: greys, black, white) always get blue."""
+    _, C, H = hex_to_oklch(h)
+    warm = C >= NEUTRAL_BRAND_C and is_cool(H)
+    return oklch_to_hex(ACCENT_L, ACCENT_C, ACCENT_WARM_H if warm else ACCENT_COOL_H)
 
 
 def neighbour_hue(H):
@@ -289,9 +298,34 @@ def _nudge(hexc, ok, max_dl=1.0):
     return None
 
 
-def cta_label(fill, text_dark):
-    """CTA label colour: white or the light theme's text colour, whichever contrasts more with the fill."""
-    return "#FFFFFF" if contrast(fill, "#FFFFFF") >= contrast(fill, text_dark) else text_dark
+def _nudge_hue(hexc, ok):
+    """Lightness first; when no lightness works, rotate the hue in 10 degree steps (nearest first)."""
+    got = _nudge(hexc, ok)
+    if got:
+        return got
+    L, C, H = hex_to_oklch(hexc)
+    C = max(C, ACCENT_C)
+    for d in range(10, 181, 10):
+        for s in (d, -d):
+            got = _nudge(oklch_to_hex(L, C, (H + s) % 360), ok)
+            if got:
+                return got
+    return None
+
+
+def best_label(fill, roles):
+    """Label colour for words on `fill`: the theme's text, background, white or black, most contrast wins."""
+    cands = (roles["text"], roles["background"], "#FFFFFF", "#000000")
+    return max(cands, key=lambda c: contrast(fill, c))
+
+
+def _hue_gap(a, b):
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def _accent_ok(c, brand, bg):
+    return (cvd_delta(c, brand) >= MIN_CVD and delta_e2000(c, brand) >= ONE_ACCENT_DE
+            and contrast(c, bg) >= LARGE_TEXT)
 
 
 def _resolve(spec, ctx):
@@ -309,27 +343,65 @@ def _resolve(spec, ctx):
     return ctx[kind]  # accent, cta, brand
 
 
-def _theme_roles(i, ctx):
-    roles = {k: _resolve(ROLE_TABLE[k][i], ctx) for k in ROLE_KEYS}
-    bg, surface = roles["background"], roles["surface"]
-    # never report falsely: roles that miss their bar are moved in lightness until they pass
-    fixes = {"text": lambda c: min(contrast(c, bg), contrast(c, surface)) >= TEXT_TARGET,
-             "brand": lambda c: contrast(c, bg) >= SHAPE_MIN,
-             "caption_pill": lambda c: contrast(c, "#FFFFFF") >= MIN_TEXT}  # white caption text on the pill
-    for k, ok in fixes.items():
-        roles[k] = _nudge(roles[k], ok) or roles[k]
-    return roles
+def _theme(i, ctx):
+    """Roles and label colours of one theme (0 light, 1 dark), every role held to its bar by moving L."""
+    r = {k: _resolve(ROLE_TABLE[k][i], ctx) for k in ROLE_KEYS}
+    bg, surface = r["background"], r["surface"]
+    r["text"] = _nudge(r["text"], lambda c: min(contrast(c, bg), contrast(c, surface)) >= TEXT_TARGET) or r["text"]
+    r["muted"] = _nudge(r["muted"], lambda c: contrast(c, bg) >= MIN_TEXT) or r["muted"]
+    r["brand"] = _nudge(r["brand"], lambda c: contrast(c, bg) >= SHAPE_MIN) or r["brand"]
+    # the accent is checked against this theme's brand role (which may have moved), not the input colour
+    r["accent"] = _nudge_hue(r["accent"], lambda c: _accent_ok(c, r["brand"], bg)) or r["accent"]
+    if ctx["cta_is_accent"]:
+        r["cta"] = r["accent"]
+    hl_L = ROLE_TABLE["highlight"][i]
+    if isinstance(hl_L, str) and hl_L.startswith("accent:"):
+        _, aC, aH = hex_to_oklch(r["accent"])
+        r["highlight"] = oklch_to_hex(float(hl_L.split(":")[1]), aC * HIGHLIGHT_C, aH)
+    for k in ("cta", "highlight", "caption_pill"):
+        r[k] = _nudge(r[k], lambda c: contrast(c, best_label(c, r)) >= MIN_TEXT) or r[k]
+    labels = {"caption": best_label(r["caption_pill"], r), "cta": best_label(r["cta"], r),
+              "highlight": best_label(r["highlight"], r)}
+    return r, labels
 
 
-def _check(p, text_dark):
-    themes = (p["roles"]["light"], p["roles"]["dark"])
-    tb = min(contrast(r["text"], r["background"]) for r in themes)
-    ts = min(contrast(r["text"], r["surface"]) for r in themes)
-    ct = min(contrast(r["cta"], cta_label(r["cta"], text_dark)) for r in themes)
-    cvd = cvd_delta(p["accent"], p["brand"])
-    return {"text_on_background": round(tb, 2), "text_on_surface": round(ts, 2), "cta_text": round(ct, 2),
-            "accent_vs_brand_cvd": round(cvd, 2),
-            "pass": tb >= MIN_TEXT and ts >= MIN_TEXT and ct >= MIN_TEXT and cvd >= MIN_CVD}
+def _one_accent(r, H, brand_C):
+    if delta_e2000(r["accent"], r["brand"]) < ONE_ACCENT_DE:
+        return False
+    if brand_C < NEUTRAL_BRAND_C:
+        return True  # a grey brand has no hue to drift from; every non-accent role is grey too
+    for k in ROLE_KEYS:
+        if k in ("accent", "highlight", "cta"):
+            continue
+        _, c, h = hex_to_oklch(r[k])
+        if c >= 0.02 and _hue_gap(h, H) > ONE_ACCENT_HUE:
+            return False
+    return True
+
+
+def _check(p, H, brand_C):
+    pairs = [(p["roles"][t], p["labels"][t]) for t in ("light", "dark")]
+
+    def worst(fn):
+        return min(fn(r, lab) for r, lab in pairs)
+
+    c = {
+        "text_on_background": worst(lambda r, lab: contrast(r["text"], r["background"])),
+        "text_on_surface": worst(lambda r, lab: contrast(r["text"], r["surface"])),
+        "muted_on_background": worst(lambda r, lab: contrast(r["muted"], r["background"])),
+        "caption_text": worst(lambda r, lab: contrast(lab["caption"], r["caption_pill"])),
+        "cta_text": worst(lambda r, lab: contrast(lab["cta"], r["cta"])),
+        "text_on_highlight": worst(lambda r, lab: contrast(lab["highlight"], r["highlight"])),
+        "accent_large_text": worst(lambda r, lab: contrast(r["accent"], r["background"])),
+        "accent_vs_brand_cvd": worst(lambda r, lab: cvd_delta(r["accent"], r["brand"])),
+    }
+    c = {k: round(v, 2) for k, v in c.items()}
+    c["one_accent"] = all(_one_accent(r, H, brand_C) for r, _ in pairs)
+    c["pass"] = bool(
+        min(c[k] for k in ("text_on_background", "text_on_surface", "muted_on_background", "caption_text",
+                           "cta_text", "text_on_highlight")) >= MIN_TEXT
+        and c["accent_large_text"] >= LARGE_TEXT and c["accent_vs_brand_cvd"] >= MIN_CVD and c["one_accent"])
+    return c
 
 
 def proposals(h):
@@ -337,13 +409,9 @@ def proposals(h):
     brand = parse_hex(h)
     L, C, H = hex_to_oklch(brand)
     rmp, neu = ramp(brand), neutrals(brand)
-    text_dark = _resolve(ROLE_TABLE["text"][0], {"C": C, "H": H})
 
     def far(c):
-        return cvd_delta(c, brand) >= MIN_CVD
-
-    def readable(c):
-        return contrast(c, cta_label(c, text_dark)) >= MIN_TEXT
+        return cvd_delta(c, brand) >= MIN_CVD and delta_e2000(c, brand) >= ONE_ACCENT_DE
 
     nb = oklch_to_hex(L, max(C, ANALOGOUS_MIN_C), neighbour_hue(H))
     picks = {"monochrome": (rmp[300] if L < 0.66 else rmp[800], brand),
@@ -352,13 +420,14 @@ def proposals(h):
     out = []
     for kind in KINDS:
         acc, cta = picks[kind]
-        acc = _nudge(acc, far) or acc
-        cta = _nudge(cta or acc, readable) or (cta or acc)
-        ctx = {"H": H, "C": C, "ramp": rmp, "neutrals": neu, "accent": acc, "cta": cta, "brand": brand}
+        acc = _nudge_hue(acc, far) or acc
+        ctx = {"H": H, "C": C, "ramp": rmp, "neutrals": neu, "accent": acc, "cta": cta or acc,
+               "cta_is_accent": cta is None, "brand": brand}
+        (light, ll), (dark, dl) = _theme(0, ctx), _theme(1, ctx)
         p = {"kind": kind, "brand": brand, "ramp": {str(k): v for k, v in rmp.items()},
              "neutrals": {str(k): v for k, v in neu.items()}, "accent": acc,
-             "roles": {"dark": _theme_roles(1, ctx), "light": _theme_roles(0, ctx)}}
-        p["checks"] = _check(p, text_dark)
+             "roles": {"dark": dark, "light": light}, "labels": {"dark": dl, "light": ll}}
+        p["checks"] = _check(p, H, C)
         out.append(p)
     return out
 
@@ -371,11 +440,12 @@ def format_proposals(ps):
         c = p["checks"]
         lines.append(f"== {p['kind']}  brand {p['brand']}  accent {p['accent']}  "
                      f"{'PASS' if c['pass'] else 'FAIL'}")
-        lines.append(f"   {'role':<13} {'light':<9} {'dark':<9}")
+        lines.append(f"   {'role':<15} {'light':<9} {'dark':<9}")
         for k in ROLE_KEYS:
-            lines.append(f"   {k:<13} {p['roles']['light'][k]:<9} {p['roles']['dark'][k]:<9}")
-        lines.append(f"   checks: text/background {c['text_on_background']}  text/surface {c['text_on_surface']}  "
-                     f"cta text {c['cta_text']}  accent vs brand (deuteranopia dE) {c['accent_vs_brand_cvd']}")
+            lines.append(f"   {k:<15} {p['roles']['light'][k]:<9} {p['roles']['dark'][k]:<9}")
+        for k in ("caption", "cta", "highlight"):
+            lines.append(f"   {k + ' label':<15} {p['labels']['light'][k]:<9} {p['labels']['dark'][k]:<9}")
+        lines.append("   checks: " + "  ".join(f"{k} {v}" for k, v in c.items() if k != "pass"))
         lines.append("")
     return "\n".join(lines)
 
