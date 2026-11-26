@@ -58,3 +58,36 @@ def test_add_list_round_trip(home):
     r = run_cli("cutlang.py", "lexicon", "list", "--lang", "he")
     assert r.returncode == 0, r.stderr
     assert "qux" in r.stdout and "קוקס" in r.stdout
+
+
+def test_latin_folding():
+    assert cutlang.norm_for_align("Straße", "en") == "strasse"
+    assert cutlang.norm_for_align("København", "en") == "kobenhavn"
+    assert cutlang.norm_for_align("Łódź", "en") == "lodz"
+
+
+def test_hebrew_hundreds_conjunction():
+    h = cutlang.he_number
+    assert h(101) == "מאה ואחת"
+    assert h(120) == "מאה ועשרים"
+    assert h(125) == "מאה עשרים וחמש"
+    assert h(300) == "שלוש מאות"
+    assert h(999) == "תשע מאות תשעים ותשע"
+    assert h(1) == "אחת" and h(11) == "אחת עשרה" and h(21) == "עשרים ואחת"
+
+
+def test_big_numbers_and_non_en_digits():
+    assert cutlang.norm_for_align("1234", "he") == "אחת שתיים שלוש ארבע"
+    assert cutlang.norm_for_align("2026", "en") == "two thousand twenty six"
+    assert cutlang.norm_for_align("42", "fr") == ""
+    assert cutlang.norm_for_align("(AI)", "he") == "איי איי"
+
+
+def test_lexicon_lookup_strips_edge_punctuation(home):
+    cutlang.add_word("en", "foo", "bar")
+    assert cutlang.norm_for_align('"Foo,"', "en") == "bar"
+
+
+def test_cli_rejects_bad_lang(home):
+    r = run_cli("cutlang.py", "lexicon", "list", "--lang", "../x")
+    assert r.returncode == 1

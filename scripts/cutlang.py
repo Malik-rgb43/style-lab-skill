@@ -13,11 +13,12 @@ User lexicon: <store home>/lexicon/<lang>.json = {"word": "spelling"}; keys comp
 Hebrew: niqqud and punctuation dropped, digits spoken as Hebrew words, Latin words spelled through
 the lexicon (a short built-in list of common tech words; brands belong in the user lexicon).
 Latin languages: NFKD, combining marks dropped, lowercase a-z and apostrophe; digits become English
-words for `en`. Other scripts are returned stripped of punctuation only.
+words for `en`. Other scripts (neither Latin nor Hebrew) return ''.
 """
 import argparse
 import json
 import re
+import string
 import sys
 import unicodedata
 from pathlib import Path
@@ -27,7 +28,7 @@ import store  # noqa: E402
 
 NIQQUD = re.compile(r"[֑-ׇ]")
 
-HE_UNITS = ["אפס", "אחד", "שתיים", "שלוש", "ארבע", "חמש", "שש", "שבע", "שמונה", "תשע", "עשר"]
+HE_UNITS = ["אפס", "אחת", "שתיים", "שלוש", "ארבע", "חמש", "שש", "שבע", "שמונה", "תשע", "עשר"]
 HE_TEENS = {11: "אחת עשרה", 12: "שתים עשרה", 13: "שלוש עשרה", 14: "ארבע עשרה", 15: "חמש עשרה",
             16: "שש עשרה", 17: "שבע עשרה", 18: "שמונה עשרה", 19: "תשע עשרה"}
 HE_TENS = {20: "עשרים", 30: "שלושים", 40: "ארבעים", 50: "חמישים", 60: "שישים", 70: "שבעים",
@@ -93,7 +94,11 @@ def he_number(n: int) -> str:
         base = HE_HUNDREDS[h * 100]
     else:
         base = HE_UNITS[h] + " מאות"
-    return base + (" " + _he_below_100(rest) if rest else "")
+    if not rest:
+        return base
+    tail = _he_below_100(rest)
+    # "ו" goes before the last element only: 101 מאה ואחת, 120 מאה ועשרים, 125 מאה עשרים וחמש
+    return base + (" ו" if rest < 20 or rest % 10 == 0 else " ") + tail
 
 
 def _user_path(lang):
@@ -122,6 +127,12 @@ def add_word(lang: str, word: str, spelling: str) -> None:
     store.update_json(_user_path(lang), {}, fn)
 
 
+_FOLD = str.maketrans({"ß": "ss", "ẞ": "ss", "ø": "o", "Ø": "o", "æ": "ae", "Æ": "ae", "œ": "oe",
+                       "Œ": "oe", "ł": "l", "Ł": "l", "đ": "d", "Đ": "d", "þ": "th", "Þ": "th",
+                       "ı": "i"})
+_EDGE = string.whitespace + string.punctuation + "‘’“”…«»"
+
+
 def _strip_marks(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
@@ -147,10 +158,10 @@ def _he(word, vocab):
 
 def _latin(word, lang):
     lex = lexicon(lang)
-    key = word.strip().lower()
+    key = word.strip(_EDGE).lower()
     if key in lex:
         word = lex[key]
-    s = _strip_marks(word).lower().replace("\u2019", "'")
+    s = _strip_marks(word.translate(_FOLD)).lower().replace("\u2019", "'")
     out = []
     for p in re.findall(r"[a-z']+|\d+", s):
         if p.isdigit():
@@ -193,6 +204,9 @@ def _main(argv=None):
     a = lx.add_parser("list")
     a.add_argument("--lang", required=True)
     args = p.parse_args(argv)
+    if not re.fullmatch(r"[A-Za-z-]{2,8}", args.lang):
+        print("error: --lang must match [A-Za-z-]{2,8}", file=sys.stderr)
+        return 1
     if args.action == "add":
         try:
             add_word(args.lang, args.word, args.spelling)
