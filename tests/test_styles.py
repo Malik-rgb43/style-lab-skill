@@ -84,3 +84,10 @@ def test_parallel_adds(home, tmp_path):
         assert p.returncode == 0
     d = json.loads((home / "styles.json").read_text(encoding="utf-8"))
     assert len(d["styles"]) == 6
+
+
+def test_list_has_clients_column(home):
+    seed(home)
+    r = run_cli("styles.py", "list")
+    assert r.returncode == 0
+    assert all(line.split("\t")[4].startswith("clients:") for line in r.stdout.strip().splitlines())

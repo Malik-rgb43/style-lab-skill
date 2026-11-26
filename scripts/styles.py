@@ -109,7 +109,8 @@ def cmd_list(data, args):
         print("no styles yet")
         return 0
     for s in rows:
-        print(f"{s['slug']}\t{s.get('name','')}\t{s.get('status','')}\t{s.get('description','')}")
+        print(f"{s['slug']}\t{s.get('name','')}\t{s.get('status','')}\t{s.get('description','')}"
+              f"	clients:{', '.join(_client_names(s['slug']))}")
     return 0
 
 
