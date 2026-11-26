@@ -70,6 +70,7 @@ Rules for every script that writes here (`store.py` does this for all of them):
 | requires | list, default `[]` | connections the style depends on: `{name, why, level: required\|recommended, fallback}`; `name` is a key of the capability map (a local tool or a session MCP/skill). Managed by `styles.py require <slug> --name --why --level [--fallback]` / `unrequire <slug> --name`; `doctor.py --style <slug>` checks them (exit 4 when a `required` one is missing) |
 | aliases | list | other names that find it; never another style's slug, name or alias |
 | board_url, notes | text | |
+| cover | path relative to the pack, absent until chosen | the frame that represents the style (the Studio library shows it as the card's main visual). `cover.py candidates <pack>` proposes typical frames into `<pack>/cover-candidates/`; only the owner's pick sets it, through `styles.py set-cover <slug> <image>`, which writes `<pack>/cover.jpg` (1080 px long side, JPEG quality 88). `list` (last column) and `show` (`cover_path`) print the full path |
 | created / updated | ISO dates | set by the script |
 
 **Linked clients are not stored here.** Links live on the client side (`client.json` →

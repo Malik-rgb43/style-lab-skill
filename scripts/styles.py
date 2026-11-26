@@ -19,6 +19,9 @@ Commands:
                   (ready needs <pack>/proof.json with recreation.passed and holdout.passed, and no
                    recipe in <pack>/recipes.json whose `how` starts with ai_ and whose test.status is
                    not passed; --force logs ready_forced, --waive-recipes logs recipes_waived)
+    styles.py set-cover <slug> <image>
+                  (the owner's pick from cover.py candidates: writes <pack>/cover.jpg, 1080 px long side,
+                   JPEG q88, and stores `cover` relative to the pack; a style without a pick has no cover)
     styles.py remove <slug>          (removes the registry entry only, never files)
     styles.py check                  (every pack and skill path still exists)
 """
@@ -164,7 +167,7 @@ def cmd_list(data, args):
     else:
         for s in rows:
             print(f"{s['slug']}\t{s.get('name','')}\t{s.get('status','')}\t{s.get('description','')}"
-                  f"\tclients:{', '.join(_client_names(s['slug']))}")
+                  f"\tclients:{', '.join(_client_names(s['slug']))}\tcover:{cover_path(s)}")
     for line in _dangling_lines(data):  # stderr keeps the rows (and --json) clean for parsing
         print(line, file=sys.stderr)
     return 0
@@ -215,7 +218,8 @@ def cmd_show(data, args):
     if not s:
         print(f"no style {args.key!r}", file=sys.stderr)
         return 1
-    print(json.dumps({**s, "clients": clients_for(s["slug"])}, ensure_ascii=False, indent=2))
+    print(json.dumps({**s, "cover_path": cover_path(s), "clients": clients_for(s["slug"])},
+                     ensure_ascii=False, indent=2))
     return 0
 
 
@@ -423,6 +427,69 @@ def cmd_set_status(data, args):
     return None
 
 
+COVER_LONG_SIDE = 1080
+COVER_QUALITY = 88
+
+
+def _write_cover(src, dst):
+    """src image -> dst JPEG, long side COVER_LONG_SIDE, quality COVER_QUALITY. Returns an error text or None."""
+    tmp = dst.with_name(dst.name + ".tmp.jpg")
+    try:
+        try:
+            from PIL import Image
+        except ImportError:
+            Image = None
+        if Image is not None:
+            with Image.open(src) as im:
+                im = im.convert("RGB")
+                k = COVER_LONG_SIDE / max(im.size)
+                im = im.resize((max(1, round(im.width * k)), max(1, round(im.height * k))), Image.LANCZOS)
+                im.save(tmp, "JPEG", quality=COVER_QUALITY)
+        else:
+            import subprocess
+            vf = (f"scale='if(gt(iw,ih),{COVER_LONG_SIDE},-2)':'if(gt(iw,ih),-2,{COVER_LONG_SIDE})'")
+            r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(src), "-vf", vf, "-q:v", "3", str(tmp)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                return "could not convert the image (install Pillow: pip install pillow)"
+        os.replace(tmp, dst)
+    except OSError as e:
+        return f"could not write the cover: {e}"
+    except Exception as e:  # PIL: unreadable or unsupported image
+        return f"could not read the image: {e}"
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return None
+
+
+def cover_path(s):
+    return str(Path(s["pack"]) / s["cover"]) if s.get("cover") and s.get("pack") else ""
+
+
+def cmd_set_cover(data, args):
+    s = find(data, args.slug)
+    if not s:
+        print(f"no style {args.slug!r}", file=sys.stderr)
+        return 1
+    src = Path(args.image)
+    if not src.is_file():
+        print(f"image not found: {src}", file=sys.stderr)
+        return 1
+    pack = Path(s.get("pack") or "")
+    if not str(s.get("pack") or "").strip() or not pack.is_dir():
+        print(f"the pack folder does not exist: {s.get('pack')}", file=sys.stderr)
+        return 1
+    err = _write_cover(src, pack / "cover.jpg")
+    if err:
+        print(err, file=sys.stderr)
+        return 1
+    s["cover"] = "cover.jpg"
+    s["updated"] = today()
+    print(f"{s['slug']}: cover {pack / 'cover.jpg'}")
+    return None
+
+
 def cmd_remove(data, args):
     s = find(data, args.slug)
     if not s:
@@ -483,7 +550,7 @@ def cmd_migrate(args):
 
 
 WRITERS = {"add": cmd_add, "set": cmd_set, "remove": cmd_remove, "require": cmd_require,
-           "unrequire": cmd_unrequire,
+           "unrequire": cmd_unrequire, "set-cover": cmd_set_cover,
            "set-status": cmd_set_status}
 
 
@@ -513,6 +580,8 @@ def _main(argv=None):
     a.add_argument("slug"); a.add_argument("status", choices=STATUSES)
     a.add_argument("--force", action="store_true"); a.add_argument("--waive-recipes", action="store_true")
     a.add_argument("--reason", default="")
+    a = sub.add_parser("set-cover", help="store the owner's chosen cover frame for a style")
+    a.add_argument("slug"); a.add_argument("image")
     a = sub.add_parser("remove"); a.add_argument("slug")
     a = sub.add_parser("require", help="record a connection the style depends on")
     a.add_argument("style"); a.add_argument("--name", required=True); a.add_argument("--why", required=True)
