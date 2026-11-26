@@ -96,3 +96,22 @@ def test_cli_rejects_bad_lang(home):
 def test_fold_latin_public():
     import cutlang
     assert cutlang.fold_latin("Straße Łódź Café").lower() == "strasse lodz cafe"
+
+
+def test_lexicon_is_read_once_until_the_file_changes(home, monkeypatch):
+    cutlang.add_word("he", "Zed", "זד")
+    real, reads = cutlang.store.read_json, []
+
+    def counting(p, default, *a, **k):
+        reads.append(str(p))
+        return real(p, default, *a, **k)
+
+    monkeypatch.setattr(cutlang.store, "read_json", counting)
+    for _ in range(50):
+        assert cutlang.norm_for_align("zed", "he", HE_VOCAB) == "זד"
+    assert len(reads) <= 1
+    cutlang.add_word("he", "Qux", "קוקס")  # the file changes: read again, once
+    reads.clear()
+    for _ in range(20):
+        assert cutlang.norm_for_align("qux", "he", HE_VOCAB) == "קוקס"
+    assert len(reads) == 1

@@ -18,8 +18,9 @@ reinstalling the skill never wipes a style, a client or a setting:
   taste/<client slug>.jsonl     every pick and rejection (`_none.jsonl` for no client)
   skill-feedback.md             problems in the skill's own process, as a checklist
   capabilities.json             the connections check (Stage 0)
-  lexicon/<lang>.json           spelling fixes for the cut pipeline {"heard word": "spelling"},
-                                managed by `cutlang.py lexicon add|list`
+  lexicon/<lang>.json           how a Latin word is spoken, written in the language's letters, for
+                                alignment {"latin word": "spoken form"}; only single Latin words
+                                are looked up; managed by `cutlang.py lexicon add|list`
   brand.md                      optional: the user's own default brand
 ```
 Later versions add `ideas/`, `projects.json` and `studio/` here; nothing in the skill folder

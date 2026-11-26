@@ -1,4 +1,4 @@
-"""Word normalisation for forced alignment and transcript comparison, plus the spelling lexicon.
+"""Word normalisation for forced alignment and transcript comparison, plus the spoken-form lexicon.
 
     cutlang.py lexicon add --lang he --word X --spelling Y
     cutlang.py lexicon list --lang he
@@ -7,12 +7,17 @@ Library:
     norm_for_align(word, lang, vocab=None) -> str   text the aligner model can score ('' if nothing left)
     norm_for_compare(word, lang) -> str             same mapping without a vocabulary (check pass)
     fold_latin(text) -> str                          special Latin letters folded, accents dropped
-    lexicon(lang) -> dict                            built-in merged with the user file (user wins)
+    lexicon(lang) -> dict                            built-in merged with the user file (user wins;
+                                                     cached per process, reread when the file changes)
     add_word(lang, word, spelling)
 
-User lexicon: <store home>/lexicon/<lang>.json = {"word": "spelling"}; keys compared lowercase.
-Hebrew: niqqud and punctuation dropped, digits spoken as Hebrew words, Latin words spelled through
-the lexicon (a short built-in list of common tech words; brands belong in the user lexicon).
+User lexicon: <store home>/lexicon/<lang>.json = {"latin word": "how it is spoken"}: how a Latin
+word is spoken, written in the language's letters, for alignment. Keys are single Latin words,
+compared lowercase; only Latin words in the transcript are looked up, so an entry whose key is
+written in the language's own letters, or holds several words, has no effect.
+Hebrew: niqqud and punctuation dropped, digits spoken as Hebrew words, Latin words replaced by
+their spoken form from the lexicon (a short built-in list of common tech words; brands belong in
+the user lexicon).
 Latin languages: NFKD, combining marks dropped, lowercase a-z and apostrophe; digits become English
 words for `en`. Other scripts (neither Latin nor Hebrew) return ''.
 """
@@ -106,15 +111,35 @@ def _user_path(lang):
     return store.path("lexicon", f"{lang}.json")
 
 
+_LEX_CACHE = {}  # lang -> (user file path, its (mtime_ns, size) or None, merged dict)
+
+
+def _stamp(p):
+    try:
+        st = p.stat()
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
 def lexicon(lang: str) -> dict:
-    """Built-in entries merged with the user's file; keys lowercase, user wins."""
+    """Built-in entries merged with the user's file; keys lowercase, user wins.
+
+    Cached per process, keyed by the user file's path and modification time, so the file is read
+    once per run and again only after it changes."""
+    p = _user_path(lang)
+    stamp = _stamp(p)
+    hit = _LEX_CACHE.get(lang)
+    if hit and hit[0] == str(p) and hit[1] == stamp:
+        return dict(hit[2])
     out = dict(BUILTIN.get(lang, {}))
-    user = store.read_json(_user_path(lang), {})
+    user = store.read_json(p, {}) if stamp is not None else {}
     if isinstance(user, dict):
         for k, v in user.items():
             if isinstance(k, str) and isinstance(v, str):
                 out[k.lower()] = v
-    return out
+    _LEX_CACHE[lang] = (str(p), stamp, out)
+    return dict(out)
 
 
 def add_word(lang: str, word: str, spelling: str) -> None:
@@ -205,8 +230,9 @@ def _main(argv=None):
     lx = sub.add_parser("lexicon").add_subparsers(dest="action", required=True)
     a = lx.add_parser("add")
     a.add_argument("--lang", required=True)
-    a.add_argument("--word", required=True)
-    a.add_argument("--spelling", required=True)
+    a.add_argument("--word", required=True, help="a single Latin word as the transcript writes it")
+    a.add_argument("--spelling", required=True,
+                   help="how the word is spoken, written in the language's letters, for alignment")
     a = lx.add_parser("list")
     a.add_argument("--lang", required=True)
     args = p.parse_args(argv)
