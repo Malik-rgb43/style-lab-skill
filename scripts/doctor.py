@@ -27,7 +27,6 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import align  # noqa: E402,F401  (cache helpers only; no torch import)
 import store  # noqa: E402
 
 STAGES = {
@@ -204,6 +203,12 @@ def check_module(name, deep=False):
 
 def check_model(name):
     kind, model_id = MODELS[name]
+    try:
+        import align  # imported here: it needs numpy, and a missing numpy must not crash the check
+    except ImportError as e:
+        mod = getattr(e, "name", None) or "numpy"
+        return {"ok": False, "version": "", "note": f"cannot check the cache: missing module {mod}",
+                "hint": HINTS.get(mod, f"pip install {mod}")}
     found = align.mms_cached() if kind == "mms" else align.hf_model_cached(model_id)
     return {"ok": found, "version": "", "note": "" if found else "not in the local cache",
             "hint": "" if found else HINTS[name]}

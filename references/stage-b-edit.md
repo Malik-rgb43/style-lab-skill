@@ -50,16 +50,18 @@ the script exits 3 naming the model, its size and `--allow-download`.
    the source; the output is balanced). For `vsl` the CLI ends with `next: tighten.py <stem>
    --out <stem>.tight, then check_cut.py <stem>.tight`.
 6. **VSL / talking head only**: `python scripts/tighten.py <stem> --out <out_stem>
-   [--min-pause-ms 250] [--no-placeholders] [--gap-ms 0] [--voice-db 8] [--soft-db 4]
+   [--min-pause-ms 250] [--no-placeholders] [--gap-ms 0] [--soft-db 4]
    [--check-db 0.05]` joins without dead air. Flags: `--min-pause-ms` closes every pause at least
    this long; `--no-placeholders` drops placeholders and closes their joins; `--gap-ms` room tone
-   left between a voice end and the next start; `--voice-db` sound = room tone + this; `--soft-db`
-   an edge = 3 slices below room tone + this; `--check-db` edge check tolerance. Outputs
+   left between a voice end and the next start; `--soft-db`
+   sound and edges = room tone + this (3 slices in a row); `--check-db` edge check tolerance. Outputs
    `<out_stem>.mp4/.cuts.json/.words.json`; cuts.json carries `edge_check`, `missing_check`,
-   `edge_bad`, and the informational `voice_not_died_away` and `sound_in_pause` (joins kept as the
+   `added_check`, `edge_bad`, and the informational `voice_not_died_away` and `sound_in_pause` (joins kept as the
    cut made them). Exit 1 = an edge off by more than `--check-db` (default 0.05 dB) or sound
    missing from the output (any `edge_bad` item; the files are still written, fix the cut, do not
-   ship it); exit 3 = ffmpeg missing.
+   ship it); exit 3 = ffmpeg missing. The audit also has an "added" check: exit 1 if any output
+   audio was read from outside the kept pieces. `sound_in_pause` lists joins held because soft
+   sound was found in the pause; raising `--soft-db` lets a noisy room close more joins.
 7. **Check**: `python scripts/check_cut.py <final stem> [--lang] [--model] [--heard] [--explain]
    [--max-gap-ms 450] [--max-word-ms 1200] [--join-db 12] [--max-balance-db 1.0]
    [--allow-download]`, where the final stem is the tighten output for vsl and the cut stem

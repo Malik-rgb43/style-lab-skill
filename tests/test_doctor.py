@@ -60,7 +60,7 @@ def fake_models(tmp_path, monkeypatch, which=("model_wav2vec2_he", "model_whispe
         else:
             d = th / "hub" / "checkpoints"
             d.mkdir(parents=True, exist_ok=True)
-            (d / doctor.align.os.path.basename(doctor.align.MMS_URL)).write_text("x")
+            (d / __import__("os").path.basename(__import__("align").MMS_URL)).write_text("x")
 
 
 def caps():
@@ -227,3 +227,19 @@ def test_style_recommended_missing_exit_0_with_note(home, everything, tmp_path, 
 def test_style_unknown(home, everything, tmp_path, monkeypatch):
     fake_models(tmp_path, monkeypatch)
     assert doctor.main(["--style", "nope"]) == 1
+
+
+def test_check_model_missing_numpy_reported_not_crash(home, monkeypatch):
+    import builtins
+    import sys as _sys
+    monkeypatch.delitem(_sys.modules, "align", raising=False)
+    real = builtins.__import__
+
+    def fake(name, *a, **k):
+        if name == "align":
+            raise ImportError("No module named 'numpy'", name="numpy")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", fake)
+    r = doctor.check_model("model_whisper_he")
+    assert r["ok"] is False and "numpy" in r["note"] and "pip install numpy" in r["hint"]
