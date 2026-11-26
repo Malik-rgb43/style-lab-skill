@@ -247,8 +247,11 @@ def reg(home):
     return json.loads((home / "styles.json").read_text(encoding="utf-8"))["styles"][0]
 
 
-def passed_proof(pack):
-    wj(pack / "proof.json", {"holdout": {"ids": ["c"], "scores": {}, "passed": True},
+def passed_proof(pack, trained=("a", "b")):
+    from styles import trained_hash
+    wj(pack / "fingerprint.json", fp(trained=trained))
+    wj(pack / "proof.json", {"holdout": {"ids": ["c"], "scores": {}, "passed": True,
+                                         "trained_hash": trained_hash(trained)},
                              "recreation": {"moments": [], "passed": True}})
 
 
@@ -310,3 +313,92 @@ def test_ready_gate_corrupt_files_fail_closed(home, tmp_path):
     passed_proof(pack)
     (pack / "recipes.json").write_text("{not json", encoding="utf-8")
     assert run_cli("styles.py", "set-status", "x1", "ready").returncode == 1
+
+
+# ---- fix round 1
+
+def test_holdout_timing_not_run_without_laws(tmp_path):
+    pack = make_pack(tmp_path)
+    run_cli("prove.py", "holdout-pick", pack, "--ids", "c")
+    pred = tmp_path / "pred"
+    wj(pred / "c.events.json", [{"t": 1.0, "type": "cut"}, {"t": 3.0, "type": "cut"}])
+    r = run_cli("prove.py", "holdout", pack, "--predicted", pred)
+    assert r.returncode == 1
+    assert "timing not checked: no laws with lag.p90; run laws.py first" in r.stdout
+    h = json.loads((pack / "proof.json").read_text(encoding="utf-8"))["holdout"]
+    assert h["passed"] is False and h["scores"]["timing"] == "not_run"
+
+
+def test_ready_blocked_by_stale_proof(home, tmp_path):
+    pack = add_style(tmp_path)
+    passed_proof(pack)
+    assert run_cli("styles.py", "set-status", "x1", "ready").returncode == 0
+    run_cli("styles.py", "set-status", "x1", "training")
+    wj(pack / "fingerprint.json", fp(trained=("a", "b", "z")))  # fingerprint retrained
+    r = run_cli("styles.py", "set-status", "x1", "ready")
+    assert r.returncode == 1 and "proof is stale: re-run prove.py holdout" in r.stderr
+    wj(pack / "fingerprint.json", fp(trained=("a", "c")))  # hold-out id now in training
+    r = run_cli("styles.py", "set-status", "x1", "ready")
+    assert r.returncode == 1 and "overlaps training" in r.stderr and "c" in r.stderr
+
+
+def test_holdout_pick_needs_fingerprint(tmp_path):
+    pack = tmp_path / "pack"
+    wj(pack / "analysis" / "c" / "events.json", [])
+    r = run_cli("prove.py", "holdout-pick", pack, "--ids", "c")
+    assert r.returncode == 2 and "no fingerprint.json; run fingerprint.py first" in r.stderr
+    assert not (pack / "proof.json").exists()
+    assert run_cli("prove.py", "holdout-pick", pack, "--ids", "c", "--allow-no-fingerprint").returncode == 0
+    h = json.loads((pack / "proof.json").read_text(encoding="utf-8"))["holdout"]
+    assert h["trained_unknown"] is True
+
+
+def test_gate_refuses_trained_unknown(home, tmp_path):
+    pack = add_style(tmp_path)
+    passed_proof(pack)
+    proof = json.loads((pack / "proof.json").read_text(encoding="utf-8"))
+    proof["holdout"]["trained_unknown"] = True
+    wj(pack / "proof.json", proof)
+    r = run_cli("styles.py", "set-status", "x1", "ready")
+    assert r.returncode == 1 and "without a fingerprint" in r.stderr
+
+
+def test_gate_empty_pack_and_clears_overrides(home, tmp_path):
+    pack = add_style(tmp_path)
+    run_cli("styles.py", "set-status", "x1", "ready", "--force", "--reason", "x")
+    assert "ready_forced" in reg(home)
+    run_cli("styles.py", "set-status", "x1", "training")
+    passed_proof(pack)
+    assert run_cli("styles.py", "set-status", "x1", "ready").returncode == 0
+    e = reg(home)
+    assert "ready_forced" not in e and "recipes_waived" not in e
+    run_cli("styles.py", "set-status", "x1", "training")
+    assert run_cli("styles.py", "set", "x1", "pack=").returncode == 0
+    r = run_cli("styles.py", "set-status", "x1", "ready")
+    assert r.returncode == 1 and "no pack folder" in r.stderr
+
+
+def test_non_dict_json_is_bad_input(tmp_path):
+    pack = recreation_pack(tmp_path)
+    build = tmp_path / "b.json"
+    wj(build, [1, 2])
+    r = run_cli("prove.py", "qa", pack, "--build", build)
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+    wj(pack / "proof.json", [])
+    run_cli("prove.py", "holdout-pick", pack, "--ids", "x", "--allow-no-fingerprint")
+    wj(pack / "proof.json", ["x"])
+    r = run_cli("prove.py", "holdout", pack, "--predicted", tmp_path)
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+
+
+def test_graph_pairs_by_prop_and_time(tmp_path):
+    a = tmp_path / "a.json"
+    b = tmp_path / "b.json"
+    wj(a, {"camera_moves": [mv(t0=1.0, prop="camera")], "elements": [{"name": "t", "moves": [mv(t0=2.0, prop="t")]}]})
+    wj(b, {"camera_moves": [], "elements": [{"name": "t", "moves": [mv(t0=2.1, bez=LINEAR, prop="t")]}]})
+    out = tmp_path / "o.html"
+    r = run_cli("prove.py", "graph", a, "--compare", b, "--out", out)
+    assert r.returncode == 0 and "warning" in r.stderr
+    html = out.read_text(encoding="utf-8")
+    # camera has no partner: 1 polyline x2 svgs; t has ref+build: 2 x2
+    assert html.count("<polyline") == 2 + 4

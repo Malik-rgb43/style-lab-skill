@@ -31,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import store  # noqa: E402
+from styles import trained_hash  # noqa: E402
 
 HOLDOUT_MIN_F1 = 0.6
 RECREATION_MAX_RMSE = 0.05
@@ -270,6 +271,23 @@ polyline.ref{stroke:var(--ref)}polyline.build{stroke:var(--build);stroke-dasharr
 """
 
 
+def pair_moves(moves, other):
+    """Align `other` to `moves`: each move gets the nearest-t0 unused move with the same prop, or None."""
+    used, out = set(), []
+    for m in moves:
+        best, bj = None, None
+        for j, o in enumerate(other):
+            if j in used or o.get("prop") != m.get("prop"):
+                continue
+            d = abs((o.get("t0") or 0.0) - (m.get("t0") or 0.0))
+            if best is None or d < best:
+                best, bj = d, j
+        if bj is not None:
+            used.add(bj)
+        out.append(other[bj] if bj is not None else None)
+    return out
+
+
 def graph_html(moves, compare=None):
     """Self-contained HTML: per move, a value-graph <svg> and a speed-graph <svg> with the reference
     (solid) and the build from `compare` (dashed) overlaid. No network, light/dark, RTL-safe."""
@@ -311,6 +329,13 @@ def _read(path, what):
         raise Bad(f"{what} unreadable ({path}): {e}")
 
 
+def _read_dict(path, what):
+    d = _read(path, what)
+    if not isinstance(d, dict):
+        raise Bad(f"{what} must be a JSON object: {path}")
+    return d
+
+
 def _events(data):
     if isinstance(data, dict):
         data = data.get("events", [])
@@ -321,8 +346,7 @@ def _fp(pack):
     p = Path(pack) / "fingerprint.json"
     if not p.exists():
         return {}
-    fp = _read(p, "fingerprint.json")
-    return fp if isinstance(fp, dict) else {}
+    return _read_dict(p, "fingerprint.json")
 
 
 def _proof_path(pack):
@@ -347,6 +371,9 @@ def _refuse_overlap(ids, fp):
 def cmd_holdout_pick(a):
     _check_pack(a.pack)
     fp = _fp(a.pack)
+    no_fp = not (Path(a.pack) / "fingerprint.json").exists()
+    if no_fp and not a.allow_no_fingerprint:
+        raise Bad("no fingerprint.json; run fingerprint.py first, or pass --allow-no-fingerprint")
     if a.ids:
         ids = [x.strip() for x in a.ids.split(",") if x.strip()]
         _refuse_overlap(ids, fp)
@@ -363,6 +390,8 @@ def cmd_holdout_pick(a):
 
     def fn(d):
         d["holdout"] = {"ids": ids, "scores": {}, "passed": False}  # a new pick invalidates old scores
+        if no_fp:
+            d["holdout"]["trained_unknown"] = True
     _update_proof(a.pack, fn)
     print(json.dumps({"holdout_ids": ids}, ensure_ascii=False))
     return 0
@@ -377,12 +406,12 @@ def _timing_threshold(pack):
                 if isinstance(x, dict) and isinstance(x.get("lag"), dict) and _num(x["lag"].get("p90"))]
         if vals:
             return statistics.median(vals), "laws"
-    return DEFAULT_TOL_S, "default"
+    return None, "not_run"
 
 
 def cmd_holdout(a):
     _check_pack(a.pack)
-    proof = _read(_proof_path(a.pack), "proof.json") if _proof_path(a.pack).exists() else {}
+    proof = _read_dict(_proof_path(a.pack), "proof.json") if _proof_path(a.pack).exists() else {}
     fp = _fp(a.pack)
     ids = (proof.get("holdout") or {}).get("ids") or fp.get("held_out") or []
     if not ids:
@@ -401,13 +430,22 @@ def cmd_holdout(a):
     pooled = pool_scores(list(scores.values()))
     thr, src = _timing_threshold(a.pack)
     mae = pooled["timing_mae_s"]
-    passed = pooled["overall_f1"] >= HOLDOUT_MIN_F1 and mae is not None and mae <= thr
-    result = {"overall_f1": pooled["overall_f1"], "timing_mae_s": mae, "timing_threshold_s": thr,
+    timing_run = thr is not None
+    passed = (timing_run and pooled["overall_f1"] >= HOLDOUT_MIN_F1 and mae is not None and mae <= thr)
+    result = {"overall_f1": pooled["overall_f1"], "timing_mae_s": mae,
+              "timing": "checked" if timing_run else "not_run", "timing_threshold_s": thr,
               "timing_threshold_source": src, "per_video": scores}
+    unknown = bool((proof.get("holdout") or {}).get("trained_unknown"))
 
     def fn(d):
-        d["holdout"] = {"ids": list(ids), "scores": result, "passed": bool(passed)}
+        d["holdout"] = {"ids": list(ids), "scores": result, "passed": bool(passed),
+                        "trained_hash": trained_hash(fp.get("trained_on") or [])}
+        if unknown:
+            d["holdout"]["trained_unknown"] = True
     _update_proof(a.pack, fn)
+    if not timing_run:
+        print("timing not checked: no laws with lag.p90; run laws.py first")
+        return 1
     shown = "none" if mae is None else f"{mae:.3f} s"
     print(f"hold-out {'PASSED' if passed else 'FAILED'}: overall_f1 {pooled['overall_f1']:.2f} "
           f"(need {HOLDOUT_MIN_F1}), timing MAE {shown} (max {thr:.3f} s, {src})")
@@ -417,10 +455,10 @@ def cmd_holdout(a):
 def _load_motion(build):
     p = Path(build)
     if p.suffix.lower() == ".json":
-        return _read(p, "build motion")
+        return _read_dict(p, "build motion")
     for cand in (p.with_suffix(".motion.json"), p.parent / "motion.json"):
         if cand.exists():
-            return _read(cand, "build motion")
+            return _read_dict(cand, "build motion")
     raise Bad(f"no motion data for {p}: run track_motion.py on it and pass the resulting motion.json "
               f"as --build", rc=3)
 
@@ -460,7 +498,7 @@ def cmd_recreation(a):
         raise Bad("--moment must look like <id>:<t0>-<t1> (seconds)")
     if not vid or t1 <= t0:
         raise Bad("--moment needs an id and t1 > t0")
-    ref = _read(Path(a.pack) / "analysis" / vid / "motion.json", "reference motion.json")
+    ref = _read_dict(Path(a.pack) / "analysis" / vid / "motion.json", "reference motion.json")
     build = _load_motion(a.build)
     fp = _fp(a.pack)
     scores = recreation_scores(_in_window(all_moves(ref), t0, t1), _in_window(all_moves(build), t0, t1),
@@ -494,8 +532,14 @@ def cmd_qa(a):
 
 
 def cmd_graph(a):
-    moves = all_moves(_read(a.motion, "motion.json"))
-    cmp_moves = all_moves(_read(a.compare, "compare motion.json")) if a.compare else None
+    moves = all_moves(_read_dict(a.motion, "motion.json"))
+    cmp_moves = None
+    if a.compare:
+        raw = all_moves(_read_dict(a.compare, "compare motion.json"))
+        if len(raw) != len(moves):
+            print(f"warning: reference has {len(moves)} moves, build {len(raw)}; paired by prop and time",
+                  file=sys.stderr)
+        cmp_moves = pair_moves(moves, raw)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".tmp")
@@ -515,6 +559,7 @@ def _main(argv=None):
     a = sub.add_parser("holdout-pick")
     a.add_argument("pack"); a.add_argument("--n", type=int, default=3)
     a.add_argument("--seed", type=int, default=7); a.add_argument("--ids")
+    a.add_argument("--allow-no-fingerprint", action="store_true")
     a = sub.add_parser("holdout")
     a.add_argument("pack"); a.add_argument("--predicted", required=True)
     a = sub.add_parser("recreation")

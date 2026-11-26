@@ -24,6 +24,7 @@ Commands:
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -270,6 +271,8 @@ def cmd_set(data, args):
             rc, _ = ready_gate(s)  # no override through `set`: use set-status --force
             if rc is not None:
                 return rc
+            s.pop("ready_forced", None)
+            s.pop("recipes_waived", None)
         if k in ("fonts", "colors") and v not in ("brand", "reference"):
             print(f"{k} must be brand or reference", file=sys.stderr)
             return 1
@@ -323,8 +326,15 @@ def _read_pack_json(pack, name):
         return None, f"{name} unreadable: {e}"
 
 
+def trained_hash(trained_on):
+    """sha256 of the sorted training ids; stored in proof.holdout so a changed fingerprint stales the proof."""
+    return hashlib.sha256("\n".join(sorted(str(x) for x in trained_on or [])).encode("utf-8")).hexdigest()
+
+
 def proof_problems(pack):
     """What is missing for `ready`: a list of short strings (empty = the proof passed)."""
+    if not str(pack or "").strip():
+        return ["the style has no pack folder"]
     proof, err = _read_pack_json(pack, "proof.json")
     if err:
         return [err]
@@ -335,6 +345,20 @@ def proof_problems(pack):
         part = proof.get(key)
         if not (isinstance(part, dict) and part.get("passed") is True):
             out.append(f"{key} test not passed")
+    hold = proof.get("holdout")
+    if isinstance(hold, dict) and hold.get("passed") is True:
+        fp, ferr = _read_pack_json(pack, "fingerprint.json")
+        trained = fp.get("trained_on") if isinstance(fp, dict) else None
+        if ferr:
+            out.append(ferr)
+        elif hold.get("trained_unknown"):
+            out.append("hold-out was picked without a fingerprint (training ids unknown)")
+        else:
+            ov = sorted(set(hold.get("ids") or []) & set(trained or []))
+            if ov:
+                out.append("hold-out overlaps training: " + ", ".join(ov))
+            elif hold.get("trained_hash") != trained_hash(trained or []):
+                out.append("proof is stale: re-run prove.py holdout")
     return out
 
 
@@ -368,7 +392,7 @@ def ready_gate(s, force=False, waive=False, reason=""):
                   f"Pass the tests, or --force --reason \"<text>\".", file=sys.stderr)
             return 1, {}
         log["ready_forced"] = {"reason": reason, "date": today(), "missing": problems}
-    bad, err = untested_ai_recipes(s.get("pack", ""))
+    bad, err = untested_ai_recipes(s.get("pack", "")) if str(s.get("pack") or "").strip() else ([], None)
     if err:
         bad = [err]
     if bad:
@@ -390,10 +414,12 @@ def cmd_set_status(data, args):
         rc, log = ready_gate(s, args.force, args.waive_recipes, args.reason)
         if rc is not None:
             return rc
+        s.pop("ready_forced", None)  # a clean ready clears old overrides
+        s.pop("recipes_waived", None)
         s.update(log)
     s["status"] = args.status
     s["updated"] = today()
-    print(f"{s['slug']}: status {args.status}" + (" (forced)" if "ready_forced" in s and args.status == "ready" and args.force else ""))
+    print(f"{s['slug']}: status {args.status}" + (" (forced)" if "ready_forced" in s else ""))
     return None
 
 
