@@ -479,3 +479,17 @@ def test_ease_names_match_gsap():
     assert abs(_ease("power3.inout", 0.25) - 8 * 0.25 ** 4) < 1e-9
     assert abs(_ease("power3.inout", 0.75) - (1 - 8 * 0.25 ** 4)) < 1e-9
     assert _ease("back.out", 1.0) == 1.0 and _ease("back.out", 0.7) > 1.0
+
+
+def test_face_route_prefers_yunet(monkeypatch):
+    fake = lambda g: [(1.0, 2.0, 3.0, 4.0)]  # noqa: E731
+    monkeypatch.setattr(mv, "_yunet", lambda: fake)
+    det = mv._face_detector()
+    assert det.route == "yunet"
+    monkeypatch.setattr(mv, "_yunet", lambda: None)
+    det = mv._face_detector()
+    assert det is None or det.route in ("haar", "mediapipe")
+
+
+def test_yunet_absent_without_model(home):
+    assert mv._yunet_path() is None and mv._yunet() is None

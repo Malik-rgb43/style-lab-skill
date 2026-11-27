@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import store  # noqa: E402
 
 STAGES = {
-    "train": ["ffmpeg", "ffprobe", "numpy", "cv2", "faster_whisper"],
+    "train": ["ffmpeg", "ffprobe", "numpy"],
     "train_profile": ["yt-dlp"],
     "cut": ["ffmpeg", "torch", "torchaudio", "transformers", "faster_whisper",
             "model_wav2vec2_he", "model_whisper_he"],
@@ -43,9 +43,16 @@ STAGES = {
     "publish": ["gh"],
 }
 PAID_STAGES = {"cloud_asr"}
+# Entries a stage works without: "recommended" (results are thinner without it) and "optional"
+# (one measurement is skipped and reported as not_run). Neither counts as missing.
+STAGE_EXTRAS = {
+    "train": {"recommended": ["cv2"],
+              "optional": ["librosa", "fontTools", "PIL", "ocr", "faster_whisper", "model_yunet"]},
+}
+YUNET_FILE = "face_detection_yunet_2023mar.onnx"
 
 BINARIES = ["ffmpeg", "ffprobe", "node", "blender", "yt-dlp", "gh"]
-MODULES = ["numpy", "cv2", "torch", "torchaudio", "transformers", "faster_whisper", "PIL"]
+MODULES = ["numpy", "cv2", "torch", "torchaudio", "transformers", "faster_whisper", "PIL", "librosa", "fontTools"]
 # Precise cut models: presence in the cache only (same rule as align.py); a model is never loaded here.
 MODELS = {
     "model_wav2vec2_he": ("hf", "imvladikon/wav2vec2-large-xlsr-53-hebrew"),
@@ -70,6 +77,11 @@ HINTS = {
     "faster_whisper": "pip install faster-whisper",
     "transformers": "pip install transformers (about 10 MB; the Hebrew aligner loads through it)",
     "PIL": "pip install pillow",
+    "librosa": "pip install librosa (optional: a second onset envelope for the tempo; numpy is used without it)",
+    "fontTools": "pip install fonttools (optional: font matching and glyph coverage checks)",
+    "ocr": "pip install rapidocr-onnxruntime, or install tesseract (optional: reads on-screen text; boxes are found without it)",
+    "model_yunet": "YuNet face model, about 230 KB from the OpenCV model zoo: python scripts/fetch_model.py yunet "
+                   "after the user says yes (faces fall back to Haar without it)",
     "model_wav2vec2_he": "Hebrew aligner, about 1.3 GB: run align.py with --allow-download after the user says yes",
     "model_whisper_he": "Hebrew check ASR, about 1.6 GB: run check_cut.py with --allow-download after the user says yes",
     "model_mms_fa": "aligner for other languages (torchaudio MMS_FA), about 1.2 GB: run align.py --lang en with --allow-download after the user says yes",
@@ -214,6 +226,25 @@ def check_model(name):
             "hint": "" if found else HINTS[name]}
 
 
+def check_ocr():
+    try:
+        rapid = importlib.util.find_spec("rapidocr_onnxruntime") is not None
+    except (ImportError, ValueError):
+        rapid = False
+    tess = shutil.which("tesseract")
+    if rapid or tess:
+        return {"ok": True, "version": "rapidocr" if rapid else "tesseract", "path": "" if rapid else str(tess),
+                "hint": ""}
+    return {"ok": False, "version": "", "note": "no OCR engine", "hint": HINTS["ocr"]}
+
+
+def check_yunet():
+    f = store.path("models", YUNET_FILE)
+    ok = f.is_file() and f.stat().st_size > 0
+    return {"ok": ok, "version": "", "path": str(f) if ok else "", "note": "" if ok else "not downloaded",
+            "hint": "" if ok else HINTS["model_yunet"]}
+
+
 def check_env(name):
     ok = bool(os.environ.get(name))  # presence only, the value is never stored
     return {"ok": ok, "version": "", "hint": "" if ok else HINTS[name]}
@@ -228,24 +259,30 @@ def collect_local(deep=False):
         tasks[n] = (check_env, n)
     for n in MODELS:
         tasks[n] = (check_model, n)
+    tasks["ocr"] = (check_ocr,)
+    tasks["model_yunet"] = (check_yunet,)
     with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
         futs = {k: ex.submit(*v) for k, v in tasks.items()}
         res = {k: f.result() for k, f in futs.items()}
     local = {"python": {"ok": True, "version": sys.version.split()[0], "path": sys.executable, "hint": ""}}
-    for n in BINARIES + ["hyperframes"] + MODULES + ENV_KEYS + list(MODELS):
+    for n in BINARIES + ["hyperframes"] + MODULES + ENV_KEYS + list(MODELS) + ["ocr", "model_yunet"]:
         local[n] = res[n]
     return local
 
 
 def build_stages(local):
-    return {
-        stage: {
-            "uses": list(names),
-            "missing": [n for n in names if not local.get(n, {}).get("ok")],
-            "paid": list(names) if stage in PAID_STAGES else [],
-        }
-        for stage, names in STAGES.items()
-    }
+    def gone(names):
+        return [n for n in names if not local.get(n, {}).get("ok")]
+    out = {}
+    for stage, names in STAGES.items():
+        ex = STAGE_EXTRAS.get(stage, {})
+        rec, opt = ex.get("recommended", []), ex.get("optional", [])
+        out[stage] = {"uses": list(names), "missing": gone(names),
+                      "paid": list(names) if stage in PAID_STAGES else []}
+        if rec or opt:
+            out[stage].update({"recommended": list(rec), "recommended_missing": gone(rec),
+                               "optional": list(opt), "optional_missing": gone(opt)})
+    return out
 
 
 def run_checks(deep=False):
@@ -268,13 +305,15 @@ def print_table(data):
     for stage, s in data["stages"].items():
         paid = "  (בתשלום)" if s["paid"] else ""
         print(f"[{stage}]{paid}")
-        for n in s["uses"]:
+        rows = [(n, "") for n in s["uses"]] + [(n, "מומלץ") for n in s.get("recommended", [])] +             [(n, "רשות") for n in s.get("optional", [])]
+        for n, level in rows:
+            tag = f" [{level}]" if level else ""
             if local.get(n, {}).get("ok"):
                 v = local[n].get("version", "")
-                print(f"  ✓ {n}" + (f"  {v}" if v else ""))
+                print(f"  ✓ {n}{tag}" + (f"  {v}" if v else ""))
             else:
                 note = local.get(n, {}).get("note")
-                print(f"  חסר {n}" + (f" ({note})" if note else "") + f"  ->  {local.get(n, {}).get('hint', '')}")
+                print(f"  חסר {n}{tag}" + (f" ({note})" if note else "") + f"  ->  {local.get(n, {}).get('hint', '')}")
     if data.get("session"):
         print("[session]")
         for n, s in data["session"].items():

@@ -243,3 +243,38 @@ def test_check_model_missing_numpy_reported_not_crash(home, monkeypatch):
     monkeypatch.setattr(builtins, "__import__", fake)
     r = doctor.check_model("model_whisper_he")
     assert r["ok"] is False and "numpy" in r["note"] and "pip install numpy" in r["hint"]
+
+
+def test_train_stage_reports_optional(home, everything, monkeypatch, capsys):
+    """cv2, librosa and fontTools missing: train shows them as recommended/optional with hints and
+    does not fail (only ffmpeg, ffprobe and numpy are required)."""
+    gone = {"cv2", "librosa", "fontTools"}
+    monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda n: None if n in gone else object())
+    assert doctor.main([]) == 0
+    c = caps()
+    t = c["stages"]["train"]
+    assert t["missing"] == []
+    assert t["recommended_missing"] == ["cv2"]
+    assert {"librosa", "fontTools"} <= set(t["optional_missing"])
+    for n in ("cv2", "librosa", "fontTools"):
+        assert c["local"][n]["hint"]
+    out = capsys.readouterr().out
+    assert "cv2" in out and "librosa" in out
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "ffmpeg" else f"/bin/{n}")
+    doctor.main([])
+    assert caps()["stages"]["train"]["missing"] == ["ffmpeg"]
+
+
+def test_ocr_and_yunet_checks(home, everything, monkeypatch):
+    monkeypatch.setattr(doctor.importlib.util, "find_spec",
+                        lambda n: None if n == "rapidocr_onnxruntime" else object())
+    monkeypatch.setattr(doctor.shutil, "which", lambda n: None if n == "tesseract" else f"/bin/{n}")
+    doctor.main([])
+    c = caps()
+    assert c["local"]["ocr"]["ok"] is False and c["local"]["ocr"]["hint"]
+    assert c["local"]["model_yunet"]["ok"] is False and "fetch_model.py" in c["local"]["model_yunet"]["hint"]
+    p = store.path("models", doctor.YUNET_FILE)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x" * 10)
+    doctor.main([])
+    assert caps()["local"]["model_yunet"]["ok"] is True

@@ -25,7 +25,7 @@ What is measured (all local, free):
     Measured only where something moves, so a static clip does not read as "all repeats".
   - shots: the spans between cuts, each with an OKLab palette (palette.py converters), the share of
     sampled frames with a face and the face headroom (fraction of the frame above the face box).
-  - faces: OpenCV Haar frontal cascade (needs cv2). Text: morphological-gradient text boxes (needs
+  - faces: YuNet when its model is in the store (fetch_model.py yunet), else the OpenCV Haar frontal cascade (needs cv2). Text: morphological-gradient text boxes (needs
     cv2); OCR only when rapidocr_onnxruntime imports, else tesseract on PATH, else "not_run".
     A measurement that cannot run is listed in "not_run", never a crash.
   - loudness: ffmpeg ebur128 (integrated LUFS, true peak dBTP).
@@ -616,23 +616,65 @@ def _mediapipe_detector():
     return detect
 
 
+YUNET_SCORE = 0.6  # YuNet face score threshold
+
+
+def _yunet_path():
+    """The YuNet model in the store (fetch_model.py yunet), or None. Never downloads."""
+    try:
+        import fetch_model
+    except ImportError:
+        return None
+    return str(fetch_model.target("yunet")) if fetch_model.target("yunet").is_file() else None
+
+
+def _yunet():
+    """cv2.FaceDetectorYN on the store's YuNet model, or None (no cv2, no FaceDetectorYN, no model file)."""
+    cv2 = _cv2()
+    path = _yunet_path()
+    if cv2 is None or path is None or not hasattr(cv2, "FaceDetectorYN"):
+        return None
+    try:
+        det = cv2.FaceDetectorYN.create(path, "", (320, 320), YUNET_SCORE, 0.3, 50)
+    except Exception:
+        return None
+    size = [None]
+
+    def detect(gray):
+        h, w = gray.shape
+        if size[0] != (w, h):
+            det.setInputSize((w, h))
+            size[0] = (w, h)
+        _, faces = det.detect(np.ascontiguousarray(np.repeat(gray[:, :, None], 3, axis=2)))
+        return [] if faces is None else [tuple(float(v) for v in f[:4]) for f in faces]
+    return detect
+
+
 def _face_detector():
-    """A callable gray frame -> [(x, y, w, h) pixels]: Haar if its cascade exists, else mediapipe's
-    bundled model, else None (faces are then "not_run")."""
+    """A callable gray frame -> [(x, y, w, h) pixels] with a .route name: YuNet when its model is in the
+    store, else Haar if its cascade exists, else mediapipe's bundled model, else None (faces "not_run")."""
+    yn = _yunet()
+    if yn is not None:
+        yn.route = "yunet"
+        return yn
     casc = _haar()
     if casc is not None:
         def detect(gray):
             w = gray.shape[1]
             return [tuple(b) for b in casc.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5,
                                                              minSize=(max(24, w // 16),) * 2)]
+        detect.route = "haar"
         return detect
-    return _mediapipe_detector()
+    mp_det = _mediapipe_detector()
+    if mp_det is not None:
+        mp_det.route = "mediapipe"
+    return mp_det
 
 
-def face_track(frames, fps, every=3):
+def face_track(frames, fps, every=3, det=None):
     """[{"t", "box": [x, y, w, h]}] (fractions of the frame) for every `every`-th gray frame that
-    shows a face (the largest one): Haar frontal cascade, else mediapipe's bundled model."""
-    det = _face_detector()
+    shows a face (the largest one): YuNet, else the Haar frontal cascade, else mediapipe's bundled model."""
+    det = det or _face_detector()
     if det is None:
         raise ImportError("no face detector available (Haar cascade or mediapipe)")
     out = []
@@ -878,11 +920,13 @@ def measure(video, out_dir, *, words=None, from_analysis=None, faces="auto", tex
     faces_info = {"ran": False, "tracks": [], "sample_t": [t / fps for t in sample]}
     faces_summary = {"ran": False, "frames_sampled": 0, "frames_with_face": 0, "share": None,
                      "box_median": None, "headroom": _stats([])}
-    if faces == "off" or n == 0 or _face_detector() is None:
+    det = None if (faces == "off" or n == 0) else _face_detector()
+    if det is None:
         not_run.append("faces")
     else:
-        tr = face_track(frames, fps, every=3)
-        faces_info.update(ran=True, tracks=tr)
+        tr = face_track(frames, fps, every=3, det=det)
+        faces_info.update(ran=True, tracks=tr, method=getattr(det, "route", None))
+        faces_summary["method"] = getattr(det, "route", None)
         boxes = np.array([f["box"] for f in tr]) if tr else None
         faces_summary.update(ran=True, frames_sampled=len(sample), frames_with_face=len(tr),
                              share=round(len(tr) / len(sample), 4) if sample else None,
