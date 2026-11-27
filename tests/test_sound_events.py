@@ -433,3 +433,14 @@ def test_music_sections_energy_is_dbfs():
     t = np.arange(int(6 * sr)) / sr
     y = np.sin(2 * np.pi * 440 * t) * 10 ** (-20 / 20) * np.sqrt(2)  # -20 dBFS RMS
     assert se.music_sections(y, sr)[0]["energy"] == pytest.approx(-20.0, abs=0.5)
+
+
+def test_room_not_read_under_music():
+    sr = se.AR
+    dry, spans = _bursts(sr)
+    t = np.arange(len(dry)) / sr
+    bed = 0.03 * np.sin(2 * np.pi * 220 * t)
+    doc = se.analyse(dry + bed, sr, words=spans)
+    assert doc["music"]["present"] is True
+    assert doc["voice"]["rt60_est_s"] is None and "voice_room" in doc["not_run"]
+    assert se.analyse(dry, sr, words=spans)["voice"]["rt60_est_s"] is not None

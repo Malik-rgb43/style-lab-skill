@@ -1329,7 +1329,8 @@ def music_sections(y, sr, mask_s=None):
     F = L[: n * w].reshape(n, w, -1).mean(axis=1)
     # similarity from the RMS dB distance between windows (a steady bed is 1 everywhere, so a tiny
     # wobble never becomes a boundary); Foote novelty normalised to 0..1
-    d = np.sqrt(((F[:, None, :] - F[None, :, :]) ** 2).mean(axis=2))
+    sq = (F * F).sum(axis=1)
+    d = np.sqrt(np.maximum(sq[:, None] + sq[None, :] - 2.0 * (F @ F.T), 0.0) / F.shape[1])  # n x n only
     S = np.exp(-(d / T["section_db_scale"]) ** 2)
     kw = T["section_kernel_w"]
     sign = np.concatenate([-np.ones(kw), np.ones(kw)])
@@ -1405,6 +1406,10 @@ def analyse(y, sr, words=None, cuts=None, moves=None, stem=None, stems="none"):
         why.update({k: "no --words" for k in ("voice_filter", "voice_rate", "ducking", "coupling_words")})
     music, beats = _music(y, sr, spans, cuts, stem)
     voice = voice_profile(y, sr, spans)
+    if music["present"] and voice.get("rt60_est_s") is not None:
+        voice["rt60_est_s"] = None  # the decay after a phrase would be the music bed, not the room
+        not_run.append("voice_room")
+        why["voice_room"] = "music plays under the voice"
     vdb = voice_level_db(y, sr, spans)
     sfx_dropped = {}
     sfx = detect_sfx(y if stem is None else stem, sr, spans, beats if music["bpm"] is not None else None, vdb,
