@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Picks</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Karantina:wght@400;700&family=Heebo:wght@300;400;500;600;700;800&display=swap">
+<style>
+/* Course brand tokens ("וידאו עם AI"): Karantina 700 headlines, Heebo body (-0.04em), Consolas code;
+   white / black / violet. Light by default, dark by system setting or the theme button. */
+:root{
+  --bg:#ffffff; --bg2:#f5f5f5; --surface:#ffffff; --surface2:#f7f7f8; --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.14);
+  --fg:#000000; --muted:#555555; --dim:#959595;
+  --accent:#7c5cff; --accent-hi:#9a82ff; --accent-text:#5b3fe0; --accent-ink:#ffffff; --accent-soft:#ece8ff;
+  --ok:#0b8a56; --danger:#d93a55; --note:#b07800; --callout:#d93a55;
+  --shadow:0 10px 30px rgba(0,0,0,.08); --glow:none;
+  --display:"Karantina","Heebo",system-ui,sans-serif; --body:"Heebo",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,Consolas,"Courier New",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0b0910; --bg2:#110e18; --surface:#17131f; --surface2:#1e1929; --line:rgba(237,233,255,.09); --line2:rgba(237,233,255,.16);
+  --fg:#f4f1fb; --muted:#aba4bf; --dim:#7e7791;
+  --accent-text:#b8a8ff; --accent-soft:rgba(124,92,255,.16); --ok:#5cffb0; --danger:#ff7a90; --note:#ffc94d; --callout:#ff7a90;
+  --shadow:0 18px 40px -24px rgba(0,0,0,.8); --glow:radial-gradient(80% 60% at 50% 0%,rgba(124,92,255,.22),transparent 70%);
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0b0910; --bg2:#110e18; --surface:#17131f; --surface2:#1e1929; --line:rgba(237,233,255,.09); --line2:rgba(237,233,255,.16);
+  --fg:#f4f1fb; --muted:#aba4bf; --dim:#7e7791;
+  --accent-text:#b8a8ff; --accent-soft:rgba(124,92,255,.16); --ok:#5cffb0; --danger:#ff7a90; --note:#ffc94d; --callout:#ff7a90;
+  --shadow:0 18px 40px -24px rgba(0,0,0,.8); --glow:radial-gradient(80% 60% at 50% 0%,rgba(124,92,255,.22),transparent 70%);
+  color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);background-image:var(--glow),linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:100% 600px,32px 32px,32px 32px;background-repeat:no-repeat,repeat,repeat;
+  color:var(--fg);font-family:var(--body);letter-spacing:-.04em;font-size:15px;line-height:1.55}
+h1,h2,h3,.display{font-family:var(--display);font-weight:700;letter-spacing:0;line-height:1}
+code,kbd,.mono{font-family:var(--mono);letter-spacing:0}
+.on-accent{background:var(--accent);color:var(--accent-ink);font-family:var(--display);font-weight:700;letter-spacing:0;border-radius:10px;padding:0 .22em .06em}
+button,input,textarea,select{font:inherit;letter-spacing:inherit;color:inherit}
+.btn{font-weight:600;border:1px solid var(--line2);background:var(--surface);color:var(--fg);border-radius:12px;padding:8px 16px;cursor:pointer}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-family:var(--display);font-weight:700;letter-spacing:0;font-size:20px;line-height:1.1;padding:6px 18px 8px}
+.btn.ok{color:var(--ok);border-color:var(--ok)}
+:focus-visible{outline:2px solid var(--accent-hi);outline-offset:2px}
+textarea,input[type=text]{width:100%;background:var(--surface);border:1px solid var(--line2);border-radius:12px;padding:10px 12px}
+.theme-btn{position:fixed;inset-block-start:12px;inset-inline-end:12px;z-index:20;border-radius:999px;padding:6px 12px;font-size:13px}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+/* Pick page: per beat three cards side by side (stills or looped clips), the wild card and my pick
+   marked, one "use this" per card and a "more ideas" toggle per beat. */
+body{padding-inline:max(16px,env(safe-area-inset-left,0px));padding-block:28px 64px}
+.wrap{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+.card{background:var(--surface);border:1px solid var(--line2);border-radius:22px;padding:clamp(18px,3vw,32px);box-shadow:var(--shadow)}
+.head h1{margin:0 0 6px;font-size:clamp(34px,5vw,54px)}
+.meta{color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px}
+.actions{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:16px}
+.pill{font-size:13px;color:var(--muted);border:1px solid var(--line2);border-radius:999px;padding:4px 12px}
+.bh{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+.bh h2{margin:0;font-size:34px}.bh small{font-family:var(--mono);font-size:13px;color:var(--dim);margin-inline-start:10px}
+.script{color:var(--muted);margin:6px 0 14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}
+.opt{border:1.5px solid var(--line2);border-radius:16px;padding:10px;display:flex;flex-direction:column;gap:8px;background:var(--surface)}
+.opt.on{border-color:var(--accent);background:linear-gradient(var(--accent-soft),var(--surface) 70%)}
+.opt img,.opt video{width:100%;border-radius:10px;background:var(--bg2);display:block}
+.opt h3{margin:0;font-size:22px}
+.badges{display:flex;gap:6px;flex-wrap:wrap;min-height:22px}
+.badge{font-size:12px;border-radius:999px;padding:2px 10px;border:1px solid var(--line2);color:var(--muted)}
+.badge.wild{border-color:var(--callout);color:var(--callout)}
+.badge.mine{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.use{margin-top:auto}
+.opt.on .use{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px}
+.row label{display:flex;gap:6px;align-items:center;cursor:pointer}
+.row input[type=text]{flex:1;min-width:200px}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<!-- pickpage.py fills this block: {step, project, title, mode, beats: [{n, start, end, script, recommended,
+     cards: [{id, title, wild, desc, source, media}]}]}. Media paths are published next to the page. -->
+<script type="application/json" id="picks-data">
+{"step": "frames", "project": "example", "title": "דוגמה", "mode": null, "beats": []}
+</script>
+<script>
+(function(){
+  const data = JSON.parse(document.getElementById('picks-data').textContent);
+  const STEP = {plan: 'תוכנית', frames: 'פריימים', motion: 'תנועה'};
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const KEY = 'style-lab:picks:' + data.project + ':' + data.step;
+  let state = {};
+  try { state = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { state = {}; }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} };
+  const app = document.getElementById('app');
+  const fmt = t => (t == null ? '' : Number(t).toFixed(1));
+
+  const head = document.createElement('section');
+  head.className = 'card head';
+  head.innerHTML = `<h1 dir="auto"><span class="on-accent">בחירות · ${esc(STEP[data.step])}</span> ${esc(data.title)}</h1>
+    <div class="meta"><span>פרויקט <span dir="ltr">${esc(data.project)}</span></span><span>${data.beats.length} ביטים</span></div>
+    ${data.step === 'motion' ? `<div class="row"><b>מצב תנועה</b>
+      <label><input type="radio" name="mode" value="three"> 3 וריאציות לכל ביט</label>
+      <label><input type="radio" name="mode" value="one"> אחת, Claude מחליט</label></div>` : ''}
+    <div class="actions"><span class="pill">הבחירות נשמרות בדפדפן</span>
+      <button class="btn primary" id="copy" type="button">העתקת הבחירות</button></div>`;
+  app.appendChild(head);
+  if (data.step === 'motion') {
+    const cur = state.__mode || data.mode || 'three';
+    head.querySelectorAll('input[name=mode]').forEach(r => { r.checked = r.value === cur;
+      r.addEventListener('change', () => { state.__mode = r.value; save(); }); });
+  }
+
+  data.beats.forEach(b => {
+    const s = state[b.n] = state[b.n] || {};
+    const sec = document.createElement('section');
+    sec.className = 'card';
+    const media = c => !c.media ? '' : data.step === 'motion'
+      ? `<video src="${esc(c.media)}" autoplay muted loop playsinline></video>`
+      : `<img src="${esc(c.media)}" alt="${esc(c.title)}">`;
+    sec.innerHTML = `<div class="bh"><h2>ביט ${b.n}<small dir="ltr">${fmt(b.start)} – ${fmt(b.end)}</small></h2></div>
+      <div class="script" dir="auto">${esc(b.script)}</div>
+      <div class="cards">${b.cards.map(c => `<div class="opt" data-id="${esc(c.id)}">${media(c)}
+        <div class="badges">${c.wild ? '<span class="badge wild">קלף פראי</span>' : ''}${c.id === b.recommended ? '<span class="badge mine">ההמלצה שלי</span>' : ''}</div>
+        <h3 dir="auto">${esc(c.title)}</h3><div dir="auto">${esc(c.desc)}</div>
+        <button class="btn use" type="button">לבחור בזה</button></div>`).join('')}</div>
+      <div class="row"><label><input type="checkbox" class="more"> עוד רעיונות</label>
+        ${data.step === 'motion' ? `<label>לביט הזה: <select class="mo"><option value="">כמו כל הסרטון</option><option value="three">3</option><option value="one">1</option></select></label>` : ''}
+        <input type="text" class="note" dir="auto" placeholder="הערה לביט (לא חובה)"></div>`;
+    app.appendChild(sec);
+    const paint = () => sec.querySelectorAll('.opt').forEach(el => {
+      const on = !s.more && (s.picked || b.recommended) === el.dataset.id;
+      el.classList.toggle('on', on); el.querySelector('.use').textContent = on ? '✓ נבחר' : 'לבחור בזה'; });
+    sec.querySelectorAll('.use').forEach(btn => btn.addEventListener('click', e => {
+      s.picked = e.target.closest('.opt').dataset.id; s.more = false; sec.querySelector('.more').checked = false; save(); paint(); }));
+    const more = sec.querySelector('.more'); more.checked = !!s.more;
+    more.addEventListener('change', () => { s.more = more.checked; save(); paint(); });
+    const note = sec.querySelector('.note'); note.value = s.note || '';
+    note.addEventListener('input', () => { s.note = note.value.trim(); save(); });
+    const mo = sec.querySelector('.mo');
+    if (mo) { mo.value = s.motion || ''; mo.addEventListener('change', () => { s.motion = mo.value; save(); }); }
+    paint();
+  });
+
+  // Mirrors pickpage.copy_text(): change both together.
+  function copyText(){
+    const L = [`# בחירות · ${data.title} · ${STEP[data.step]}`, `פרויקט: ${data.project}`];
+    if (data.step === 'motion') L.push(`מצב תנועה: ${(state.__mode || data.mode) === 'one' ? '1' : '3'}`);
+    data.beats.forEach(b => {
+      const s = state[b.n] || {};
+      let line = s.more ? `B${b.n}: עוד רעיונות` : `B${b.n}: ${s.picked || b.recommended || b.cards[0].id}`;
+      if (s.note) line += ` | הערה: ${s.note}`;
+      L.push(line);
+      if (data.step === 'motion' && (s.motion === 'one' || s.motion === 'three')) L.push(`B${b.n} תנועה: ${s.motion === 'one' ? '1' : '3'}`);
+    });
+    return L.join('\n') + '\n';
+  }
+  const copyBtn = document.getElementById('copy');
+  copyBtn.addEventListener('click', () => {
+    const txt = copyText();
+    const done = () => { copyBtn.textContent = '✓ הועתק, הדביקו ל־Claude'; setTimeout(() => copyBtn.textContent = 'העתקת הבחירות', 2600); };
+    const fallback = () => {
+      let pre = document.getElementById('picks-out');
+      if (!pre) { pre = document.createElement('textarea'); pre.id = 'picks-out'; pre.rows = 10; head.appendChild(pre); }
+      pre.value = txt; pre.focus(); pre.select(); copyBtn.textContent = 'סמנו והעתיקו את הטקסט למטה';
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fallback); else fallback();
+  });
+})();
+</script>
+<script>
+(function(){
+  var KEY='style-lab:theme', root=document.documentElement;
+  try{var t=localStorage.getItem(KEY); if(t) root.dataset.theme=t;}catch(e){}
+  var b=document.createElement('button'); b.type='button'; b.className='btn theme-btn';
+  var label=function(){var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches; b.textContent=dark?'☀ בהיר':'☾ כהה';};
+  b.onclick=function(){var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme=dark?'light':'dark'; try{localStorage.setItem(KEY,root.dataset.theme);}catch(e){} label();};
+  label(); document.body.appendChild(b);
+})();
+</script>
+</body>
+</html>
+

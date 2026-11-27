@@ -88,6 +88,8 @@ h1{font-size:clamp(48px,7vw,86px);margin:0;text-wrap:balance}
 .ob{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}
 .mypick{background:var(--accent);color:var(--accent-ink);font-family:var(--display);font-size:18px;letter-spacing:0;border-radius:999px;padding:2px 12px 4px}
 .use{font-size:13px;font-weight:600;border-radius:999px;padding:5px 14px;border:1.5px solid var(--line2);background:var(--surface);color:var(--fg);cursor:pointer}
+.mypick.wild{background:transparent;color:var(--callout);border:1px solid var(--callout)}
+.src{font-size:12px;color:var(--muted);border:1px solid var(--line2);border-radius:999px;padding:2px 10px}
 .opt.on .use{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
 .lab{font-family:var(--display);font-size:22px;color:var(--muted)}
 .script{font-size:21px;line-height:1.35;margin-top:4px}
@@ -295,7 +297,7 @@ html{scroll-behavior:smooth}
             <div class="cat" dir="auto">${esc(o.category)} · ${esc(SCENE[o.scene_type] || o.scene_type)}</div>
             <div class="desc" dir="auto">${esc(o.desc)}</div>
             <div class="ref" dir="ltr">Ref ${esc(o.ref)}</div>
-            <div class="ob">${o.key === b.pick ? '<span class="mypick">ההמלצה שלי</span>' : ''}<button class="use" type="button">לבחור בזה</button></div>
+            <div class="ob">${o.wild ? '<span class="mypick wild">קלף פראי</span>' : ''}${o.source ? `<span class="src">${esc({law: 'חוק של הסגנון', idea: 'מבנק הרעיונות', invention: 'רעיון חדש'}[o.source] || o.source)}</span>` : ''}${o.key === b.pick ? '<span class="mypick">ההמלצה שלי</span>' : ''}<button class="use" type="button">לבחור בזה</button></div>
           </div>`).join('')}</div>
       </div>
       <div class="r">
@@ -328,8 +330,19 @@ html{scroll-behavior:smooth}
   });
   drawTimeline();
 
+  // The machine lines first (pickpage.parse_copy_text reads them), then the readable plan.
+  function machineLines(){
+    const SRC_ID = o => o.id || o.key;
+    const L = [`# בחירות · ${data.title} · תוכנית`, `פרויקט: ${data.project || ''}`];
+    data.beats.forEach(b => {
+      const o = optOf(b, chosenOf(b));
+      const note = (state[b.n] && state[b.n].note || '').trim().replace(/\s+/g, ' ');
+      L.push(`B${b.n}: ${SRC_ID(o)}` + (note ? ` | הערה: ${note}` : ''));
+    });
+    return L.concat(['']);
+  }
   function planText(){
-    const L = [`# תוכנית עריכה: ${data.title}`, `קליפ: ${data.clip.name} · ${total.toFixed(1)} שנ' · ${data.beats.length} ביטים · סגנון: ${data.style}`, ''];
+    const L = machineLines().concat([`# תוכנית עריכה: ${data.title}`, `קליפ: ${data.clip.name} · ${total.toFixed(1)} שנ' · ${data.beats.length} ביטים · סגנון: ${data.style}`, '']);
     data.beats.forEach(b => {
       const o = optOf(b, chosenOf(b));
       const note = (state[b.n] && state[b.n].note || '').trim();
