@@ -1,0 +1,93 @@
+{
+ "id": "notes-round",
+ "title": "notes: interpret, layer, rule only on repeat + yes",
+ "needs": [],
+ "needs_scripts": [],
+ "seed": {
+  "styles": [
+   {
+    "fixture": "fixtures/ready-style",
+    "slug": "example-clean",
+    "name": "Example Clean",
+    "status": "ready"
+   }
+  ],
+  "clients": [
+   {
+    "name": "Example Shop",
+    "slug": "example-shop",
+    "brand_colors": [
+     "#008754"
+    ],
+    "styles": [
+     "example-clean"
+    ]
+   }
+  ]
+ },
+ "inputs": [
+  {
+   "copy": "evals/fixtures/notes-project",
+   "to": "notes-project"
+  }
+ ],
+ "fake_ytdlp": null,
+ "criteria": [
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "(?m)^(ASK|SAY):.*->.*->",
+    "min": 3
+   }
+  },
+  {
+   "type": "lessons",
+   "args": {
+    "where": {
+     "layer": "video"
+    },
+    "min": 1
+   }
+  },
+  {
+   "type": "lessons",
+   "args": {
+    "where": {
+     "layer": "craft"
+    },
+    "min": 1
+   }
+  },
+  {
+   "type": "lessons",
+   "args": {
+    "where": {
+     "layer": "client",
+     "status": "rule"
+    },
+    "min": 1,
+    "max": 1,
+    "evidence_min": 2
+   }
+  },
+  {
+   "type": "lessons",
+   "args": {
+    "where": {
+     "layer": "video",
+     "status": "rule"
+    },
+    "max": 0
+   }
+  },
+  {
+   "type": "unchanged",
+   "args": {
+    "path": "{work}/packs/example-clean/STYLE.md"
+   }
+  }
+ ],
+ "hash": [
+  "{work}/packs/example-clean/STYLE.md"
+ ]
+}

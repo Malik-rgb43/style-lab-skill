@@ -1,0 +1,427 @@
+{
+ "id": "example.creator",
+ "uploader": "example.creator",
+ "_type": "playlist",
+ "entries": [
+  {
+   "id": "7300000000000000100",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000100",
+   "title": "post 1",
+   "view_count": 1000,
+   "like_count": 50,
+   "duration": 20,
+   "upload_date": "20261001",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/0.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000101",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000101",
+   "title": "post 2",
+   "view_count": 63000,
+   "like_count": 3150,
+   "duration": 21,
+   "upload_date": "20261002",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/1.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000102",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000102",
+   "title": "post 3",
+   "view_count": 28000,
+   "like_count": 1400,
+   "duration": 22,
+   "upload_date": "20261003",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/2.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000103",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000103",
+   "title": "post 4",
+   "view_count": 90000,
+   "like_count": 4500,
+   "duration": 23,
+   "upload_date": "20261004",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/3.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000104",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000104",
+   "title": "post 5",
+   "view_count": 55000,
+   "like_count": 2750,
+   "duration": 24,
+   "upload_date": "20261005",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/4.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000105",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000105",
+   "title": "post 6",
+   "view_count": 20000,
+   "like_count": 1000,
+   "duration": 25,
+   "upload_date": "20261006",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/5.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000106",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000106",
+   "title": "post 7",
+   "view_count": 82000,
+   "like_count": 4100,
+   "duration": 26,
+   "upload_date": "20261007",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/6.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000107",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000107",
+   "title": "post 8",
+   "view_count": 47000,
+   "like_count": 2350,
+   "duration": 27,
+   "upload_date": "20261008",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/7.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000108",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000108",
+   "title": "post 9",
+   "view_count": 12000,
+   "like_count": 600,
+   "duration": 28,
+   "upload_date": "20261009",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/8.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000109",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000109",
+   "title": "post 10",
+   "view_count": 74000,
+   "like_count": 3700,
+   "duration": 29,
+   "upload_date": "20261010",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/9.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000110",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000110",
+   "title": "post 11",
+   "view_count": 39000,
+   "like_count": 1950,
+   "duration": 30,
+   "upload_date": "20261011",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/10.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000111",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000111",
+   "title": "post 12",
+   "view_count": 4000,
+   "like_count": 200,
+   "duration": 31,
+   "upload_date": "20261012",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/11.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000112",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000112",
+   "title": "post 13",
+   "view_count": 66000,
+   "like_count": 3300,
+   "duration": 32,
+   "upload_date": "20261013",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/12.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000113",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000113",
+   "title": "post 14",
+   "view_count": 31000,
+   "like_count": 1550,
+   "duration": 33,
+   "upload_date": "20261014",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/13.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000114",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000114",
+   "title": "post 15",
+   "view_count": 93000,
+   "like_count": 4650,
+   "duration": 34,
+   "upload_date": "20261015",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/14.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000115",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000115",
+   "title": "post 16",
+   "view_count": 58000,
+   "like_count": 2900,
+   "duration": 35,
+   "upload_date": "20261016",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/15.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000116",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000116",
+   "title": "post 17",
+   "view_count": 23000,
+   "like_count": 1150,
+   "duration": 36,
+   "upload_date": "20261017",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/16.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000117",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000117",
+   "title": "post 18",
+   "view_count": 85000,
+   "like_count": 4250,
+   "duration": 37,
+   "upload_date": "20261018",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/17.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000118",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000118",
+   "title": "post 19",
+   "view_count": 50000,
+   "like_count": 2500,
+   "duration": 38,
+   "upload_date": "20261019",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/18.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000119",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000119",
+   "title": "post 20",
+   "view_count": 15000,
+   "like_count": 750,
+   "duration": 39,
+   "upload_date": "20261020",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/19.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000120",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000120",
+   "title": "post 21",
+   "view_count": 77000,
+   "like_count": 3850,
+   "duration": 40,
+   "upload_date": "20261021",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/20.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000121",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000121",
+   "title": "post 22",
+   "view_count": 42000,
+   "like_count": 2100,
+   "duration": 41,
+   "upload_date": "20261022",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/21.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000122",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000122",
+   "title": "post 23",
+   "view_count": 7000,
+   "like_count": 350,
+   "duration": 42,
+   "upload_date": "20261023",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/22.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000123",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000123",
+   "title": "post 24",
+   "view_count": 69000,
+   "like_count": 3450,
+   "duration": 43,
+   "upload_date": "20261024",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/23.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000124",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000124",
+   "title": "post 25",
+   "view_count": 34000,
+   "like_count": 1700,
+   "duration": 44,
+   "upload_date": "20261025",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/24.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000125",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000125",
+   "title": "post 26",
+   "view_count": 96000,
+   "like_count": 4800,
+   "duration": 45,
+   "upload_date": "20261026",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/25.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000126",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000126",
+   "title": "post 27",
+   "view_count": 61000,
+   "like_count": 3050,
+   "duration": 46,
+   "upload_date": "20261027",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/26.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000127",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000127",
+   "title": "post 28",
+   "view_count": 26000,
+   "like_count": 1300,
+   "duration": 47,
+   "upload_date": "20261028",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/27.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000128",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000128",
+   "title": "post 29",
+   "view_count": 88000,
+   "like_count": 4400,
+   "duration": 48,
+   "upload_date": "20261001",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/28.jpg"
+    }
+   ]
+  },
+  {
+   "id": "7300000000000000129",
+   "url": "https://www.tiktok.com/@example.creator/video/7300000000000000129",
+   "title": "post 30",
+   "view_count": 53000,
+   "like_count": 2650,
+   "duration": 49,
+   "upload_date": "20261002",
+   "thumbnails": [
+    {
+     "url": "https://example.com/t/29.jpg"
+    }
+   ]
+  }
+ ]
+}

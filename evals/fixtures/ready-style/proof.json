@@ -1,0 +1,17 @@
+{
+ "recreation": {
+  "passed": true,
+  "score": 0.86,
+  "clips": [
+   "V02"
+  ]
+ },
+ "holdout": {
+  "passed": true,
+  "score": 0.81,
+  "clips": [
+   "V07"
+  ]
+ },
+ "checked": "2026-11-27"
+}

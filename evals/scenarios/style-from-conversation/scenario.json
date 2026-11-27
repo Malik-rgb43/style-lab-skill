@@ -1,0 +1,52 @@
+{
+ "id": "style-from-conversation",
+ "title": "A0: a style from this conversation and a project folder",
+ "needs": [],
+ "needs_scripts": [],
+ "seed": {},
+ "inputs": [
+  {
+   "copy": "evals/fixtures/conversation-a0.md",
+   "to": "conversation-a0.md"
+  },
+  {
+   "copy": "tests/fixtures/hf_project",
+   "to": "hf_project"
+  }
+ ],
+ "fake_ytdlp": null,
+ "criteria": [
+  {
+   "type": "transcript_order",
+   "args": {
+    "before": "^ASK:.*מה לקחתי מהשיחה",
+    "after": "styles\\.py add"
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{home}/styles.json",
+    "path": "styles[*].kind",
+    "op": "contains",
+    "value": "derived"
+   }
+  },
+  {
+   "type": "lessons",
+   "args": {
+    "where": {
+     "status": "rule"
+    },
+    "max": 0
+   }
+  },
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "(?m)^ASK:.*(סרטונים|גרסאות סופיות|finals|עוד)",
+    "min": 1
+   }
+  }
+ ]
+}

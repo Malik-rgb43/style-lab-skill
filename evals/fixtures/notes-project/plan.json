@@ -1,0 +1,33 @@
+{
+ "title": "example",
+ "lang": "he",
+ "clip": {
+  "file": "draft.mp4",
+  "length_s": 6.0
+ },
+ "beats": [
+  {
+   "n": 1,
+   "start": 0.0,
+   "end": 2.0,
+   "script": "יש 3 דרכים להתחיל",
+   "beat_types": [
+    "list"
+   ]
+  },
+  {
+   "n": 2,
+   "start": 2.0,
+   "end": 3.6,
+   "script": "ומה עושים עכשיו ?",
+   "beat_types": []
+  },
+  {
+   "n": 3,
+   "start": 3.6,
+   "end": 6.0,
+   "script": "בואו",
+   "beat_types": []
+  }
+ ]
+}

@@ -1,0 +1,66 @@
+{
+ "id": "train-folder",
+ "title": "train a style from a folder of 14 clips",
+ "needs": [
+  "ffmpeg",
+  "numpy",
+  "cv2"
+ ],
+ "needs_scripts": [],
+ "seed": {},
+ "inputs": [
+  {
+   "make": "motion_clips",
+   "n": 14,
+   "args": {
+    "dur_s": 6.0,
+    "fps": 25,
+    "cut_every_s": 2.0,
+    "jitter_s": 0.3,
+    "ease": "power3.inout"
+   }
+  }
+ ],
+ "fake_ytdlp": null,
+ "criteria": [
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{home}/styles.json",
+    "path": "styles[*].kind",
+    "op": "contains",
+    "value": "trained"
+   }
+  },
+  {
+   "type": "file_count",
+   "args": {
+    "glob": "{pack}/analysis/*/measure.json",
+    "min": 12
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{pack}/fingerprint.json",
+    "path": "trained_on",
+    "op": "disjoint_with",
+    "value": "held_out"
+   }
+  },
+  {
+   "type": "transcript_order",
+   "args": {
+    "before": "^(ASK|PUBLISH):.*(board|לוח)",
+    "after": "transcribe_words|A3"
+   }
+  },
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "(?m)^ASK:.*(לוח|board)",
+    "min": 1
+   }
+  }
+ ]
+}

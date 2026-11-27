@@ -1,0 +1,16 @@
+{
+ "name": "Example Clean",
+ "lang": "he",
+ "verdict": "approved",
+ "colors": [
+  "#0b0910",
+  "#7c5cff",
+  "#f4f1fb"
+ ],
+ "fonts": [
+  {
+   "name": "Heebo",
+   "role": "main"
+  }
+ ]
+}

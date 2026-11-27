@@ -3,3 +3,4 @@ __pycache__/
 *.tmp
 *.lock
 .superpowers/
+evals/.runs/

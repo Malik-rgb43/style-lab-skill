@@ -1,0 +1,19 @@
+{
+ "items": [
+  {
+   "id": "L1",
+   "kind": "counter_card",
+   "file": "library/counter.html"
+  },
+  {
+   "id": "L2",
+   "kind": "caption",
+   "file": "library/caption.html"
+  },
+  {
+   "id": "L3",
+   "kind": "box_in",
+   "file": "library/box.html"
+  }
+ ]
+}

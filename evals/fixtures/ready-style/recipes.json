@@ -1,0 +1,17 @@
+{
+ "recipes": [
+  {
+   "kind": "code-card",
+   "how": "code",
+   "look": {},
+   "prompt_template": "",
+   "negative": "",
+   "motion": {},
+   "tools": [],
+   "test": {
+    "status": "untested"
+   },
+   "source_evidence": []
+  }
+ ]
+}

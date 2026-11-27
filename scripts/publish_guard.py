@@ -27,7 +27,7 @@ MENTIONS = (
 )
 TEXT_EXT = {".md", ".py", ".html", ".json", ".txt", ".js", ".css", ".yml", ".yaml", ".svg", ".toml"}
 SKIP = {"scripts/publish_guard.py", "tests/test_publish_guard.py", "scripts/install.py"}
-SKIP_DIRS = {".git", ".superpowers", "__pycache__", ".pytest_cache"}
+SKIP_DIRS = {".git", ".superpowers", "__pycache__", ".pytest_cache", ".runs"}  # .runs: local eval sandboxes, git-ignored
 
 
 def find_mentions(root: Path) -> list[str]:

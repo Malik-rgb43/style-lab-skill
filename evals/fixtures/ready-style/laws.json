@@ -1,0 +1,36 @@
+{
+ "laws": [
+  {
+   "when": "word:number",
+   "then": "counter_card",
+   "anchor": "word",
+   "confidence": 0.82,
+   "support_videos": 5,
+   "occurrences": 11,
+   "lag": {
+    "median": 0.3,
+    "p10": 0.1,
+    "p90": 0.6,
+    "n": 9,
+    "seen_in": 5
+   },
+   "status": "rule-candidate"
+  },
+  {
+   "when": "question",
+   "then": "big_text",
+   "anchor": "word",
+   "confidence": 0.4,
+   "support_videos": 2,
+   "occurrences": 4,
+   "lag": {
+    "median": 0.2,
+    "p10": 0.1,
+    "p90": 0.4,
+    "n": 3,
+    "seen_in": 2
+   },
+   "status": "option"
+  }
+ ]
+}

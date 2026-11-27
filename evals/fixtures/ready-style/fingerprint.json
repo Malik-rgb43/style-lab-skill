@@ -1,0 +1,72 @@
+{
+ "schema": "fingerprint/1",
+ "trained_on": [
+  "V01",
+  "V02",
+  "V03",
+  "V04",
+  "V05",
+  "V06"
+ ],
+ "held_out": [
+  "V07"
+ ],
+ "layers": {
+  "motion": {
+   "source": "refs",
+   "eases": [
+    {
+     "name": "power2.out",
+     "bezier": [
+      0.215,
+      0.61,
+      0.355,
+      1
+     ],
+     "share": 0.6,
+     "seen_in": 3
+    },
+    {
+     "name": "power3.out",
+     "bezier": [
+      0.165,
+      0.84,
+      0.44,
+      1
+     ],
+     "share": 0.3,
+     "seen_in": 2
+    }
+   ],
+   "metrics": {
+    "dur_f": {
+     "median": 14,
+     "p10": 10,
+     "p90": 20,
+     "n": 3,
+     "seen_in": 3
+    },
+    "peak_at": {
+     "median": 0.3,
+     "p10": 0.2,
+     "p90": 0.45,
+     "n": 3,
+     "seen_in": 3
+    }
+   }
+  },
+  "look": {
+   "source": "refs",
+   "metrics": {
+    "grain_std": {
+     "median": 2.0,
+     "p10": 1.5,
+     "p90": 2.5,
+     "n": 3,
+     "seen_in": 3
+    }
+   }
+  }
+ },
+ "lang": "he"
+}

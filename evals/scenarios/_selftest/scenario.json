@@ -1,0 +1,24 @@
+{
+ "id": "_selftest",
+ "title": "runner self-test (no agent needed)",
+ "needs": [],
+ "needs_scripts": [],
+ "seed": {},
+ "inputs": [],
+ "fake_ytdlp": null,
+ "criteria": [
+  {
+   "type": "file_exists",
+   "args": {
+    "path": "{work}/PROMPT.md"
+   }
+  },
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "^ASK: שלום",
+    "min": 1
+   }
+  }
+ ]
+}

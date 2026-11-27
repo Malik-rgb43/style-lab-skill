@@ -1,0 +1,74 @@
+{
+ "id": "train-profile",
+ "title": "train from a profile link: list, consent, download",
+ "needs": [],
+ "needs_scripts": [],
+ "seed": {},
+ "inputs": [
+  {
+   "make": "motion_clips",
+   "n": 1,
+   "args": {
+    "dur_s": 3.0
+   }
+  }
+ ],
+ "fake_ytdlp": {
+  "fixtures": {
+   "example.creator": "evals/fixtures/profiles/creator30.json"
+  },
+  "media": "clip01.mp4"
+ },
+ "criteria": [
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{pack}/refs/proposal.json",
+    "path": "mode",
+    "op": "eq",
+    "value": "views"
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{pack}/refs/proposal.json",
+    "path": "entries[*].proposed",
+    "op": "contains",
+    "value": true
+   }
+  },
+  {
+   "type": "transcript_order",
+   "args": {
+    "before": "^ASK:.*(20|רשימ|פוסט)",
+    "after": "^ASK:.*(פרטי|private)"
+   }
+  },
+  {
+   "type": "ytdlp_after_consent",
+   "args": {}
+  },
+  {
+   "type": "ytdlp_calls",
+   "args": {
+    "kind": "download",
+    "min": 1
+   }
+  },
+  {
+   "type": "file_count",
+   "args": {
+    "glob": "{pack}/refs/V*.mp4",
+    "min": 20,
+    "max": 20
+   }
+  },
+  {
+   "type": "file_exists",
+   "args": {
+    "path": "{pack}/refs/sources.md"
+   }
+  }
+ ]
+}

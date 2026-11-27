@@ -1,0 +1,60 @@
+{
+ "id": "cross-language",
+ "title": "adapt an English-trained style to Hebrew",
+ "needs": [],
+ "needs_scripts": [],
+ "seed": {
+  "styles": [
+   {
+    "fixture": "fixtures/en-style",
+    "slug": "example-en",
+    "name": "Example English",
+    "status": "ready"
+   }
+  ]
+ },
+ "inputs": [],
+ "fake_ytdlp": null,
+ "criteria": [
+  {
+   "type": "file_exists",
+   "args": {
+    "path": "{work}/packs/example-en/adapt-he.json"
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{work}/packs/example-en/adapt-he.json",
+    "path": "to_lang",
+    "op": "eq",
+    "value": "he"
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{work}/packs/example-en/adapt-he.json",
+    "path": "timing_ratio",
+    "op": "ne",
+    "value": 1
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{work}/packs/example-en/adapt-he.json",
+    "path": "emphasis_swaps",
+    "op": "len_eq",
+    "value": 1
+   }
+  },
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "(?m)^ASK:.*(פונט|font)",
+    "min": 1
+   }
+  }
+ ]
+}

@@ -1,0 +1,79 @@
+{
+ "id": "plan-frames-motion",
+ "title": "plan, 3 real frames per beat, motion variants",
+ "needs": [
+  "ffmpeg",
+  "node",
+  "hyperframes"
+ ],
+ "needs_scripts": [
+  "frames.py",
+  "motion.py",
+  "plan.py"
+ ],
+ "seed": {
+  "styles": [
+   {
+    "fixture": "fixtures/ready-style",
+    "slug": "example-clean",
+    "name": "Example Clean",
+    "status": "ready"
+   }
+  ],
+  "clients": [
+   {
+    "name": "Example Shop",
+    "slug": "example-shop",
+    "brand_colors": [
+     "#008754"
+    ],
+    "styles": [
+     "example-clean"
+    ]
+   }
+  ]
+ },
+ "inputs": [
+  {
+   "make": "speech_clip"
+  }
+ ],
+ "fake_ytdlp": null,
+ "criteria": [
+  {
+   "type": "file_count",
+   "args": {
+    "glob": "{work}/**/plan.json",
+    "min": 1
+   }
+  },
+  {
+   "type": "file_count",
+   "args": {
+    "glob": "{work}/**/frames.json",
+    "min": 1
+   }
+  },
+  {
+   "type": "file_count",
+   "args": {
+    "glob": "{work}/**/picks.json",
+    "min": 1
+   }
+  },
+  {
+   "type": "file_count",
+   "args": {
+    "glob": "{work}/**/motion-variants.json",
+    "min": 1
+   }
+  },
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "(?m)^ASK:.*(3 גרסאות|שלוש גרסאות|גרסאות אנימציה)",
+    "min": 1
+   }
+  }
+ ]
+}

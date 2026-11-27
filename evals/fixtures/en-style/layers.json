@@ -1,0 +1,16 @@
+{
+ "layers": {
+  "motion": {
+   "source": "refs"
+  },
+  "look": {
+   "source": "refs"
+  },
+  "type": {
+   "source": "refs"
+  },
+  "sound": {
+   "source": "refs"
+  }
+ }
+}

@@ -1,0 +1,36 @@
+{
+ "id": "train-profile-thin",
+ "title": "a profile with too few posts stops before any download",
+ "needs": [],
+ "needs_scripts": [],
+ "seed": {},
+ "inputs": [],
+ "fake_ytdlp": {
+  "fixtures": {
+   "example.small": "tests/fixtures/profiles/tiktok_small.json"
+  }
+ },
+ "criteria": [
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "(?m)^(ASK|SAY):.*\\b(8|12)\\b",
+    "min": 1
+   }
+  },
+  {
+   "type": "ytdlp_calls",
+   "args": {
+    "kind": "download",
+    "max": 0
+   }
+  },
+  {
+   "type": "file_count",
+   "args": {
+    "glob": "{work}/**/refs/V*.mp4",
+    "max": 0
+   }
+  }
+ ]
+}

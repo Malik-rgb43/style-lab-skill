@@ -1,0 +1,69 @@
+{
+ "id": "client-one-colour",
+ "title": "a new client from one brand colour",
+ "needs": [],
+ "needs_scripts": [],
+ "seed": {
+  "styles": [
+   {
+    "fixture": "fixtures/ready-style",
+    "slug": "example-clean",
+    "name": "Example Clean",
+    "status": "ready"
+   }
+  ]
+ },
+ "inputs": [],
+ "fake_ytdlp": null,
+ "criteria": [
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{home}/clients.json",
+    "path": "clients[*].name",
+    "op": "contains",
+    "value": "Example Brand"
+   }
+  },
+  {
+   "type": "transcript_has",
+   "args": {
+    "regex": "(?m)^ASK:.*(monochrome|analogous|accent|מונוכרום|אנלוג|הדגשה)",
+    "min": 1
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{home}/clients/example-brand/client.json",
+    "path": "palette.picked",
+    "op": "eq",
+    "value": "accent"
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{home}/clients/example-brand/client.json",
+    "path": "styles[*].default",
+    "op": "contains",
+    "value": true
+   }
+  },
+  {
+   "type": "unchanged",
+   "args": {
+    "path": "{work}/packs/example-clean"
+   }
+  },
+  {
+   "type": "lessons",
+   "args": {
+    "max": 0
+   }
+  }
+ ],
+ "hash": [
+  "{work}/packs/example-clean"
+ ]
+}
