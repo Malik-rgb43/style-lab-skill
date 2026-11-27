@@ -338,6 +338,9 @@ def measured_layers(analysis, words_ok=True):
     return out
 
 
+MANUAL_DUP_S = 0.15
+
+
 def events(analysis, words=True):
     """Unified, time-sorted event stream [{t, kind, type, src, attrs}] of one analysis.
 
@@ -393,9 +396,12 @@ def events(analysis, words=True):
             ev.append({"t": t, "kind": "sound", "type": f"sfx:{sf.get('class_guess') or 'unknown'}",
                        "src": f"sfx:{k}",
                        "attrs": {k2: sf[k2] for k2 in ("confidence", "level_vs_voice_db") if k2 in sf}})
+    measured = [(x["t"], x["type"]) for x in ev]
     for k, e in enumerate(analysis.get("manual") or []):
         t = _t(e.get("t")) if isinstance(e, dict) else None
         if t is not None and isinstance(e.get("type"), str):
+            if any(ty == e["type"] and abs(mt - t) <= MANUAL_DUP_S for mt, ty in measured):
+                continue  # already measured: a hand-written copy would count the same event twice
             ev.append({"t": t, "kind": "manual", "type": e["type"], "src": f"man:{k}",
                        "attrs": dict(e.get("attrs") or {}, **({"label": e["label"]} if e.get("label") else {}))})
     if words:

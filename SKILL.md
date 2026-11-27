@@ -97,13 +97,14 @@ The full procedure, with every command, is `references/stage-a-train.md`. In sho
    `profile_fetch.py list/pick/download`, consent first, see stage-a-train.md), ~20 videos,
    family vs contrast; `doctor.py` `[train]` block. References stay local: never published, uploaded
    or put in an artifact.
-3. **The style board (checkpoint 1).** Frames every 0.5 s and contact sheets, categories, 100-150
-   thumbs, `board.json` (`references/board-and-plan-spec.md`) with measurable callouts and draft
-   "why" answers; `board.html` from `assets/board-template.html`, published as an artifact.
-   **Stop and wait** for the owner's notes; a wrong board trains a wrong style.
-4. **A2 measure every video** (background scripts, a few at a time): `transcribe_words.py`,
+3. **A2 measure every video** (background scripts, a few at a time): `transcribe_words.py`,
    `measure_video.py`, `track_motion.py`, `sound_events.py`, `look.py`; then watch and write
-   `events.manual.json` and `creator.json` (`references/creator-mind.md`).
+   `events.manual.json` (only what the measurements miss: a measured cut is never written again) and
+   `creator.json` (`references/creator-mind.md`).
+4. **The style board (checkpoint 1), before any law.** Frames every 0.5 s and contact sheets,
+   categories, 100-150 thumbs, `board.json` (`references/board-and-plan-spec.md`) with callouts measured
+   in A2 and draft "why" answers; `board.html` from `assets/board-template.html`, published as an
+   artifact. **Stop and wait** for the owner's notes; a wrong board trains a wrong style.
 5. **A3 hold-out first** (`prove.py holdout-pick`), then `fingerprint.py`, `laws.py`, `creator.py synth`
    on the training set; `lang.py adapt` when the target language differs.
 6. **A4-A5 assets and recipes.** `assets_log.py` (licences, sound libraries, `requires`), one

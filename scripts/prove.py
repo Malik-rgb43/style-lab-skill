@@ -38,6 +38,8 @@ HOLDOUT_MIN_F1 = 0.6
 RECREATION_MAX_RMSE = 0.05
 QA_EASE_MAX_RMSE = 0.05
 DEFAULT_TOL_S = 0.3
+TIMING_FLOOR_S = 0.1   # the hold-out timing limit is never below ~2-3 frames (laws with zero lag spread)
+QA_MIN_HALF = {"dur_f": 1.0, "peak_at": 0.05}   # a band never narrower than +-1 frame / +-5 %
 DEFAULT_DUR_RATIO = (0.8, 1.25)  # build/ref duration allowed when no style spread is known
 PEAK_AT_TOL = 0.15
 SAMPLES = 41
@@ -205,6 +207,9 @@ def qa_moves(build_motion, fingerprint):
         t, prop = m.get("t0"), m.get("prop")
         for name in ("dur_f", "peak_at"):
             band = _metric(fingerprint, name)
+            if band:
+                mid, half = (band[0] + band[1]) / 2, max((band[1] - band[0]) / 2, QA_MIN_HALF[name])
+                band = (round(mid - half, 4), round(mid + half, 4))
             v = m.get(name)
             if band and _num(v) and not band[0] <= v <= band[1]:
                 issues.append({"t": t, "prop": prop,
@@ -380,12 +385,25 @@ def _refuse_overlap(ids, fp):
         raise Bad("hold-out overlaps training (scoring refused): " + ", ".join(ov))
 
 
+def _twin_groups(pack, ids):
+    """{first id: [ids]} grouping byte-identical reference files (refs/<id>.*), so copies never split
+    between hold-out and training. Ids without a file are their own group."""
+    by_hash, out = {}, {}
+    for vid in ids:
+        f = next(iter(sorted((Path(pack) / "refs").glob(f"{vid}.*"))), None)
+        key = None
+        if f and f.is_file():
+            import hashlib
+            key = hashlib.sha256(f.read_bytes()).hexdigest()
+        g = by_hash.setdefault(key, vid) if key else vid
+        out.setdefault(g, []).append(vid)
+    return out
+
+
 def cmd_holdout_pick(a):
     _check_pack(a.pack)
     fp = _fp(a.pack)
-    no_fp = not (Path(a.pack) / "fingerprint.json").exists()
-    if no_fp and not a.allow_no_fingerprint:
-        raise Bad("no fingerprint.json; run fingerprint.py first, or pass --allow-no-fingerprint")
+    no_fp = not (Path(a.pack) / "fingerprint.json").exists()  # normal: the hold-out is picked first
     if a.ids:
         ids = [x.strip() for x in a.ids.split(",") if x.strip()]
         _refuse_overlap(ids, fp)
@@ -396,7 +414,9 @@ def cmd_holdout_pick(a):
         cands = [c for c in cands if c not in trained]
         if len(cands) < a.n:
             raise Bad(f"need {a.n} hold-out videos, only {len(cands)} analysed and not trained on")
-        ids = sorted(random.Random(a.seed).sample(cands, a.n))
+        groups = _twin_groups(a.pack, cands)
+        picked = random.Random(a.seed).sample(sorted(groups), min(a.n, len(groups)))
+        ids = sorted(x for g in picked for x in groups[g])  # a twin is held out with its copy
     if not ids:
         raise Bad("no hold-out ids")
 
@@ -417,7 +437,8 @@ def _timing_threshold(pack):
         vals = [x["lag"]["p90"] for x in laws or []
                 if isinstance(x, dict) and isinstance(x.get("lag"), dict) and _num(x["lag"].get("p90"))]
         if vals:
-            return statistics.median(vals), "laws"
+            med = statistics.median(vals)
+            return (max(med, TIMING_FLOOR_S), "laws" if med >= TIMING_FLOOR_S else "laws+floor")
     return None, "not_run"
 
 
@@ -512,7 +533,8 @@ def cmd_holdout(a):
               "timing_threshold_source": src, "per_video": scores, **extra}
     if not_run:
         result["not_run"] = not_run  # reported only; structure and retention do not decide pass yet
-    unknown = bool((proof.get("holdout") or {}).get("trained_unknown"))
+    # picked before the fingerprint existed (the documented order): known now, overlap refused above
+    unknown = bool((proof.get("holdout") or {}).get("trained_unknown")) and not fp.get("trained_on")
 
     def fn(d):
         d["holdout"] = {"ids": list(ids), "scores": result, "passed": bool(passed),

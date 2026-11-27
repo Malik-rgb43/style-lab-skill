@@ -17,6 +17,7 @@ def test_type_levels_from_fixture():
     assert lv[2]["font"] == "Heebo" and lv[2]["weight"] == 800
     assert lv[3]["font"] == "Gveret Levin"
     assert lv[0]["colour"] == "#7c3aed"  # var chain resolved
+    assert lv[0]["tracking"] == -1  # negative letter-spacing (found by the A0 eval)
     assert abs(t["scale_ratios"][0] - 2.5) <= 0.01
     assert lv[1]["uses"] == 2
 

@@ -20,7 +20,7 @@
    "type": "transcript_order",
    "args": {
     "before": "^ASK:.*מה לקחתי מהשיחה",
-    "after": "styles\\.py add"
+    "after": "^SAY:.*(יצרתי|רשמתי|נרשם).*(סגנון|derived)"
    }
   },
   {

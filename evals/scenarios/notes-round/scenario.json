@@ -36,7 +36,7 @@
   {
    "type": "transcript_has",
    "args": {
-    "regex": "(?m)^(ASK|SAY):.*->.*->",
+    "regex": "(?m)^(ASK|SAY):.*(->|→).*(->|→)",
     "min": 3
    }
   },

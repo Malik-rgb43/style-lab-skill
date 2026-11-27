@@ -318,6 +318,10 @@ def _source(adir, measure):
     for v in ((sj or {}).get("source") if isinstance(sj, dict) else None, (measure or {}).get("source")):
         if isinstance(v, str) and v and Path(v).exists():
             return Path(v)
+    refs = Path(adir).parent.parent / "refs"  # <pack>/analysis/<id> -> <pack>/refs/<id>.*
+    for f in sorted(refs.glob(f"{Path(adir).name}.*")) if refs.is_dir() else []:
+        if f.suffix.lower() in (".mp4", ".mov", ".mkv", ".webm", ".m4v"):
+            return f
     return None
 
 

@@ -36,7 +36,7 @@
    "type": "json_path",
    "args": {
     "file": "{home}/clients/example-brand/client.json",
-    "path": "palette.picked",
+    "path": "palette.kind",
     "op": "eq",
     "value": "accent"
    }
@@ -60,6 +60,15 @@
    "type": "lessons",
    "args": {
     "max": 0
+   }
+  },
+  {
+   "type": "json_path",
+   "args": {
+    "file": "{home}/clients/example-brand/client.json",
+    "path": "palette.source_hex",
+    "op": "eq",
+    "value": "#7A3E9D"
    }
   }
  ],

@@ -207,3 +207,13 @@ def test_video_without_language_listed(tmp_path):
     out = fp.build(tmp_path)
     assert any(n.startswith("word_laws:B") for n in out["not_run"])
     assert not any(n.startswith("word_laws:A") for n in out["not_run"])
+
+
+def test_manual_copy_of_a_measured_cut_is_dropped():
+    """Found by the train-folder eval: manual 'cut' entries doubled the measured cuts and halved recall."""
+    import fingerprint
+    a = {"measure": {"cuts": [{"t": 2.0}]}, "manual": [{"t": 2.05, "type": "cut"}, {"t": 3.0, "type": "cut"},
+                                                      {"t": 2.0, "type": "pose_change"}]}
+    ev = [(e["t"], e["type"]) for e in fingerprint.events(a, words=False)]
+    assert ev.count((2.0, "cut")) == 1 and (2.05, "cut") not in ev
+    assert (3.0, "cut") in ev and (2.0, "pose_change") in ev

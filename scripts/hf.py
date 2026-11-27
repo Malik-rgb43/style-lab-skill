@@ -30,14 +30,23 @@ def _cmd():
 CHROME_PATHS = [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
                 r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome",
-                "/usr/bin/chromium", "/usr/bin/chromium-browser"]
+                "/usr/bin/chromium", "/usr/bin/chromium-browser",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"]
+
+
+def _browser_candidates():
+    """Machine-wide installs, then a per-user Chrome (LOCALAPPDATA) on Windows."""
+    local = os.environ.get("LOCALAPPDATA")
+    extra = [os.path.join(local, "Google", "Chrome", "Application", "chrome.exe")] if local else []
+    return CHROME_PATHS[:2] + extra + CHROME_PATHS[2:]
 
 
 def browser_env():
     """The environment for HyperFrames: an installed Chrome, so it never downloads its own browser."""
     env = dict(os.environ)
     if not env.get("HYPERFRAMES_BROWSER_PATH"):
-        for c in CHROME_PATHS:
+        for c in _browser_candidates():
             if os.path.isfile(c):
                 env["HYPERFRAMES_BROWSER_PATH"] = c
                 break
@@ -61,7 +70,15 @@ def gsap_file():
     for r in roots:
         hits = glob.glob(os.path.join(r, "*", "node_modules", "gsap", "dist", "gsap.min.js"))
         if hits:
-            return Path(sorted(hits)[-1])
+            found = Path(sorted(hits)[-1])
+            try:  # keep a copy in the store so later runs do not depend on the npx cache
+                import store
+                dst = store.path("vendor", "gsap.min.js")
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(found, dst)
+                return dst
+            except Exception:
+                return found
     return None
 
 

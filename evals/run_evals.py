@@ -144,8 +144,11 @@ def env_for(work, sc):
     e = {"STYLE_LAB_HOME": _fwd(w / "home"), "HOME": _fwd(w / "fakehome"), "USERPROFILE": _fwd(w / "fakehome")}
     if sc.get("fake_ytdlp"):
         e["STYLE_LAB_YTDLP"] = _fwd(REPO / "tests" / "fixtures" / "fake_ytdlp.py")
-        e["FAKE_YTDLP_FIXTURES"] = json.dumps({k: _fwd(REPO / v) for k, v in sc["fake_ytdlp"]["fixtures"].items()},
-                                              ensure_ascii=False)
+        fx = w / "ytdlp.fixtures.json"   # fake_ytdlp reads this file (URL substring -> fixture file)
+        fx.parent.mkdir(parents=True, exist_ok=True)
+        fx.write_text(json.dumps({k: _fwd(REPO / v) for k, v in sc["fake_ytdlp"]["fixtures"].items()},
+                                 ensure_ascii=False), encoding="utf-8")
+        e["FAKE_YTDLP_FIXTURES"] = _fwd(fx)
         e["FAKE_YTDLP_LOG"] = _fwd(w / "ytdlp.log.jsonl")
         media = sc["fake_ytdlp"].get("media")
         if media:

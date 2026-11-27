@@ -205,7 +205,7 @@ def _colours_in(value):
 
 
 def _px(value):
-    m = re.fullmatch(r"([\d.]+)\s*(px|rem|em)?", value.strip().lower())
+    m = re.fullmatch(r"(-?[\d.]+)\s*(px|rem|em)?", value.strip().lower())  # negative tracking is common
     if not m:
         return None
     n = float(m.group(1))

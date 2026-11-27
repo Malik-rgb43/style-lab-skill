@@ -103,9 +103,13 @@ Then write the creator's mind for each video, `<pack>/analysis/<id>/creator.json
 `references/creator-mind.md` (the visual ideas first: the line, the message, how it became a
 picture and why). `creator.py check <pack>` validates every file.
 
+**Then the board (checkpoint 1)**, before any law: the callouts use the A2 numbers, and the owner's notes
+on the board decide what the laws look for. Wait for the owner's yes.
+
 ## A3. Hold-out first, then the laws
 
-1. Pick the hold-out before you look for patterns, so the proof is honest:
+1. Pick the hold-out before you look for patterns, so the proof is honest (no fingerprint is needed
+   yet; byte-identical copies are held out together so no twin leaks into training):
    `prove.py holdout-pick <pack> --n 3` (or `--ids V07,V12` to choose them; never a contrast video
    for the placement score). These ids are never trained on.
 2. `fingerprint.py <pack> --exclude <hold-out ids>`: per layer median and spread, traits (a

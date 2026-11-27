@@ -140,3 +140,10 @@ edge is worse than no breakout.
 ## Music and SFX
 Only what the user is licensed to use: their own library, royalty-free packs, or SFX they
 synthesise. Never claim a track is cleared if you do not know.
+
+## HyperFrames will not start its browser
+`hf.py` points HyperFrames at an installed Chrome or Edge (machine-wide, then the per-user Chrome) so it
+never downloads one. If a snapshot or render still times out on the browser: set
+`HYPERFRAMES_BROWSER_PATH` to a Chrome, Edge or puppeteer `chrome-headless-shell` executable, and on a
+permission error in a temp folder point `TEMP`/`TMP` at a folder you own. GSAP is read from
+`STYLE_LAB_GSAP`, `<store>/vendor/gsap.min.js` or the npx cache (copied into the store the first time).

@@ -342,15 +342,25 @@ def test_ready_blocked_by_stale_proof(home, tmp_path):
     assert r.returncode == 1 and "overlaps training" in r.stderr and "c" in r.stderr
 
 
-def test_holdout_pick_needs_fingerprint(tmp_path):
+def test_holdout_pick_before_fingerprint(tmp_path):
+    """The documented order: the hold-out is picked first; it is marked until the fingerprint exists."""
     pack = tmp_path / "pack"
     wj(pack / "analysis" / "c" / "events.json", [])
-    r = run_cli("prove.py", "holdout-pick", pack, "--ids", "c")
-    assert r.returncode == 2 and "no fingerprint.json; run fingerprint.py first" in r.stderr
-    assert not (pack / "proof.json").exists()
-    assert run_cli("prove.py", "holdout-pick", pack, "--ids", "c", "--allow-no-fingerprint").returncode == 0
+    assert run_cli("prove.py", "holdout-pick", pack, "--ids", "c").returncode == 0
     h = json.loads((pack / "proof.json").read_text(encoding="utf-8"))["holdout"]
-    assert h["trained_unknown"] is True
+    assert h["trained_unknown"] is True and h["ids"] == ["c"]
+
+
+def test_holdout_pick_keeps_twins_together(tmp_path):
+    pack = tmp_path / "pack"
+    for vid, data in (("V01", b"a"), ("V02", b"b"), ("V03", b"a"), ("V04", b"c")):
+        wj(pack / "analysis" / vid / "events.json", [])
+        (pack / "refs").mkdir(parents=True, exist_ok=True)
+        (pack / "refs" / f"{vid}.mp4").write_bytes(data)
+    for seed in range(6):
+        r = run_cli("prove.py", "holdout-pick", pack, "--n", "1", "--seed", seed)
+        ids = json.loads(r.stdout)["holdout_ids"]
+        assert ("V01" in ids) == ("V03" in ids), ids
 
 
 def test_gate_refuses_trained_unknown(home, tmp_path):
@@ -475,3 +485,15 @@ def test_holdout_actual_events_from_measurements(tmp_path):
     assert r.returncode in (0, 1) and "Traceback" not in r.stderr, r.stderr
     h = json.loads((pack / "proof.json").read_text(encoding="utf-8"))["holdout"]
     assert h["scores"]["per_video"]["c"]["tp"] == 2
+
+
+def test_zero_spread_bands_get_a_floor(tmp_path):
+    """Found by the train-folder eval: perfectly regular references gave zero-width gates."""
+    import prove
+    pack = tmp_path / "pack"
+    wj(pack / "laws.json", {"laws": [{"when": "a", "then": "b", "lag": {"median": 0, "p10": 0, "p90": 0}}]})
+    thr, src = prove._timing_threshold(pack)
+    assert thr == prove.TIMING_FLOOR_S and src == "laws+floor"
+    fp = {"layers": {"motion": {"metrics": {"peak_at": {"median": 0.3325, "p10": 0.3325, "p90": 0.3325, "n": 4}}}}}
+    issues = prove.qa_moves({"moves": [{"t0": 1, "prop": "x", "peak_at": 0.32}]}, fp)
+    assert not [i for i in issues if "peak_at" in i["issue"]]
