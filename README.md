@@ -41,6 +41,7 @@ Type one of these in Claude Code:
 | 0 | Connections check: what is installed, what is connected, what costs money | `references/tools-and-fallbacks.md` |
 | A | Train a style: measure the references, laws, the creator's way of thinking, recipes, proof | `references/stage-a-train.md` |
 | C | A client: brand profile, logo, fonts, a palette from one colour | `references/stage-c-client.md` |
+| Studio | `python scripts/studio.py`: styles, clients, ideas, learning, projects and the pick room | `references/studio.md` |
 | B | Edit: precise cut, plan, cost gate, frames, motion, build, review rounds, ideas bank | `references/stage-b-edit.md` |
 
 ## Connections

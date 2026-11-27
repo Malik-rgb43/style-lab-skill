@@ -158,7 +158,8 @@ Run `doctor.py --style <slug>` before planning; a missing `required` connection 
    words → `check` → `snap` → the page. **B4 motion**: ask once "3 גרסאות אנימציה לכל פריים, או להמשיך
    עם אחת?", `motion.py mode`, `variants`, `check`, `render`, the page. Contracts:
    `references/frames-and-motion.md`.
-4. **Picks**: `picks.py sync` after the owner picks; a pasted text: `pickpage.py import`.
+4. **Picks**: the Studio is the main way (`studio.py`, started in the background, give the owner its link;
+   `references/studio.md`); then `picks.py sync`. Without it: the exported page, a pasted text → `pickpage.py import`.
 5. **Build**: captions first (`buildcheck.py captions-done`), beats in order (`start-beat`/`beat-done`),
    the first 2 non-a-roll beats compared with their picked frames (`compare`), AI beats animated from a
    passed still (`genprep.py animate`, the recipe's camera curve in code), then `checklist`, ticks,
@@ -195,6 +196,7 @@ skill edits (never edited without a yes) and new ideas (learning-loop §9).
 - `references/stage-a-train.md`: training step by step (A0 sources, measuring, hold-out, laws, assets, recipes, create, prove, what to show the owner). Read before Phase A.
 - `references/creator-mind.md`: how to write `creator.json` (the creator's visual ideas, story, decisions, retention, toolchain). Read before A2's watching step.
 - `references/stage-b-edit.md`: stage B step by step (B1 precise cut, B2 plan, the cost gate, B3 frames, B4 motion, picks, B5 build gates, B6 rounds, B7 final and the ideas bank). Read before Phase B.
+- `references/studio.md`: the local Studio (screens, how picks reach Claude, safety). Read before starting it.
 - `references/frames-and-motion.md`: the frame scaffold, tokens, variant rules, motion params, signatures and the render budget. Read before B3 and B4.
 - `references/craft-rules.md`: the way of thinking and the rules that survived real review rounds (composition, motion, speaker, captions, cuts, sound, sources, build hygiene). Read before B2 and B4.
 - `references/review-loop.md`: drafts, the review room page, reading notes, rounds, final.
