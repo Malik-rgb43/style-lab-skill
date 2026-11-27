@@ -7,7 +7,7 @@ say "rule 7" and mean one thing. Replace every <…>.
 ```markdown
 ---
 name: style-<slug>
-description: The <Style Name> editing style (Hebrew name: <name as the user calls it>; registry slug <slug>) for <format, e.g. 9:16 talking-head reels>, trained on <N> reference videos of <creator/source>. <One sentence on the look: grounds, type, accent, motion.> Use whenever the user wants to edit, plan, caption or design a clip "in the <Style Name> style", "like <creator>", or names this style. Editing runs through the style-lab skill (phase B); this skill holds the style's rules, tokens and reference library.
+description: [style-lab] The <Style Name> editing style (Hebrew name: <name as the user calls it>; registry slug <slug>) for <format, e.g. 9:16 talking-head reels>, trained on <N> reference videos of <creator/source>. <One sentence on the look: grounds, type, accent, motion.> Use whenever the user wants to edit, plan, caption or design a clip "in the <Style Name> style", "like <creator>", or names this style. Editing runs through the style-lab skill (phase B); this skill holds the style's rules, tokens and reference library.
 ---
 
 # <Style Name>
@@ -75,6 +75,9 @@ references/craft-rules.md for the general ones; write only what is specific here
 ## Known gaps
 <what the references did not show enough of; what to ask the user>
 ```
+
+**The `[style-lab]` marker.** The description always starts with `[style-lab] `, so the slash
+menu shows that the skill was made with style-lab. Keep it when editing the description.
 
 **Review-round rules.** Keep that heading and the marker pair exactly as above, with `<slug>`
 replaced by the style's slug, empty when the style is packaged, in both STYLE.md and the style skill. `lessons.py
