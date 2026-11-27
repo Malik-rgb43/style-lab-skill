@@ -6,6 +6,8 @@
     render_draft(cwd, out)        render --quality draft -o <out> -> out
 Never downloads: `--no-install` refuses a package that is not cached (doctor.py shows the install hint).
 """
+import glob
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -25,10 +27,48 @@ def _cmd():
     return [npx] + CMD[1:]
 
 
+CHROME_PATHS = [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/usr/bin/google-chrome",
+                "/usr/bin/chromium", "/usr/bin/chromium-browser"]
+
+
+def browser_env():
+    """The environment for HyperFrames: an installed Chrome, so it never downloads its own browser."""
+    env = dict(os.environ)
+    if not env.get("HYPERFRAMES_BROWSER_PATH"):
+        for c in CHROME_PATHS:
+            if os.path.isfile(c):
+                env["HYPERFRAMES_BROWSER_PATH"] = c
+                break
+    return env
+
+
+def gsap_file():
+    """A local gsap.min.js: $STYLE_LAB_GSAP, <store>/vendor/gsap.min.js, or one inside the npx cache. None if absent."""
+    env = os.environ.get("STYLE_LAB_GSAP")
+    if env and os.path.isfile(env):
+        return Path(env)
+    try:
+        import store
+        p = store.path("vendor", "gsap.min.js")
+        if p.is_file():
+            return p
+    except Exception:
+        pass
+    roots = [os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm-cache", "_npx"),
+             os.path.expanduser("~/.npm/_npx")]
+    for r in roots:
+        hits = glob.glob(os.path.join(r, "*", "node_modules", "gsap", "dist", "gsap.min.js"))
+        if hits:
+            return Path(sorted(hits)[-1])
+    return None
+
+
 def run(args, cwd, timeout=300):
     try:
         r = subprocess.run(_cmd() + list(args), cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
+                           errors="replace", timeout=timeout, stdin=subprocess.DEVNULL, env=browser_env())
     except FileNotFoundError:
         raise HFMissing(HINT)
     except subprocess.TimeoutExpired:

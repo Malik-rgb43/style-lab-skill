@@ -144,6 +144,7 @@ def _set_dir(d, beat, set_no):
 # ---------------------------------------------------------------- new set
 
 def new_set(d, beat, more=False, owner_ok_more=False, owner_words=None):
+    import hf
     import project
     cx = _ctx(d)
     b = _beat(d, beat)
@@ -167,6 +168,9 @@ def new_set(d, beat, more=False, owner_ok_more=False, owner_words=None):
         if not (vd / "index.html").exists():
             (vd / "index.html").write_text(html, encoding="utf-8")
         (vd / "tokens.css").write_text(tokens_css(cx["client"], theme), encoding="utf-8")
+        g = hf.gsap_file()
+        if g is not None and not (vd / "gsap.min.js").exists():
+            shutil.copyfile(g, vd / "gsap.min.js")
         store.write_json(vd / "words.json", {"language": lang, "words": words})
         if not (vd / "variant.json").exists():
             store.write_json(vd / "variant.json", {"id": f"B{int(beat):02d}-f{n}-{x}", "title": "", "composition": "",
@@ -364,6 +368,9 @@ def _main(argv=None):
             print(f"סט {n} לביט {args.beat}: " + ", ".join(p.relative_to(args.project).as_posix() for p in dirs))
             if blocked:
                 print("חסומים (כבר הוצגו או נדחו): " + ", ".join(blocked))
+            if hf.gsap_file() is None:
+                print("warning: no local gsap.min.js found; put one at <store>/vendor/gsap.min.js "
+                      "(or set STYLE_LAB_GSAP) before snapshots", file=sys.stderr)
             return 0
         if args.cmd == "check":
             probs = check_set(args.project, args.beat, args.set)
