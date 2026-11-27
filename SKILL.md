@@ -19,7 +19,7 @@ ffmpeg and Python, and works best with HyperFrames installed.
 
 Language: always talk to the user in Hebrew unless they write in another language. Explain each
 step in plain words before doing it (what we do, why, what the user does now), one step at a
-time, and name the step ("שלב A2: בורד הסגנון"). All pages the user sees (board, plan, review
+time, and name the step ("שלב A2: מדידת הסרטונים"). All pages the user sees (board, plan, review
 room) are in the course design: RTL Hebrew, Karantina / Heebo, white-black-violet.
 
 Inspiration: the two-phase workflow (train from ~20 references and a board, then edit with a
@@ -70,7 +70,7 @@ python scripts/styles.py add [<slug>] --name "<name>" --pack <folder> --descript
 python scripts/styles.py {require <slug> --name N --why W --level required|recommended [--fallback F] | unrequire <slug> --name N}
 python scripts/styles.py set <slug> name="<new name>" status=ready aliases="..." theme=light version=2
 ```
-Status `training` (phase A), `ready` (after A5; only these are offered), `archived`; `remove`
+Status `training` (phase A), `ready` (after A7, the proof; only these are offered), `archived`; `remove`
 drops the entry only. Other fields (`fonts`/`colors`, `theme`, `kind`, `aspect`, `version`,
 `rules_count`): `references/store-schema.md`. New packs: `~/.claude/style-lab/styles/<slug>/`.
 **Clients** (a brand any style can wear): name, logo, fonts, brand colours, a picked palette
@@ -87,61 +87,38 @@ videos are local study copies, never published. Scripts (local, free): every `sc
 
 ## Phase A: train a style (build the style pack)
 
-### A1. Collect the references
-- Ask what to **call the style** and for a one-line description; register it right away
-  (`styles.py add ...`, status `training`). Ask brand look (default) or the reference's own.
-- Ask where the references are. **Videos:** the user gives files or links they are allowed to
-  download; aim for ~20 of the best-edited videos in exactly this style; fewer than ~12 gives a
-  thin library (say so, continue if the user wants). Name them `V01.mp4 …`, list each in
-  `refs/sources.md`. They stay local: never published, uploaded or put in an artifact.
-- **Description only** (no videos): interview the user (feel, grounds, type, motion, captions,
-  sound, what is banned), turn every adjective into a number, collect a few stills they like.
-  Skip A3-A4's frame work: the board shows tokens, rules and sketches instead of reference
-  frames; the library starts empty and grows from approved edits.
+The full procedure, with every command, is `references/stage-a-train.md`. In short:
 
-### A2. The style board (the most important part of training)
-1. Analyse every reference: frames every 0.5 s with ffmpeg (or a video-analysis tool if
-   installed), contact sheets, audio loudness. Read the sheets.
-2. Propose the categories (caption system, layout, B-roll types, graphics, transitions, CTA …);
-   the style's own categories win. `references/example-style-3d-paper.md` shows a finished one.
-3. Pick 100-150 inspiration thumbs into `board/thumbs/` and one hero frame per category.
-4. Fill `board.json` (`references/board-and-plan-spec.md`): tokens (hex picked from frames) and
-   per category the tiles, one frame with 3-5 **measurable** callouts, and draft answers to the
-   four "why" questions (design, colours, effects, animations).
-5. Build `board.html` from `assets/board-template.html` (replace the JSON block) and publish it
-   as an artifact with the thumbs as supporting files. The user rewrites the "why" answers and
-   presses **העתקת ההערות לבורד** to paste them back.
-6. **Checkpoint 1: stop and wait.** Apply the user's notes, republish. Do not start A3 until the
-   user says the board is right; a wrong board trains a wrong style.
+1. **A0 sources.** Videos, a profile link, this conversation, a HyperFrames project (code beats
+   video: `code_tokens.py`), or a description. Show "מה לקחתי מהשיחה" for a yes. Per-layer
+   sources (`code_tokens.py layer`) when the owner wants fonts or hierarchy from a brand or project.
+2. **A1 inputs.** Register (`styles.py add`, status `training`); `V01.mp4 ...` in `refs/`, ~20 videos,
+   family vs contrast; `doctor.py` `[train]` block. References stay local: never published, uploaded
+   or put in an artifact.
+3. **The style board (checkpoint 1).** Frames every 0.5 s and contact sheets, categories, 100-150
+   thumbs, `board.json` (`references/board-and-plan-spec.md`) with measurable callouts and draft
+   "why" answers; `board.html` from `assets/board-template.html`, published as an artifact.
+   **Stop and wait** for the owner's notes; a wrong board trains a wrong style.
+4. **A2 measure every video** (background scripts, a few at a time): `transcribe_words.py`,
+   `measure_video.py`, `track_motion.py`, `sound_events.py`, `look.py`; then watch and write
+   `events.manual.json` and `creator.json` (`references/creator-mind.md`).
+5. **A3 hold-out first** (`prove.py holdout-pick`), then `fingerprint.py`, `laws.py`, `creator.py synth`
+   on the training set; `lang.py adapt` when the target language differs.
+6. **A4-A5 assets and recipes.** `assets_log.py` (licences, sound libraries, `requires`), one
+   reproduction recipe per element kind, `recipe check`; AI recipes get one test after the
+   paid-spend gate and the owner's yes.
+7. **A6 create.** A principle beside every rule; `creator.py ideate` for visual ideas.
+8. **A7 prove.** Hold-out predicted from transcripts only, 3 recreation moments, `prove.py qa`, the
+   graph view, cover candidates (`cover.py candidates`, owner picks, `styles.py set-cover`), then
+   `styles.py set-status <slug> ready` (gated by proof.json and the recipe tests).
+9. **Package.** `STYLE.md` and the style skill from `references/style-skill-template.md`: numbered,
+   measured rules, each with its principle; tokens mapped onto the brand; the "Review-round rules"
+   marker pair. Optional: a tested component kit in `kit/`. Save the skill to
+   `~/.claude/skills/style-<slug>/SKILL.md`; fill `requires`. Tell the user the style's name and that
+   a new session will list it.
 
-### A3. The breakdown
-For **every** reference: a word-level transcript (`transcribe_words.py`, language from the user
-or `auto`) and a frame-by-frame pass that finds every animation and records three things:
-- **placement**: which words trigger it, how long after the word, which kind of line gets
-  which kind of scene (announce vs describe, number, person, story, punchline);
-- **design**: ground, texture, type pair and sizes, colour, line work, illustration, position;
-- **logic**: duration in frames, distances, easing, camera moves. Measure on frames; never guess.
-Then reconcile with the board (board = what and why; videos = when and how it moves); ask the
-user where they disagree. Write each animation to `animations.json` (`V<nn>-A<n>`, start/end,
-keyframe, title, category, scene type, words, notes). One video at a time, saving as you go;
-with many videos, split the work across subagents (one video each, same schema).
-
-### A4. The reference library
-`python scripts/build_reference_library.py styles/<slug>/animations.json --out styles/<slug>/library`
-Every animation becomes a folder (still, labelled frame strip, clip, notes) plus `index.json`.
-Open a few strips, fix wrong boundaries in `animations.json`, rerun with `--force`.
-
-### A5. Package the style
-Write `STYLE.md` and the style skill from `references/style-skill-template.md`: **numbered,
-measured rules** (so a plan or a note can say "rule 7"); tokens mapped onto the brand (keep the
-reference's sizes, ratios and colour discipline; record its originals); each category with
-design, motion, placement and 2-3 library refs; the planning patterns; the sound profile; a
-"way of thinking" section; a "Review-round rules" section holding only the learned-rules marker
-pair. Start from the general rules in `references/craft-rules.md` and write only what differs.
-Recommended: build the recurring parts (captions, headline, speaker layout, CTA) as a tested
-component kit in `kit/`. Save the skill to `~/.claude/skills/style-<slug>/SKILL.md`, then
-`styles.py set <slug> status=ready board_url=<board artifact URL>`. Fill `requires` (`styles.py require`) with the connections training showed the style depends on. Tell the user the style's
-name and that a new session will list it.
+The animation library (`build_reference_library.py styles/<slug>/animations.json --out styles/<slug>/library`)
+still works for styles trained the old way; new styles use the analysis folders.
 
 ## Phase B: edit a clip in a trained style
 Use the strongest model and effort available.
@@ -227,6 +204,8 @@ skill edits (never edited without a yes) and new ideas (learning-loop §9).
   or growth promises. Mark AI-generated people and voices as AI.
 
 ## References
+- `references/stage-a-train.md`: training step by step (A0 sources, measuring, hold-out, laws, assets, recipes, create, prove, what to show the owner). Read before Phase A.
+- `references/creator-mind.md`: how to write `creator.json` (the creator's visual ideas, story, decisions, retention, toolchain). Read before A2's watching step.
 - `references/craft-rules.md`: the way of thinking and the rules that survived real review rounds (composition, motion, speaker, captions, cuts, sound, sources, build hygiene). Read before B2 and B4.
 - `references/review-loop.md`: drafts, the review room page, reading notes, rounds, final.
 - `references/learning-loop.md`: notes into lessons, layers, rules on the owner's yes, conflicts, exceptions, taste, skill feedback. Read before B2 and B5.
@@ -235,5 +214,5 @@ skill edits (never edited without a yes) and new ideas (learning-loop §9).
 - `references/stage-c-client.md` (a client in chat) and `references/palette.md` (three palettes, roles, checks).
 - `references/tools-and-fallbacks.md`: what each step needs, local vs cloud, building without HyperFrames, optional 3D and image generation.
 - `references/board-and-plan-spec.md`: `board.json` and `plan.json` schemas and how to publish the pages.
-- `references/style-skill-template.md`: the generated style skill (A5); `references/brand-defaults.md`: the course brand tokens (dark and light) and how to map a reference palette onto them.
+- `references/style-skill-template.md`: the generated style skill (Package step); `references/brand-defaults.md`: the course brand tokens (dark and light) and how to map a reference palette onto them.
 - `references/example-style-3d-paper.md`: a real, approved style pack after three review rounds, as a worked example.

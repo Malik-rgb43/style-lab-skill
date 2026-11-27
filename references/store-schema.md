@@ -22,6 +22,8 @@ reinstalling the skill never wipes a style, a client or a setting:
                                 alignment {"latin word": "spoken form"}; only single Latin words
                                 are looked up; managed by `cutlang.py lexicon add|list`
   brand.md                      optional: the user's own default brand
+  lang/<code>.json              a language profile that overrides the built-in one (`lang.py add`)
+  models/                       small model files fetched with a yes (`fetch_model.py`), e.g. YuNet
 ```
 Later versions add `ideas/`, `projects.json` and `studio/` here; nothing in the skill folder
 holds user data. Footage, builds and renders stay in the user's own project folders.
@@ -35,6 +37,33 @@ holds user data. Footage, builds and renders stay in the user's own project fold
 ~/.claude/skills/style-<slug>/SKILL.md   the generated style skill
 ```
 `refs/` videos are local study copies, never published.
+
+**Training files** (stage A, `references/stage-a-train.md`). Per reference `<pack>/analysis/<id>/`:
+
+| File | Written by | Holds |
+|---|---|---|
+| `words.json` | `transcribe_words.py` | `{language, words: [{word, start, end}]}` |
+| `measure.json` (`measure/1`) | `measure_video.py` | video info and sha256, cuts, cadence, shots (palette, face share), faces (`method`: yunet, haar or mediapipe), text boxes, loudness, pace, `not_run` |
+| `motion.json` | `track_motion.py` | `elements[{id, moves[{prop, t0, t1, dur_f, curve, speed, ease fit, peak_at}]}]`, `camera_moves`, holds |
+| `sound.json` (`sound/1`) | `sound_events.py` | `sfx[{t, class_guess, level_vs_voice_db}]`, `music{present, bpm, beats_n, energy_per_s, ducking_db, sections[{t0, t1, energy}]}`, `voice{lufs, words_per_s, pause_median_s, spectral_tilt_db_per_oct, crest_db, rt60_est_s, de_ess_db}`, `coupling` |
+| `look.json` (`look/1`) | `look.py` | `per_shot`, `summary{metric: stat}` (grain, vignette, sharpness, tone, split toning, halation, chroma, letterbox, flicker), `text_finish` |
+| `events.manual.json` | Claude, from the sheets | `[{t, type, label, attrs}]` |
+| `creator.json` (`creator/2`) | Claude (`references/creator-mind.md`) | story, visual ideas, decisions, retention, toolchain |
+| `events.json` | optional | the actual events for the hold-out; measured from the folder when absent |
+
+Per pack:
+
+| File | Written by | Holds |
+|---|---|---|
+| `fingerprint.json` (`fingerprint/1`) | `fingerprint.py` | `trained_on`, `held_out`, `dupes`, `layers{layer: {source, metrics}}` (type, motion, colour, broll, structure, sound, look), `traits`, `not_run`; a number is `{median, p10, p90, n, seen_in}` |
+| `laws.json` | `laws.py` | `laws[{when, then, anchor, confidence, support_videos, lag, chance, lift, status}]`, `co_occurrences[{a, b, occurrences, videos}]` |
+| `layers.json` | `code_tokens.py layer` | per layer `{source: refs|code|brand|owner, ref, path_hint}` |
+| `tokens.json` | `code_tokens.py` | type levels, colour roles, motion eases, sound files read from a project |
+| `creator-mind.json` | `creator.py synth` | the playbook, principles, never-list |
+| `adapt-<code>.json` | `lang.py adapt` | scaled timing, RTL mirror plan, font mapping |
+| `proof.json` | `prove.py` | `holdout{ids, scores, passed}`, `recreation{moments, passed}` |
+| `ASSETS.md`, `assets.json`, `recipes.json` | `assets_log.py` | assets with licences; one recipe per element kind (`how`, `look`, `motion`, `prompt_template`, tools, `test`) |
+| `cover-candidates.json`, `cover-candidates/`, `cover.jpg` | `cover.py`, `styles.py set-cover` | frames typical of the style; the owner's pick |
 
 Rules for every script that writes here (`store.py` does this for all of them):
 - one writer at a time: a `<file>.lock` next to the file, taken with retry; a lock older than
@@ -179,7 +208,8 @@ style, so styles sharing a pack keep separate blocks). Each written file gets a
 `<file>.bak-YYYYMMDD` backup once a day.
 
 ## settings.json
-`{"auto_promote": false}`. `lessons.py settings auto_promote=true` (only on the owner's request)
+`{"auto_promote": false, "sound_libraries": []}`. `sound_libraries` is the owner's SFX and music
+folders, `[{name, path, kinds}]`, managed by `assets_log.py sound-lib add|list|remove`. `lessons.py settings auto_promote=true` (only on the owner's request)
 turns proposed lessons into rules at once, without the conflict check; `lessons.py settings`
 prints the values.
 

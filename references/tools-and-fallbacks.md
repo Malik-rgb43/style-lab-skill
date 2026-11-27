@@ -15,7 +15,8 @@ The local part checks binaries (ffmpeg, ffprobe, node, blender, yt-dlp, gh; Blen
 `BLENDER_PATH` and the usual install folders), HyperFrames (bounded, non-interactive,
 `npx --no`: it never downloads; a package that is not cached yet reads "not installed", and the
 first `npx hyperframes` downloads it, so ask the user first), Python
-modules (numpy, cv2, torch, torchaudio, transformers, faster_whisper, PIL), the cut models (presence of the cache folder only, never loaded) and env keys (RunPod; presence
+modules (numpy, cv2, torch, torchaudio, transformers, faster_whisper, PIL, librosa, fontTools), an
+OCR engine (rapidocr-onnxruntime or tesseract), the YuNet face model in `<store>/models/`, the cut models (presence of the cache folder only, never loaded) and env keys (RunPod; presence
 only, a value is never printed or stored). Each missing item carries an install hint.
 
 The session part is yours: look at your own tool list and skills and record each MCP server or
@@ -33,6 +34,22 @@ per stage what will be used, what is missing (and the hint to add it), and what 
 picks its tool only from this map. If a step's tool is missing, say which step is blocked and
 what to install. Never install or download without the user's yes, and never skip a step
 silently.
+
+A stage can also list **recommended** and **optional** entries (the `train` stage does). They are
+printed with `[מומלץ]` / `[רשות]` and never count as missing; without one, the measurement it
+serves is skipped and listed under `not_run`.
+
+## Training (stage A)
+| Entry | Level | Without it |
+|---|---|---|
+| ffmpeg, ffprobe, numpy | required | nothing is measured |
+| cv2 | recommended | no faces or text boxes; look.py blurs slower |
+| YuNet face model (`fetch_model.py yunet --yes`, 232,589 bytes, OpenCV model zoo, MIT) | optional | faces use the Haar cascade (if the cv2 build has it) or mediapipe, else `not_run` |
+| OCR (rapidocr-onnxruntime or tesseract) | optional | text boxes are found, their words are not read |
+| librosa | optional | the tempo uses the numpy onset envelope only |
+| fontTools + Pillow | optional | `font_match.py` and the glyph checks of `lang.py adapt` do not run |
+| faster-whisper | optional | no local transcript: word laws and the pace are `not_run` (or use the cloud route) |
+| demucs (`sound_events.py --allow-download`, with a yes) | optional | SFX and tempo are read on the mix |
 
 ## Required
 - **ffmpeg / ffprobe** on PATH: frames, cuts, proxies, audio. Nothing works without it.

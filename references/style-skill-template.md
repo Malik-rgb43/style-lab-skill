@@ -1,4 +1,4 @@
-# Template: the generated style skill (step A5)
+# Template: the generated style skill (Phase A, the Package step)
 
 Write this to `~/.claude/skills/style-<slug>/SKILL.md`, filled from the board, the breakdown and
 the library. Keep every rule numbered and measurable; a plan or a revision note must be able to
@@ -15,8 +15,11 @@ description: The <Style Name> editing style (Hebrew name: <name as the user call
 Registry: `<slug>` in ~/.claude/style-lab/styles.json · fonts: <brand|reference> · colours: <brand|reference>
 
 Trained <date> from <N> reference videos (<creator>, list in <pack>/refs/sources.md) and the style
-board <board artifact URL>. Library: <absolute path>/library (<count> animations, index.json).
-To edit a clip in this style, follow style-lab phase B (B1–B6) with this skill loaded.
+board <board artifact URL>. Measured: <pack>/fingerprint.json (per-layer numbers with spreads),
+<pack>/laws.json (when X then Y), <pack>/creator-mind.json (how the creator turns a line into a
+picture), <pack>/recipes.json (how each element is made again). Proof: <pack>/proof.json (hold-out
+F1 <x>, timing error <y> s; recreation moments <ids>). To edit a clip in this style, follow
+style-lab phase B (B1–B6) with this skill loaded, and read those files at B2.
 
 ## What makes it work
 <3–5 sentences: the feeling, the discipline, what is never done.>
@@ -34,9 +37,11 @@ To edit a clip in this style, follow style-lab phase B (B1–B6) with this skill
 | Layout / safe zones | <…> | <caption band y-range, margins> |
 
 ## Rules (numbered)
-1. <Caption rule …>
+1. <Caption rule …> Why: <the principle: metaphor, reveal, tension, contrast, rhythm>.
 2. …
-(Every rule: what, measured value, when it applies. Cite the board callout it came from.)
+(Every rule: what, measured value with its spread (median, p10-p90 from fingerprint.json), when it
+applies, and why it works. A rule from laws.json names the law (`when` → `then`, lag, support).
+Cite the board callout or the law it came from.)
 
 ## Categories
 ### <n>. <Category name>  (<scene type: a-roll / overlay / cutaway>)
@@ -54,8 +59,13 @@ To edit a clip in this style, follow style-lab phase B (B1–B6) with this skill
 "show the real tool working"; "one idea per beat, never repeated". See style-lab
 references/craft-rules.md for the general ones; write only what is specific here.>
 
+## Look (from look.json)
+- Grain <std, size px>; vignette <falloff>; tone <black/white points, contrast>; split toning
+  <shadow and highlight tint>; halation <yes/no>; text finish <stroke px, shadow, glow>.
+
 ## Sound profile
-- Music: <feel, level under voice in LUFS or dB>
+- Voice: <LUFS, words per second, pause median, spectral tilt, crest dB (compression), room rt60>
+- Music: <feel, level under voice in LUFS or dB, BPM, ducking dB, sections per minute>
 - Effects: <text appear → click; line/graph draw → marker; transition → whoosh; …>, density ≈ <n per minute>
 
 ## Review-round rules (added after each round)
@@ -67,7 +77,7 @@ references/craft-rules.md for the general ones; write only what is specific here
 ```
 
 **Review-round rules.** Keep that heading and the marker pair exactly as above, with `<slug>`
-replaced by the style's slug, empty at A5, in both STYLE.md and the style skill. `lessons.py
+replaced by the style's slug, empty when the style is packaged, in both STYLE.md and the style skill. `lessons.py
 approve` writes the style's approved rules between its markers (numbered, measured, with
 evidence count, date and lesson id; cite them by lesson id) and keeps everything outside them
 as written, other styles' blocks included (`references/learning-loop.md` §6). Never type rules
