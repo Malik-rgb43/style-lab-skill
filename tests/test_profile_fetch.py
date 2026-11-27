@@ -215,3 +215,106 @@ def test_no_http_client_imports():
     src = (REPO_ROOT / "scripts" / "profile_fetch.py").read_text(encoding="utf-8")
     for needle in ("import requests", "urllib.request", "httpx", "http.client"):
         assert needle not in src
+
+
+def _run_by_url(outputs, fail=()):
+    def run(cmd, **kw):
+        tab = cmd[-1].rsplit("/", 1)[-1]
+        if tab in fail:
+            return SimpleNamespace(returncode=1, stdout=b"", stderr=b"ERROR: HTTP Error 404: Not Found\n")
+        return SimpleNamespace(returncode=0, stdout=(PROFILES / outputs[tab]).read_bytes(), stderr=b"")
+    return run
+
+
+def test_one_missing_tab_does_not_fail(monkeypatch):
+    monkeypatch.setenv("STYLE_LAB_YTDLP", "yt-dlp-stub")
+    prof = pf.parse_profile_url("https://www.youtube.com/@ExampleChannel")
+    outs = {"shorts": "youtube_shorts_flat.json", "videos": "youtube_videos_flat.json"}
+    failed = []
+    raw = pf.list_posts(prof, limit=60, run=_run_by_url(outs, fail=("videos",)), tabs_failed=failed)
+    assert len(raw) == 25 and failed == [{"tab": "videos", "error": "ERROR: HTTP Error 404: Not Found"}]
+    with pytest.raises(pf.FetchError):
+        pf.list_posts(prof, limit=60, run=_run_by_url(outs, fail=("videos", "shorts")))
+
+
+def test_cli_missing_tab_records_tabs_failed(fake, tmp_path):
+    fake({"/shorts": "youtube_shorts_flat.json"})  # no fixture for /videos: that call fails
+    pack = tmp_path / "pack"
+    r = run_cli("profile_fetch.py", "list", "https://www.youtube.com/@ExampleChannel", "--pack", pack)
+    assert r.returncode == 0, r.stderr
+    prop = json.loads((pack / "refs" / "proposal.json").read_text(encoding="utf-8"))
+    assert [t["tab"] for t in prop["tabs_failed"]] == ["videos"]
+    assert "videos" in r.stderr
+
+
+def test_max_duration_before_warning_and_empty_exit1(fake, tmp_path):
+    posts = posts_of("tiktok_flat.json", "tiktok")
+    res = pf.rank(posts, max_duration=20)  # keeps only a handful
+    assert any("fewer than 12" in w for w in res["warnings"]) and any("longer than" in w for w in res["warnings"])
+    assert f"fewer than {pf.MIN_POSTS}" in res["warnings"][-1]
+    fake({"tiktok.com": "tiktok_flat.json"})
+    r = run_cli("profile_fetch.py", "list", "https://www.tiktok.com/@example.creator", "--pack", tmp_path / "p",
+                "--max-duration", "1")
+    assert r.returncode == 1 and "--max-duration" in r.stderr and "Traceback" not in r.stderr
+
+
+def test_upload_date_is_timestamp_fallback():
+    raw = {"id": "a", "url": "https://www.youtube.com/watch?v=a", "upload_date": "20250102"}
+    p = pf.normalise(raw, "youtube")
+    assert p["upload_date"] == "2025-01-02" and p["timestamp"] == 1735776000
+    undated = pf.normalise({"id": "b", "url": "https://www.youtube.com/watch?v=b"}, "youtube")
+    res = pf.rank([undated, p])
+    assert res["mode"] == "pick" and [e["id"] for e in res["entries"]] == ["a", "b"]
+
+
+def test_duplicate_keeps_richer_entry():
+    base = {"id": "a", "url": "https://www.youtube.com/watch?v=a", "view_count": None}
+    thin = pf.normalise(base, "youtube")
+    rich = pf.normalise({**base, "view_count": 50, "like_count": 5}, "youtube")
+    for order in ([thin, rich], [rich, thin]):
+        res = pf.rank(order)
+        assert len(res["entries"]) == 1 and res["entries"][0]["views"] == 50
+
+
+def test_tiktok_photo_dropped():
+    assert pf.normalise({"id": "a", "url": "https://www.tiktok.com/@example.creator/photo/1"}, "tiktok") is None
+
+
+def test_json_not_object_exit1(tmp_path, monkeypatch):
+    class R:
+        returncode = 0
+        stdout = b"[1, 2]"
+        stderr = b""
+    monkeypatch.setenv("STYLE_LAB_YTDLP", "yt-dlp-stub")
+    with pytest.raises(pf.FetchError, match="not an object"):
+        pf.list_posts(pf.parse_profile_url("https://www.tiktok.com/@example.creator"), limit=5, run=lambda c, **k: R)
+
+
+def test_timeout_is_fetch_error(monkeypatch):
+    def run(cmd, **kw):
+        assert kw["timeout"] == 7
+        raise subprocess.TimeoutExpired(cmd, 7)
+    monkeypatch.setenv("STYLE_LAB_YTDLP", "yt-dlp-stub")
+    with pytest.raises(pf.FetchError, match="timed out"):
+        pf.list_posts(pf.parse_profile_url("https://www.tiktok.com/@example.creator"), limit=5, run=run, timeout=7)
+
+
+def test_limit_validated_and_bad_registry_exit2(tmp_path):
+    for bad in ("0", "201"):
+        r = run_cli("profile_fetch.py", "list", "https://www.tiktok.com/@example.creator", "--pack", tmp_path / "p",
+                    "--limit", bad)
+        assert r.returncode == 2
+    import store
+    reg = store.home() / "styles.json"
+    reg.parent.mkdir(parents=True, exist_ok=True)
+    reg.write_text("{not json", encoding="utf-8")
+    r = run_cli("profile_fetch.py", "list", "https://www.tiktok.com/@example.creator", "--style", "x")
+    assert r.returncode == 2 and "Traceback" not in r.stderr
+
+
+def test_unwritable_pack_exit2(fake, tmp_path):
+    fake({"tiktok.com": "tiktok_flat.json"})
+    blocker = tmp_path / "file"
+    blocker.write_text("x", encoding="utf-8")
+    r = run_cli("profile_fetch.py", "list", "https://www.tiktok.com/@example.creator", "--pack", blocker / "pack")
+    assert r.returncode == 2 and "Traceback" not in r.stderr

@@ -46,7 +46,7 @@ def home(tmp_path, monkeypatch):
 
 
 def run_cli(script, *args):
-    env = dict(os.environ)
+    env = child_env()
     sl = env.get("STYLE_LAB_HOME")
     assert sl, "run_cli: STYLE_LAB_HOME is unset (test isolation broken)"
     assert not _inside(sl, REAL_CLAUDE), f"run_cli: STYLE_LAB_HOME {sl} is inside the real user profile (~/.claude)"
@@ -57,12 +57,23 @@ def run_cli(script, *args):
 
 
 _LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+_BIND_OK = (None, "", "0.0.0.0", "::")
+NETGUARD_DIR = Path(__file__).resolve().parent / "_netguard"
+
+
+def child_env(env=None):
+    """Env for a child Python: the network guard (tests/_netguard/sitecustomize.py) loads first."""
+    env = dict(os.environ if env is None else env)
+    old = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = str(NETGUARD_DIR) + (os.pathsep + old if old else "")
+    return env
 
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
-    """Tests never reach the network: connecting anywhere but localhost raises."""
+    """Tests never reach the network, in-process or in a child Python: only localhost is allowed."""
     real_connect, real_connect_ex = socket.socket.connect, socket.socket.connect_ex
+    real_sendto, real_gai = socket.socket.sendto, socket.getaddrinfo
 
     def _allowed(address):
         if isinstance(address, tuple) and address:
@@ -79,5 +90,21 @@ def _no_network(monkeypatch):
             raise RuntimeError("network blocked in tests")
         return real_connect_ex(self, address)
 
+    def sendto(self, data, *args):
+        if args and not _allowed(args[-1]):
+            raise RuntimeError("network blocked in tests")
+        return real_sendto(self, data, *args)
+
+    def getaddrinfo(host, *args, **kw):
+        if isinstance(host, bytes):
+            host = host.decode("ascii", "ignore")
+        if host not in _LOCAL_HOSTS and host not in _BIND_OK:
+            raise RuntimeError("network blocked in tests")
+        return real_gai(host, *args, **kw)
+
     monkeypatch.setattr(socket.socket, "connect", connect)
     monkeypatch.setattr(socket.socket, "connect_ex", connect_ex)
+    monkeypatch.setattr(socket.socket, "sendto", sendto)
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    # every child Python the test spawns (run_cli or a plain subprocess) inherits the guard
+    monkeypatch.setenv("PYTHONPATH", child_env()["PYTHONPATH"])

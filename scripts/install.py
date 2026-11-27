@@ -19,7 +19,13 @@ What it does, in order:
   5. verifies every managed file and every private file, seeds the store with what is missing,
      migrates a v1 registry, writes <target>/.install.json, prints the rollback command.
 
-Never creates links, never follows them: a junction or symlink inside the target, the archive or on
+Nothing is backed up when nothing would change. Before a seed or a registry migration the store files they
+touch are copied to <archive>/style-lab-store-<stamp>/ (a sibling of the skill backup); store changes are NOT
+rolled back by --rollback. A rollback restores every file of the backup, leaves files the backup lacks in
+place (listed; --prune removes them after backing them up) and keeps a runnable copy of this script in the
+replaced-state backup for the undo command.
+
+Never creates links, never follows them (the source tree is checked too): a junction or symlink inside the target, the archive or on
 their paths is refused. --dry-run prints the plan and writes nothing, not even a backup.
 Exit codes: 0 ok, 1 check failed, 2 bad input, 3 missing tool.
 
@@ -32,6 +38,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -133,12 +140,26 @@ def _reparse_on_path(p: Path) -> list[str]:
 
 
 def _files_under(root: Path) -> list[str]:
+    """Regular files below root (POSIX relative paths); links and junctions are skipped, never followed."""
     out = []
     root = Path(root)
-    for dp, dns, fns in os.walk(root):
-        for fn in fns:
-            out.append((Path(dp) / fn).relative_to(root).as_posix())
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        for e in os.scandir(d):
+            p = Path(e.path)
+            if _is_reparse(p):
+                continue
+            if e.is_dir(follow_symlinks=False):
+                stack.append(p)
+            else:
+                out.append(p.relative_to(root).as_posix())
     return sorted(out)
+
+
+def _fmt(p) -> str:
+    """Path for display: one separator style."""
+    return str(Path(p))
 
 
 def _atomic_write(dest: Path, data: bytes) -> None:
@@ -189,15 +210,23 @@ def split_private(md: str) -> tuple[str, str]:
 
 
 def merge_skill_md(repo_md: str, live_md: str) -> str:
-    """The repo SKILL.md with the live file's private section re-appended at the end."""
+    """The repo SKILL.md with the live file's private section re-appended at the end.
+    The result keeps the repo file's own line endings."""
     private = split_private(live_md)[1]
     if not private:
         return repo_md
-    return split_private(repo_md)[0].rstrip("\n") + "\n\n" + private.rstrip("\n") + "\n"
+    eol = "\r\n" if "\r\n" in repo_md else "\n"
+    base = repo_md.replace("\r\n", "\n").replace("\r", "\n")
+    base = split_private(base)[0].rstrip("\n")
+    out = base + "\n\n" + private.rstrip("\n") + "\n"
+    return out.replace("\n", eol) if eol != "\n" else out
 
 
 def _read_text(p: Path) -> str:
-    return p.read_bytes().decode("utf-8")
+    try:
+        return p.read_bytes().decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise InstallError(f"not valid UTF-8 text: {_fmt(p)}")
 
 
 # ---------- backup / rollback ----------
@@ -217,12 +246,49 @@ def backup(target: Path, archive: Path) -> Path:
         n += 1
     shutil.copytree(target, dest, symlinks=False)
     if _tree_hashes(target) != _tree_hashes(dest):
-        raise InstallError(f"backup verification failed: {dest}", code=1)
+        raise InstallError(f"backup verification failed: {_fmt(dest)}", code=1)
     return dest
 
 
-def rollback_command(backup: Path, target: Path) -> str:
-    return f'python "{target}/scripts/install.py" --rollback "{backup}" --target "{target}"'
+INSTALLER_DIR = "_installer"     # a runnable copy of this script, put inside a rollback's backup
+STORE_FILES = ("settings.json", "styles.json", "brand.md")
+
+
+def rollback_command(backup: Path, target: Path, script: Path = None) -> str:
+    script = Path(script) if script else Path(target) / "scripts" / "install.py"
+    return f'python "{_fmt(script)}" --rollback "{_fmt(backup)}" --target "{_fmt(target)}"'
+
+
+def _stamp_of(backup: Path) -> str:
+    n = Path(backup).name
+    return n[len("style-lab-"):] if n.startswith("style-lab-") else n
+
+
+def snapshot_store(home: Path, archive: Path, stamp: str):
+    """Copy the store files seed/migrate may touch to <archive>/style-lab-store-<stamp>/ (a sibling of the
+    skill backup). Returns the folder, or None when there was nothing to copy."""
+    home, archive = Path(home), Path(archive)
+    files = [f for f in STORE_FILES if (home / f).is_file()]
+    lex = home / "lexicon"
+    if lex.is_dir():
+        files += [f"lexicon/{r}" for r in _files_under(lex)]
+    if not files:
+        return None
+    dest = archive / f"style-lab-store-{stamp}"
+    n = 2
+    while os.path.lexists(dest):
+        dest = archive / f"style-lab-store-{stamp}-{n}"
+        n += 1
+    for rel in files:
+        d = dest / rel
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(home / rel, d)
+    return dest
+
+
+def store_warning(snapshot) -> str:
+    where = f"store snapshot: {_fmt(snapshot)}" if snapshot else "store snapshot: none (no store files were touched)"
+    return f"note: store changes (seed, registry migration) are NOT rolled back; {where}"
 
 
 def _check_no_links(target: Path, archive: Path, extra=()):
@@ -231,7 +297,7 @@ def _check_no_links(target: Path, archive: Path, extra=()):
     for p in (target, archive, *extra):
         bad += _reparse_on_path(p)
     for root in (target, *extra):
-        bad += [f"{root}/{x}" for x in find_reparse_points(root) if x != "."]
+        bad += [f"{_fmt(root)}/{x}" for x in find_reparse_points(root) if x != "."]
     if os.path.isdir(archive):
         try:
             bad += [e.path for e in os.scandir(archive) if _is_reparse(Path(e.path))]
@@ -251,46 +317,76 @@ def _remove_empty_dirs(root: Path) -> None:
                 pass
 
 
-def rollback(backup_dir: Path, target: Path, archive: Path) -> Path:
-    """Make target equal to backup_dir. The replaced state is backed up first (returned)."""
+def _restore_set(backup_dir: Path) -> set:
+    return {r for r in _files_under(backup_dir) if r.split("/")[0] != INSTALLER_DIR}
+
+
+def rollback_detail(backup_dir: Path, target: Path, archive: Path, prune: bool = False):
+    """Make target contain every file of backup_dir. Files in target that the backup lacks are left in place
+    (removed only with prune, after they are backed up). Returns (replaced-state backup, left_in_place, pruned)."""
     backup_dir, target, archive = Path(backup_dir), Path(target), Path(archive)
     if not backup_dir.is_dir() or not (backup_dir / "SKILL.md").is_file():
-        raise InstallError(f"not a style-lab backup (no SKILL.md): {backup_dir}")
+        raise InstallError(f"not a style-lab backup (no SKILL.md): {_fmt(backup_dir)}")
     _check_no_links(target, archive, extra=(backup_dir,))
+    keep = _restore_set(backup_dir)
     bak = backup(target, archive) if target.exists() else None
-    keep = set(_files_under(backup_dir))
-    if target.exists():
-        for rel in _files_under(target):
-            if rel not in keep:
-                (target / rel).unlink()  # a copy is in `bak`
+    if bak:  # a runnable copy, so the undo command works after this rollback
+        d = bak / INSTALLER_DIR
+        d.mkdir()
+        here = Path(__file__).resolve().parent
+        for name in ("install.py", "store.py", "publish_guard.py"):
+            shutil.copy2(here / name, d / name)
+    extras = sorted(r for r in (_files_under(target) if target.exists() else []) if r not in keep)
+    pruned = []
+    if prune:
+        for rel in extras:
+            (target / rel).unlink()
+            pruned.append(rel)
+        extras = []
     for rel in sorted(keep):
         _atomic_write(target / rel, (backup_dir / rel).read_bytes())
-    if target.exists():
+    if prune and target.exists():
         _remove_empty_dirs(target)
-    if _tree_hashes(target) != _tree_hashes(backup_dir):
-        raise InstallError("rollback verification failed", code=1, backup=bak)
-    return bak
+    for rel in keep:
+        if _sha(target / rel) != _sha(backup_dir / rel):
+            raise InstallError(f"rollback verification failed: {rel}", code=1, backup=bak)
+    return bak, extras, pruned
+
+
+def rollback(backup_dir: Path, target: Path, archive: Path) -> Path:
+    """Restore target from backup_dir; the replaced state is backed up first (returned)."""
+    return rollback_detail(backup_dir, target, archive)[0]
 
 
 # ---------- install ----------
 
 def _plan_file(src: Path, target: Path, rel: str, live_md):
     """(new bytes, changed?) for one managed file."""
-    if rel == "SKILL.md":
-        repo_md = _read_text(src / rel)
-        data = (merge_skill_md(repo_md, live_md) if live_md else repo_md).encode("utf-8")
+    if rel == "SKILL.md" and live_md and split_private(live_md)[1]:
+        data = merge_skill_md(_read_text(src / rel), live_md).encode("utf-8")
     else:
-        data = (src / rel).read_bytes()
+        data = (src / rel).read_bytes()       # verbatim
     dest = target / rel
     changed = not (dest.is_file() and dest.read_bytes() == data)
     return data, changed
+
+
+def _check_source_links(src: Path):
+    bad = [f"{_fmt(src)}/{n}" for n in MANAGED_ROOT_FILES if os.path.lexists(src / n) and _is_reparse(src / n)]
+    for top in MANAGED_TOP:
+        bad += [f"{_fmt(src)}/{top}/{x}" if x != "." else f"{_fmt(src)}/{top}"
+                for x in find_reparse_points(src / top)]
+    if bad:
+        raise InstallError("refusing junctions/symlinks in the source tree (nothing was changed): "
+                           + "; ".join(sorted(bad)))
 
 
 def install(src, target, *, archive, prune=False, dry_run=False) -> dict:
     src, target, archive = Path(src), Path(target), Path(archive)
     # 1. validate everything first
     if not (src / "SKILL.md").is_file() or not (src / "scripts" / "store.py").is_file():
-        raise InstallError(f"source is not a style-lab repo (needs SKILL.md and scripts/store.py): {src}")
+        raise InstallError(f"source is not a style-lab repo (needs SKILL.md and scripts/store.py): {_fmt(src)}")
+    _check_source_links(src)
     repo_md = _read_text(src / "SKILL.md")
     if split_private(repo_md)[1]:
         raise InstallError("the repo SKILL.md contains the private-extras heading; it must stay machine-local")
@@ -316,8 +412,9 @@ def install(src, target, *, archive, prune=False, dry_run=False) -> dict:
     if dry_run:
         return out
 
-    # 2. backup
-    bak = backup(target, archive) if target.exists() else None
+    # 2. backup (skipped when nothing would change)
+    need_backup = target.exists() and (bool(copied) or (prune and bool(stale)))
+    bak = backup(target, archive) if need_backup else None
     out["backup"] = bak
     private_before = {r: _sha(target / r) for r in _files_under(target) if _is_private(r)} if target.exists() else {}
 
@@ -355,7 +452,7 @@ def load_seed(seed: Path) -> dict:
     try:
         d = json.loads(seed.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
-        raise InstallError(f"seed unreadable: {seed} ({e})")
+        raise InstallError(f"seed unreadable: {_fmt(seed)} ({e})")
 
     def bad(msg):
         raise InstallError(f"seed invalid: {msg}")
@@ -373,6 +470,9 @@ def load_seed(seed: Path) -> dict:
             and all(isinstance(w, str) and isinstance(s, str) for w, s in v.items())
             for k, v in lex.items()):
         bad('"lexicon" must be {lang: {word: spoken}} with text values')
+    for lang in lex:
+        if not re.fullmatch(r"[a-z]{2,3}", lang):
+            bad(f'lexicon language "{lang}" must match [a-z]{{2,3}}')
     if "brand_md" in d and "brand_md_file" in d:
         bad('use "brand_md" or "brand_md_file", not both')
     if "brand_md" in d and not isinstance(d["brand_md"], str):
@@ -382,7 +482,11 @@ def load_seed(seed: Path) -> dict:
             bad('"brand_md_file" must be a path (text)')
         f = seed.parent / d["brand_md_file"]
         if not f.is_file():
-            bad(f'"brand_md_file" not found: {f}')
+            bad(f'"brand_md_file" not found: {_fmt(f)}')
+        try:
+            f.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            bad(f'"brand_md_file" unreadable as UTF-8 text: {_fmt(f)} ({e})')
     libs = d.get("sound_libraries", [])
     if not isinstance(libs, list):
         bad('"sound_libraries" must be a list')
@@ -498,6 +602,98 @@ def _version(src: Path):
 
 # ---------- CLI ----------
 
+def _lines(title, items, limit=40):
+    if not items:
+        return
+    print(title)
+    for r in items[:limit]:
+        print(f"  {r}")
+    if len(items) > limit:
+        print(f"  ... and {len(items) - limit} more")
+
+
+def _snapshot_for(archive: Path, backup_dir: Path):
+    p = Path(archive) / f"style-lab-store-{_stamp_of(backup_dir)}"
+    return p if p.is_dir() else None
+
+
+def _cmd_rollback(a, target, archive) -> int:
+    backup_dir = Path(os.path.abspath(a.rollback))
+    bak, left, pruned = rollback_detail(backup_dir, target, archive, prune=a.prune)
+    print(f"rolled back {_fmt(target)} from {_fmt(backup_dir)}")
+    _lines("left in place (not in the backup; use --prune to remove, they are backed up first):", left)
+    _lines("pruned (copies are in the replaced-state backup):", pruned)
+    if bak:
+        print(f"replaced state saved to {_fmt(bak)}")
+        print("to undo this rollback: "
+              + rollback_command(bak, target, script=bak / INSTALLER_DIR / "install.py"))
+    print(store_warning(_snapshot_for(archive, backup_dir)))
+    return 0
+
+
+def _cmd_install(a, target, archive, claude) -> int:
+    src = Path(os.path.abspath(a.src)) if a.src else Path(__file__).resolve().parent.parent
+    seed = Path(os.path.abspath(a.seed)) if a.seed else None
+    if seed:
+        load_seed(seed)  # validate before anything is written
+    if a.home:
+        home = Path(os.path.abspath(a.home))
+    else:
+        env = os.environ.get("STYLE_LAB_HOME")
+        home = Path(os.path.abspath(os.path.expanduser(env))) if env else claude / "style-lab"
+
+    res = install(src, target, archive=archive, prune=a.prune, dry_run=a.dry_run)
+    bak = res["backup"]
+    changed = bool(res["copied"] or res["pruned"])
+    tag = "[dry-run] " if a.dry_run else ""
+    print(f"{tag}target: {_fmt(target)}")
+    print(f"{tag}{'would copy' if a.dry_run else 'copied'} {len(res['copied'])}, unchanged {len(res['unchanged'])}")
+    _lines(f"{tag}files to update:" if a.dry_run else "updated:", res["copied"])
+    if res["stale"]:
+        verb = ("pruned:" if res["pruned"] else
+                "would prune:" if a.prune and a.dry_run else "kept (use --prune to remove):")
+        _lines(f"stale files {verb}", res["stale"])
+    if res["private_kept"]:
+        print("private extras section at the end of SKILL.md: kept")
+    v = _registry_version(home)
+    if a.dry_run:
+        if seed:
+            print(f"{tag}seed {_fmt(seed)} would be applied (missing values only)")
+        if v is not None and v < 2:
+            print(f"{tag}registry v{v} would be migrated to v2")
+        print(f"{tag}no backup, no store snapshot, nothing changed")
+        return 0
+
+    snap = None
+    if seed or (v is not None and v < 2):
+        stamp = _stamp_of(bak) if bak else dt.datetime.now().strftime("%Y%m%d-%H%M")
+        snap = snapshot_store(home, archive, stamp)
+        if snap:
+            print(f"store snapshot: {_fmt(snap)}")
+    if seed:
+        s = apply_seed(seed, home)
+        print(f"seed: added {len(s['added'])}, kept {len(s['kept'])}")
+        _lines("added:", s["added"])
+        _lines("kept (already set):", s["kept"])
+    note = migrate_registry(target, home)
+    if note:
+        print(note)
+    if changed or not (target / ".install.json").is_file():
+        store.write_json(target / ".install.json", {
+            "version": _version(src), "commit": _commit(src),
+            "installed": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "backup": _fmt(bak) if bak else None})
+    if bak:
+        print(f"backup: {_fmt(bak)}")
+        print("rollback: " + rollback_command(bak, target))
+    elif not changed:
+        print("nothing to change: already up to date, no backup written")
+    else:
+        print("fresh install, no previous version to back up")
+    print(store_warning(snap))
+    return 0
+
+
 def main(argv=None) -> int:
     store.print_utf8()
     ap = argparse.ArgumentParser(description="install, update or roll back the live style-lab skill")
@@ -514,79 +710,25 @@ def main(argv=None) -> int:
     claude = Path.home() / ".claude"
     target = Path(os.path.abspath(a.target)) if a.target else claude / "skills" / "style-lab"
     archive = Path(os.path.abspath(a.archive)) if a.archive else claude / "skills-archive"
-    src = Path(os.path.abspath(a.src)) if a.src else Path(__file__).resolve().parent.parent
-    bak = None
     try:
         if a.rollback:
-            bak = rollback(Path(os.path.abspath(a.rollback)), target, archive)
-            print(f"rolled back {target} from {a.rollback}")
-            if bak:
-                print(f"replaced state saved to {bak}")
-                print("to undo this rollback: " + rollback_command(bak, target))
-            return 0
-
-        seed = Path(os.path.abspath(a.seed)) if a.seed else None
-        if seed:
-            load_seed(seed)  # validate before anything is written
-        home = Path(os.path.abspath(a.home)) if a.home else None
-        if home is None:
-            env = os.environ.get("STYLE_LAB_HOME")
-            home = Path(os.path.abspath(os.path.expanduser(env))) if env else claude / "style-lab"
-
-        res = install(src, target, archive=archive, prune=a.prune, dry_run=a.dry_run)
-        bak = res["backup"]
-        tag = "[dry-run] " if a.dry_run else ""
-        print(f"{tag}target: {target}")
-        print(f"{tag}would copy {len(res['copied'])}, unchanged {len(res['unchanged'])}" if a.dry_run
-              else f"copied {len(res['copied'])}, unchanged {len(res['unchanged'])}")
-        for r in res["copied"]:
-            print(f"  update {r}")
-        if res["stale"]:
-            verb = "pruned" if res["pruned"] else ("would prune" if a.prune and a.dry_run else "kept (use --prune)")
-            print(f"stale files {verb}:")
-            for r in res["stale"]:
-                print(f"  {r}")
-        if res["private_kept"]:
-            print("private extras section at the end of SKILL.md: kept")
-        if a.dry_run:
-            if seed:
-                print(f"{tag}seed {seed} would be applied (missing values only)")
-            v = _registry_version(home)
-            if v is not None and v < 2:
-                print(f"{tag}registry v{v} would be migrated to v2")
-            print(f"{tag}no backup written, nothing changed")
-            return 0
-
-        if seed:
-            s = apply_seed(seed, home)
-            print(f"seed: added {len(s['added'])}, kept {len(s['kept'])}")
-            for x in s["added"]:
-                print(f"  added {x}")
-            for x in s["kept"]:
-                print(f"  kept {x}")
-        note = migrate_registry(target, home)
-        if note:
-            print(note)
-        store.write_json(target / ".install.json", {
-            "version": _version(src), "commit": _commit(src),
-            "installed": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-            "backup": str(bak) if bak else None})
-        if bak:
-            print(f"backup: {bak}")
-            print("rollback: " + rollback_command(bak, target))
-        else:
-            print("fresh install, no previous version to back up")
-        return 0
+            return _cmd_rollback(a, target, archive)
+        return _cmd_install(a, target, archive, claude)
     except InstallError as e:
         print(f"error: {e}", file=sys.stderr)
-        b = e.backup or bak
-        if b:
-            print(f"backup: {b}", file=sys.stderr)
-            print("rollback: " + rollback_command(b, target), file=sys.stderr)
+        if e.backup:
+            print(f"backup: {_fmt(e.backup)}", file=sys.stderr)
+            print("rollback: " + rollback_command(e.backup, target), file=sys.stderr)
         return e.code
     except store.LockTimeout:
         print(f"error: {store.LOCK_BUSY}", file=sys.stderr)
         return 1
+    except OSError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except (UnicodeError, ValueError) as e:
+        print(f"error: bad input: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

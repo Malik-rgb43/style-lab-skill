@@ -5,7 +5,7 @@ The proposal is written to <pack>/refs/proposal.json for the user to look at and
 
     profile_fetch.py list <url> (--pack DIR | --style SLUG) [--limit 60] [--top 20] [--pick-count 40]
                          [--tab auto|shorts|videos|all] [--cookies-from-browser BROWSER]
-                         [--max-duration SECONDS] [--json]
+                         [--max-duration SECONDS] [--timeout SECONDS] [--json]
 
 Ranking: by views when at least 60 % of the posts have views; else by engagement (likes + 2 x comments
 + 2 x reposts) when likes pass the same test; else "pick" mode (the latest posts, nothing proposed).
@@ -114,12 +114,14 @@ def _entries(node):
     return out
 
 
-def _fetch(url, *, limit, cookies_browser, run):
+def _fetch(url, *, limit, cookies_browser, run, timeout=120):
     cookies = ["--cookies-from-browser", cookies_browser] if cookies_browser else []
     cmd = [*ytdlp_cmd(), "--flat-playlist", "-J", "--playlist-end", str(limit), *cookies, url]
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     try:
-        r = run(cmd, capture_output=True, env=env)
+        r = run(cmd, capture_output=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise FetchError(f"yt-dlp timed out after {timeout:g} s", False)
     except FileNotFoundError as e:
         raise MissingTool(f"yt-dlp could not run ({e}): {_hint()}")
 
@@ -131,25 +133,42 @@ def _fetch(url, *, limit, cookies_browser, run):
         last = lines[-1] if lines else f"yt-dlp exited with {r.returncode}"
         raise FetchError(last, bool(LOGIN_RE.search(" ".join(lines[-3:]) or last)))
     try:
-        return _entries(json.loads(txt(r.stdout)))
+        data = json.loads(txt(r.stdout))
     except json.JSONDecodeError:
         raise FetchError("yt-dlp returned output that is not JSON", False)
+    if not isinstance(data, dict):
+        raise FetchError("yt-dlp returned JSON that is not an object", False)
+    return _entries(data)
 
 
-def list_posts(profile, *, limit, cookies_browser=None, run=subprocess.run, tab="auto") -> list:
-    """Raw entries of a profile. A YouTube channel without a tab in the URL reads /shorts and /videos."""
+def list_posts(profile, *, limit, cookies_browser=None, run=subprocess.run, tab="auto",
+               timeout=120, tabs_failed=None) -> list:
+    """Raw entries of a profile. A YouTube channel without a tab in the URL reads /shorts and /videos.
+
+    If one tab fails and another works, the listing continues and `tabs_failed` (a list, when given)
+    gets `{"tab", "error"}`; it only raises when every tab failed."""
     url = profile["url"]
     if profile["platform"] == "youtube" and not profile.get("tab"):
         base = re.sub(r"/(shorts|videos)$", "", url)
         tabs = ["shorts", "videos"] if tab in ("auto", "all") else [tab]
-        out = []
+        out, failed, last = [], [], None
         for t in tabs:
-            for e in _fetch(f"{base}/{t}", limit=limit, cookies_browser=cookies_browser, run=run):
+            try:
+                got = _fetch(f"{base}/{t}", limit=limit, cookies_browser=cookies_browser, run=run, timeout=timeout)
+            except FetchError as e:
+                failed.append({"tab": t, "error": str(e)})
+                last = e
+                continue
+            for e in got:
                 e = dict(e)
                 e["tab"] = t
                 out.append(e)
+        if len(failed) == len(tabs):
+            raise last
+        if tabs_failed is not None:
+            tabs_failed.extend(failed)
         return out
-    entries = _fetch(url, limit=limit, cookies_browser=cookies_browser, run=run)
+    entries = _fetch(url, limit=limit, cookies_browser=cookies_browser, run=run, timeout=timeout)
     if profile["platform"] == "youtube":
         for e in entries:
             e["tab"] = profile["tab"]
@@ -174,13 +193,20 @@ def normalise(raw: dict, platform: str):
         return None
     if platform == "instagram" and "/p/" in url and not raw.get("duration"):
         return None
+    if platform == "tiktok" and "/photo/" in url:
+        return None
     ts = _int(raw.get("timestamp"))
     date = None
     if ts is not None:
         date = dt.datetime.fromtimestamp(ts, dt.timezone.utc).date().isoformat()
     elif re.fullmatch(r"\d{8}", str(raw.get("upload_date") or "")):
         d = str(raw["upload_date"])
-        date = f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        try:
+            day = dt.date(int(d[:4]), int(d[4:6]), int(d[6:]))
+            date = day.isoformat()
+            ts = int(dt.datetime(day.year, day.month, day.day, tzinfo=dt.timezone.utc).timestamp())
+        except ValueError:
+            pass
     thumbs = [t for t in (raw.get("thumbnails") or []) if isinstance(t, dict) and t.get("url")]
     thumb = (max(thumbs, key=lambda t: (t.get("width") or 0) * (t.get("height") or 0))["url"]
              if thumbs else raw.get("thumbnail"))
@@ -200,19 +226,23 @@ def _by_newest(posts):
 
 
 def rank(posts, *, top=20, pick_count=40, max_duration=None) -> dict:
-    seen, uniq = set(), []
+    richness = lambda p: sum(p[k] is not None for k in ("views", "likes", "comments", "reposts"))  # noqa: E731
+    pos, uniq = {}, []
     for p in posts:
-        if p["id"] not in seen:
-            seen.add(p["id"])
+        if p["id"] not in pos:
+            pos[p["id"]] = len(uniq)
             uniq.append(p)
+        elif richness(p) > richness(uniq[pos[p["id"]]]):
+            uniq[pos[p["id"]]] = p
     warnings = []
-    if len(uniq) < MIN_POSTS:
-        warnings.append(f"only {len(uniq)} video posts found (fewer than 12): the style will have a thin library")
     if max_duration is not None:
         kept = [p for p in uniq if p["duration_s"] is None or p["duration_s"] <= max_duration]
         if len(kept) < len(uniq):
-            warnings.append(f"{len(uniq) - len(kept)} posts longer than {max_duration} s were left out")
+            warnings.append(f"{len(uniq) - len(kept)} posts longer than {max_duration:g} s were left out")
         uniq = kept
+    if len(uniq) < MIN_POSTS:
+        warnings.append(
+            f"only {len(uniq)} video posts found (fewer than {MIN_POSTS}): the style will have a thin library")
     n = len(uniq)
     views_ok = n and sum(1 for p in uniq if (p["views"] or 0) > 0) / n >= METRIC_SHARE
     likes_ok = n and sum(1 for p in uniq if (p["likes"] or 0) > 0) / n >= METRIC_SHARE
@@ -229,7 +259,7 @@ def rank(posts, *, top=20, pick_count=40, max_duration=None) -> dict:
     else:
         mode = "pick"
         warnings.append("no usable view or like counts: pick mode (latest posts, nothing proposed; the user chooses)")
-        ordered = _by_newest(uniq) if all(p["timestamp"] is not None for p in uniq) else uniq
+        ordered = _by_newest(uniq)  # dated posts newest first, undated ones after, in playlist order
         entries = [{**p, "rank": i, "score": None, "proposed": False} for i, p in enumerate(ordered[:pick_count], 1)]
     return {"mode": mode, "entries": entries, "warnings": warnings}
 
@@ -254,7 +284,10 @@ def _resolve_pack(args):
     if args.pack:
         return Path(args.pack)
     import styles
-    s = styles.find(styles.load_registry(), args.style)
+    try:
+        s = styles.find(styles.load_registry(), args.style)
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as e:
+        raise BadInput(f"cannot read the style registry: {e}")
     if not s:
         raise BadInput(f"style not found: {args.style}")
     if not s.get("pack"):
@@ -263,10 +296,12 @@ def _resolve_pack(args):
 
 
 def cmd_list(args) -> int:
+    tabs_failed = []
     try:
         pack = _resolve_pack(args)
         profile = parse_profile_url(args.url)
-        raw = list_posts(profile, limit=args.limit, cookies_browser=args.cookies_from_browser, tab=args.tab)
+        raw = list_posts(profile, limit=args.limit, cookies_browser=args.cookies_from_browser, tab=args.tab,
+                         timeout=args.timeout, tabs_failed=tabs_failed)
     except BadInput as e:
         print(f"bad input: {e}", file=sys.stderr)
         return 2
@@ -284,14 +319,24 @@ def cmd_list(args) -> int:
         print("no video posts found on this profile", file=sys.stderr)
         return 1
     res = rank(posts, top=args.top, pick_count=args.pick_count, max_duration=args.max_duration)
+    if not res["entries"]:
+        print(f"no video posts left after --max-duration {args.max_duration:g}", file=sys.stderr)
+        return 1
+    for t in tabs_failed:
+        res["warnings"].append(f"tab {t['tab']} could not be read ({t['error']}): the list may be incomplete")
     proposal = {
         "schema": SCHEMA, "url": profile["url"], "platform": profile["platform"], "handle": profile["handle"],
         "fetched": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "mode": res["mode"], "total_posts": len({p["id"] for p in posts}),
-        "entries": res["entries"], "warnings": res["warnings"], "selected": [], "consent": None,
+        "entries": res["entries"], "warnings": res["warnings"], "tabs_failed": tabs_failed,
+        "selected": [], "consent": None,
     }
     out = pack / "refs" / "proposal.json"
-    store.write_json(out, proposal)
+    try:
+        store.write_json(out, proposal)
+    except OSError as e:
+        print(f"bad input: cannot write {out}: {e}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(proposal, ensure_ascii=False, indent=2))
     else:
@@ -303,6 +348,13 @@ def cmd_list(args) -> int:
     return 0
 
 
+def _limit(v):
+    n = int(v)
+    if not 1 <= n <= 200:
+        raise argparse.ArgumentTypeError("must be between 1 and 200")
+    return n
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -311,7 +363,8 @@ def main(argv=None) -> int:
     g = a.add_mutually_exclusive_group(required=True)
     g.add_argument("--pack")
     g.add_argument("--style")
-    a.add_argument("--limit", type=int, default=60)
+    a.add_argument("--limit", type=_limit, default=60, help="posts to read per tab, 1-200")
+    a.add_argument("--timeout", type=float, default=120, help="seconds before a yt-dlp call is stopped")
     a.add_argument("--top", type=int, default=20)
     a.add_argument("--pick-count", type=int, default=40)
     a.add_argument("--tab", choices=("auto", "shorts", "videos", "all"), default="auto")

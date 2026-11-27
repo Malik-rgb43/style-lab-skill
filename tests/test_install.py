@@ -46,7 +46,13 @@ def make_live(target, skill="# old skill\n\nold body\n" + "\n" + OLD_PRIVATE):
 
 
 def archive_dirs(archive):
-    return sorted(p for p in Path(archive).glob("style-lab-*")) if Path(archive).is_dir() else []
+    if not Path(archive).is_dir():
+        return []
+    return sorted(p for p in Path(archive).glob("style-lab-*") if not p.name.startswith("style-lab-store-"))
+
+
+def store_snaps(archive):
+    return sorted(Path(archive).glob("style-lab-store-*")) if Path(archive).is_dir() else []
 
 
 def test_managed_files_selection(tmp_path):
@@ -85,8 +91,12 @@ def test_update_backs_up_and_keeps_private(paths, capsys):
     for p, b in private_before.items():
         assert (target / p).read_bytes() == b
         assert (bak / p).read_bytes() == b
-    live = (target / "SKILL.md").read_text(encoding="utf-8")
-    repo = (REPO_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    live = (target / "SKILL.md").read_bytes().decode("utf-8").replace("
+", "
+")
+    repo = (REPO_ROOT / "SKILL.md").read_bytes().decode("utf-8").replace("
+", "
+")
     assert live.startswith(repo.rstrip("\n"))
     assert live.count(install.PRIVATE_HEADING) == 1
     assert live.endswith(OLD_PRIVATE)
@@ -104,8 +114,11 @@ def test_second_install_no_duplicate_section(paths, eol):
     assert run(target, archive) == 0
     live = (target / "SKILL.md").read_bytes()
     assert live == first
-    assert live.decode("utf-8").count(install.PRIVATE_HEADING) == 1
-    assert live.decode("utf-8").endswith(OLD_PRIVATE)
+    text = live.decode("utf-8").replace("
+", "
+")     # the file keeps the repo's own endings
+    assert text.count(install.PRIVATE_HEADING) == 1
+    assert text.endswith(OLD_PRIVATE)
 
 
 def test_split_and_merge_units():
@@ -187,7 +200,9 @@ def test_hebrew_target_path(tmp_path):
     archive = tmp_path / "ארכיון"
     make_live(target)
     assert run(target, archive) == 0
-    assert (target / "SKILL.md").read_text(encoding="utf-8").endswith(OLD_PRIVATE)
+    assert (target / "SKILL.md").read_bytes().decode("utf-8").replace("
+", "
+").endswith(OLD_PRIVATE)
     assert len(archive_dirs(archive)) == 1
     assert (target / ".install.json").is_file()
 
@@ -255,24 +270,164 @@ def test_migrates_v1_registry(paths):
     assert list(home.glob("styles.json.bak-*"))
 
 
-def test_rollback_restores(paths, capsys):
+def test_rollback_restores_keeps_extras_and_undo_works(paths, capsys):
     target, archive = paths
     make_live(target)
-    (target / "scripts" / "old_tool.py").write_bytes(b"# stale\n")
     pre = tree(target)
     assert run(target, archive) == 0
     out = capsys.readouterr().out
     (bak,) = archive_dirs(archive)
     cmd = install.rollback_command(bak, target)
     assert cmd in out and f'"{bak}"' in cmd and f'"{target}"' in cmd
-    assert tree(target) != pre
+    assert "NOT rolled back" in out
+    after_install = tree(target)
 
-    assert run(target, archive, "--prune") == 0     # a second state to throw away
     assert install.main(["--rollback", str(bak), "--target", str(target), "--archive", str(archive)]) == 0
-    assert tree(target) == pre
-    assert len(archive_dirs(archive)) == 3            # first backup, second backup, replaced state
+    rout = capsys.readouterr().out
+    assert "NOT rolled back" in rout and "store snapshot" in rout
+    assert "left in place (not in the backup" in rout
+    now = tree(target)
+    for rel, data in pre.items():                       # everything from the backup is back
+        assert now[rel] == data
+    assert (target / "scripts" / "install.py").exists()  # an extra from the install stays
+    assert len(archive_dirs(archive)) == 2
+    replaced = [b for b in archive_dirs(archive) if b != bak][0]
+    copy = replaced / install.INSTALLER_DIR / "install.py"
+    assert copy.is_file() and f'"{copy}"' in rout        # the undo command points at a script that exists
+    assert "undo this rollback" in rout
+
+    # undo: restoring the replaced state brings the installed files back, without the helper copy
+    assert install.main(["--rollback", str(replaced), "--target", str(target), "--archive", str(archive)]) == 0
+    now = tree(target)
+    for rel, data in after_install.items():
+        if not rel.endswith(".install.json"):
+            assert now[rel] == data
+    assert not (target / install.INSTALLER_DIR).exists()
+
     assert install.main(["--rollback", str(archive / "nope"), "--target", str(target),
                          "--archive", str(archive)]) == 2
+
+
+def test_rollback_prune_removes_extras_after_backup(paths, capsys):
+    target, archive = paths
+    make_live(target)
+    assert run(target, archive) == 0
+    (bak,) = archive_dirs(archive)
+    capsys.readouterr()
+    assert install.main(["--rollback", str(bak), "--target", str(target), "--archive", str(archive),
+                         "--prune"]) == 0
+    assert not (target / "scripts" / "install.py").exists()
+    replaced = [b for b in archive_dirs(archive) if b != bak][0]
+    assert (replaced / "scripts" / "install.py").exists()
+
+
+def test_install_prints_store_snapshot_before_seed(paths, capsys):
+    target, archive = paths
+    home = Path(os.environ["STYLE_LAB_HOME"])
+    (home / "settings.json").parent.mkdir(parents=True)
+    (home / "settings.json").write_text('{"keep": 1}', encoding="utf-8")
+    assert run(target, archive, "--seed", FIXTURES / "seed_example.json") == 0
+    out = capsys.readouterr().out
+    (snap,) = store_snaps(archive)
+    assert str(snap) in out and "NOT rolled back" in out
+    assert json.loads((snap / "settings.json").read_text(encoding="utf-8")) == {"keep": 1}
+    assert snap.parent == archive                         # a sibling of the skill backups
+
+
+def test_nothing_to_change_skips_backup(paths, capsys):
+    target, archive = paths
+    assert run(target, archive) == 0
+    rec = (target / ".install.json").read_bytes()
+    assert run(target, archive) == 0
+    assert archive_dirs(archive) == []
+    assert (target / ".install.json").read_bytes() == rec
+    assert "nothing to change" in capsys.readouterr().out
+
+
+def test_repo_endings_kept_with_private_section(paths, tmp_path):
+    src = tmp_path / "src"
+    (src / "scripts").mkdir(parents=True)
+    (src / "scripts" / "store.py").write_text("", encoding="utf-8")
+    (src / "SKILL.md").write_bytes(b"# repo\r\n\r\nbody\r\n")
+    target, archive = paths
+    make_live(target)
+    assert install.main(["--src", str(src), "--target", str(target), "--archive", str(archive)]) == 0
+    live = (target / "SKILL.md").read_bytes()
+    assert live.startswith(b"# repo\r\n\r\nbody\r\n\r\n" + install.PRIVATE_HEADING.encode())
+    assert b"\n" not in live.replace(b"\r\n", b"")
+
+
+def test_bad_utf8_skill_exit2_no_traceback(paths, capsys):
+    target, archive = paths
+    make_live(target)
+    (target / "SKILL.md").write_bytes(b"\xff\xfe\x00bad")
+    before = tree(target, archive)
+    assert run(target, archive) == 2
+    assert tree(target, archive) == before
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_oserror_exits_1_one_line(paths, monkeypatch, capsys):
+    target, archive = paths
+    make_live(target)
+
+    def boom(*a, **k):
+        raise PermissionError("denied")
+    monkeypatch.setattr(install.shutil, "copytree", boom)
+    assert run(target, archive) == 1
+    err = capsys.readouterr().err
+    assert "denied" in err and "Traceback" not in err
+
+
+def test_seed_lang_validated(tmp_path):
+    seed = tmp_path / "s.json"
+    seed.write_text(json.dumps({"schema": install.SEED_SCHEMA, "lexicon": {"../x": {"a": "b"}}}),
+                    encoding="utf-8")
+    with pytest.raises(install.InstallError):
+        install.load_seed(seed)
+    seed.write_text(json.dumps({"schema": install.SEED_SCHEMA, "lexicon": {"he": {"Word": "b"}}}),
+                    encoding="utf-8")
+    home = tmp_path / "h"
+    install.apply_seed(seed, home)
+    assert json.loads((home / "lexicon" / "he.json").read_text(encoding="utf-8")) == {"word": "b"}
+
+
+def _mini_src(tmp_path):
+    src = tmp_path / "src"
+    (src / "scripts").mkdir(parents=True)
+    (src / "references").mkdir()
+    (src / "scripts" / "store.py").write_text("", encoding="utf-8")
+    (src / "references" / "a.md").write_text("a", encoding="utf-8")
+    (src / "SKILL.md").write_text("# repo\n", encoding="utf-8")
+    return src
+
+
+def test_source_reparse_point_refused_detector(paths, tmp_path, monkeypatch, capsys):
+    src = _mini_src(tmp_path)
+    target, archive = paths
+    real = install._is_reparse
+    monkeypatch.setattr(install, "_is_reparse", lambda p: Path(p).name == "a.md" or real(p))
+    assert install.main(["--src", str(src), "--target", str(target), "--archive", str(archive)]) == 2
+    err = capsys.readouterr().err
+    assert "source tree" in err and "a.md" in err
+    assert not target.exists()
+
+
+def test_source_real_junction_refused(paths, tmp_path, capsys):
+    src = _mini_src(tmp_path)
+    target, archive = paths
+    link = src / "references" / "lnk"
+    _make_link(link, tmp_path / "elsewhere")
+    try:
+        assert install.main(["--src", str(src), "--target", str(target), "--archive", str(archive)]) == 2
+        assert "lnk" in capsys.readouterr().err
+        assert not target.exists()
+        assert not any(f.startswith("references/lnk") for f in install.managed_files(src))
+    finally:
+        try:
+            os.rmdir(link)
+        except OSError:
+            os.unlink(link)
 
 
 def test_repo_skill_with_private_heading_refused(paths, tmp_path):
