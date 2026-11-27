@@ -27,7 +27,7 @@ so group by note. The map is saved in `~/.claude/style-lab/capabilities.json` (s
 `references/store-schema.md`); a later local run keeps the session block.
 
 Stages in the map (`STAGES` in `doctor.py`) and their Hebrew names for the table:
-`train` אימון, `train_profile` פרופיל, `cut` חיתוך (Hebrew), `cut_other_languages` חיתוך בשפות אחרות, `frames` פריימים, `build` בנייה, `3d`
+`train` אימון, `train_profile` פרופיל, `motion` תנועה, `ideas` בנק רעיונות, `cut` חיתוך (Hebrew), `cut_other_languages` חיתוך בשפות אחרות, `frames` פריימים, `build` בנייה, `3d`
 תלת-ממד, `cloud_asr` תמלול בענן (paid), `publish` פרסום. Show the user one short Hebrew table:
 per stage what will be used, what is missing (and the hint to add it), and what costs money
 (cloud ASR, Higgsfield or other generation credits, paid image models, stock). Every later step
@@ -120,6 +120,17 @@ sticker that HTML or 3D cannot make well:
   sequence (prefer it over GIF inside a composition);
 - log each image in `SOURCES.md` with the model and the prompt.
 Ask before any paid generation and say the cost if it is known.
+
+## AI generation inside the build (stage B)
+Generation tools are chosen by capability, from the style's recipes (`recipes.json` `tools`:
+capability, level, fallback) and the capability map: `image_generator` (Higgsfield, Nano Banana, GPT
+Image, Flux, Seedream, Imagen, Firefly ...), `video_generator` (Higgsfield, Seedance, Kling, Veo, Sora,
+Runway, Hailuo ...), `stock_footage` (Pexels, Pixabay). `genprep.py` picks the first connected tool; a
+missing required one stops with the recipe's fallback (stock, a code-built scene).
+Prices: the tool's own cost-estimate call when it has one, else the owner; recorded with
+`spend.py price set ... --source tool-estimate|owner|site` (a price older than 30 days is flagged).
+The scripts never call a paid tool or the network; Claude calls the tool only for an item
+`spend.py next` released, with that exact prompt, model and seed, then `spend.py record`.
 
 ## Speaker cut-out (optional)
 A person matte (any background-removal model) gives a sharp cut-out over a clean plate (the

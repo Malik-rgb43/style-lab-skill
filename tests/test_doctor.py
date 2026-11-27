@@ -278,3 +278,20 @@ def test_ocr_and_yunet_checks(home, everything, monkeypatch):
     p.write_bytes(b"x" * 10)
     doctor.main([])
     assert caps()["local"]["model_yunet"]["ok"] is True
+
+
+def test_motion_and_ideas_stages(home, everything, monkeypatch):
+    def which(n):
+        return None if n in ("hyperframes",) else f"/bin/{n}"
+    monkeypatch.setattr(doctor.shutil, "which", which)
+    FakePopen.rc = 1  # npx --no hyperframes fails: not cached
+    doctor.main([])
+    st = caps()["stages"]
+    assert "hyperframes" in st["motion"]["missing"]
+    assert st["motion"]["uses"] == ["node", "hyperframes", "ffmpeg", "ffprobe"]
+    assert st["ideas"]["uses"] == ["ffmpeg", "ffprobe"] and st["ideas"]["missing"] == []
+
+
+def test_cloud_asr_preapproved_setting(home):
+    import store
+    assert store.settings()["cloud_asr_preapproved"] is False

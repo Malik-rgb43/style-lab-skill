@@ -25,8 +25,12 @@ reinstalling the skill never wipes a style, a client or a setting:
   lang/<code>.json              a language profile that overrides the built-in one (`lang.py add`)
   models/                       small model files fetched with a yes (`fetch_model.py`), e.g. YuNet
 ```
-Later versions add `ideas/`, `projects.json` and `studio/` here; nothing in the skill folder
-holds user data. Footage, builds and renders stay in the user's own project folders.
+  projects.json                 every edit project {id, title, path, style, client, stage, status, clip, last_draft}
+  prices.json                   {"version": 1, "prices": {"tool|model|unit": {cost, currency, unit, source, date}}}
+  ideas/index.json              the ideas bank {"version": 1, "next_id", "ideas": [Idea]}; ideas/<id>/ meta.json,
+                                still, clip.mp4 (<= 4 s, 720p), snippet.html; ideas/_removed/<id>/ (archived)
+  vendor/gsap.min.js            optional local GSAP for frame scaffolds
+Nothing in the skill folder holds user data. Footage, builds and renders stay in the user's own project folders.
 
 **Style pack and project folders** (where phase A and phase B write):
 ```
@@ -37,6 +41,36 @@ holds user data. Footage, builds and renders stay in the user's own project fold
 ~/.claude/skills/style-<slug>/SKILL.md   the generated style skill
 ```
 `refs/` videos are local study copies, never published.
+
+**Edit project files** (stage B, `references/stage-b-edit.md`; all created on first use):
+
+| File | Written by | Holds |
+|---|---|---|
+| `plan.json` | Claude + `plan.py` | beats and options (`references/board-and-plan-spec.md`) |
+| `shown.json` | `project.py` | `{items: [{beat, step, set, id, sig, idea_id?, date}], sets: {"plan:3": n}, owner_ok_more: [...]}` |
+| `picks.json`, `picks.logged.json` | `picks.py`, the Studio, `pickpage.py` | the owner's picks (shape below); which are already in taste |
+| `frames.json` | `frames.py` | `{beats: {"3": {sets: [{set, variants: [{id, title, composition, treatment, wild, concept_key, sig, at_s, still, dir, ai_items, idea_id}]}]}}}` |
+| `motion-variants.json` | `motion.py` | `{mode, overrides, beats: {"3": {window: [t0, t1], sets: [{set, variants: [{id, entrance, ease, timing, camera, wild, sig, curve_source, design_hash, clip, dir}]}]}}}` |
+| `gen/queue.json` | `genprep.py`, `spend.py add` | `{items: [{id, beat, stage, variant, recipe, how, tool, model, kind, units, unit, prompt, negative, seed, params, camera_curve, attempt, retry_of, status, batch, file, cost, what}]}`; status queued, approved, in_flight, generated, failed, look_pass, look_fail, placed, needs_batch |
+| `gen/log.jsonl` | `spend.py record`, `lookcheck.py` | one line per paid call (`type: gen`: prompt, model, seed, cost, file, sha256) and per look check (`type: look`) |
+| `gen/refcache/` | `lookcheck.py` | reference frames for the look check (local only) |
+| `spend.json` | `spend.py` | `{batches: [{id, items, base_total, retry_allowance, retry_total, total, currency, prices_used, snapshot, status: draft|superseded|approved|over|closed, owner_words, approved_at, spent, retries_used}]}` |
+| `build/state.json` | `buildcheck.py` | `{round, captions, beats: {"3": {started, built, compared, snippet, params, title, kind, beat_types}}, override, checklist: {pre, post}, drafts}` |
+| `review-checklist.md` | `buildcheck.py checklist` | the checklist as text |
+| `closing.json` | `ideas.py from-final` / `commit-final` | the beats offered to the bank, what was added or refused |
+
+### Project room files (read by the Studio)
+The Studio reads `plan.json`, `frames.json`, `motion-variants.json`, `shown.json`, `build/state.json` and
+`spend.json`, and reads and writes `picks.json` in exactly this shape (the pages and the chat write it too):
+```json
+{"version": 1, "project": "<id>", "updated": "ISO", "source": "studio|page|chat",
+ "plan":   {"3": {"picked": "B03-p2", "own": "", "more": false, "decided_by": "owner", "sig": "plan:..."}},
+ "frames": {"3": {"picked": "B03-f1-b", "more": false, "decided_by": "owner"}},
+ "motion": {"mode": "three", "overrides": {"5": "one"},
+            "beats": {"3": {"picked": "B03-m1-a", "more": false, "decided_by": "owner"}}},
+ "notes":  {"3": "free text"}}
+```
+Writes go through `store.update_json` (locked, atomic), so the Studio and the chat never lose a pick.
 
 **Training files** (stage A, `references/stage-a-train.md`). Per reference `<pack>/analysis/<id>/`:
 
@@ -208,7 +242,9 @@ style, so styles sharing a pack keep separate blocks). Each written file gets a
 `<file>.bak-YYYYMMDD` backup once a day.
 
 ## settings.json
-`{"auto_promote": false, "sound_libraries": []}`. `sound_libraries` is the owner's SFX and music
+`{"auto_promote": false, "sound_libraries": [], "cloud_asr_preapproved": false}`. `cloud_asr_preapproved`
+is set to true only on the owner's own machine at his request: cloud ASR then runs without a spend
+estimate; everywhere else it goes through `spend.py`. `sound_libraries` is the owner's SFX and music
 folders, `[{name, path, kinds}]`, managed by `assets_log.py sound-lib add|list|remove`. `lessons.py settings auto_promote=true` (only on the owner's request)
 turns proposed lessons into rules at once, without the conflict check; `lessons.py settings`
 prints the values.
@@ -221,7 +257,8 @@ client:
  "picked": "b03-opt2", "rejected": ["b03-opt1", "b03-opt3"],
  "tags": {"picked": ["warm", "paper"], "rejected": ["neon"]}, "note": ""}
 ```
-`step` is `plan` | `frames` | `motion` | `palette` | `idea`. `taste.py summary` reads the last 50
+`step` is `plan` | `frames` | `motion` | `palette` | `idea`. Lines written by `picks.py sync` also carry
+`"sigs": {"picked": "<sig>", "rejected": ["<sig>", ...]}`, which the no-repeat rule reads. `taste.py summary` reads the last 50
 entries (`--last`), optionally of one style (`--style`), and returns `prefers`, `avoids` and
 `rejected_twice`.
 

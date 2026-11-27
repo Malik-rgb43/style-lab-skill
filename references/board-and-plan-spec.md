@@ -81,6 +81,23 @@ more in several calls to the same `url`.
   script, chosen design with category, scene type and ref, the design text, and "My notes").
   The user pastes that back with the build prompt.
 
+### Plan additions (style-lab v2, `plan.py`)
+Per beat: `beat_types` (list), `message_type` (optional, for the creator's way), `lang`, `sets`,
+`recommended` (option id), `taste_decided` (bool), `taste_note`. Per option: `id` (`B03-p<k>`), `set`,
+`source` (law | idea | invention), `law` (`"<when>-><then>"` or null), `idea_id`, `recipe`, `wild`,
+`concept_key`, `tags`, `fit` (0..1), `design_q` {point, real_thing, invisible, reference, new},
+`translation`, `message`, `why_this`; the script writes `sig` and `score`. `pick` still holds the
+recommended option's `key`, so the page works as before. The page shows "קלף פראי" on the wild card and
+the source ("חוק של הסגנון", "מבנק הרעיונות", "רעיון חדש").
+
+The copy text now starts with machine lines that `pickpage.py import` reads, then the readable plan:
+```
+# בחירות · <title> · תוכנית
+פרויקט: <project id>
+B1: B01-p2
+B2: B02-p1 | הערה: <the owner's note>
+```
+
 ## Checks before publishing either page
 - The JSON parses (`python -c "import json,re,sys; …"` or load it in the page once).
 - Every `thumb` path exists in the `files` map.

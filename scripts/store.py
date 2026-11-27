@@ -182,7 +182,7 @@ def slugify(name: str, taken: set) -> str:
 
 # <home>/settings.json: the single home of user settings and their defaults.
 # auto_promote: lessons.py; sound_libraries: [{name, path, kinds: [sfx|music|ambience]}].
-SETTINGS_DEFAULTS = {"auto_promote": False, "sound_libraries": []}
+SETTINGS_DEFAULTS = {"auto_promote": False, "sound_libraries": [], "cloud_asr_preapproved": False}
 
 
 def settings() -> dict:

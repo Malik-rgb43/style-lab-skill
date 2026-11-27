@@ -96,3 +96,102 @@ the script exits 3 naming the model, its size and `--allow-download`.
 If the stack is missing and the user will not install it, say so in Hebrew, name the cost (long
 pauses, clipped syllables), and use `cut_silences.py` + `verify_cut.py` only after an explicit yes.
 Both print: "fallback: the precise cut pipeline (align.py, cut.py, check_cut.py) was skipped".
+
+## B2-B7: plan, cost gate, frames, motion, picks, build, ideas
+
+The project folder is `<project>/edits/<clip>/` (`project.py init` registers it). Every command below is
+`python scripts/<name>.py`; check flags with `--help`. Picks come from the owner; "אתה מחליט" picks are
+yours and are never logged to taste.
+
+### B2. The plan (3 concepts per beat)
+1. Read the rules that apply: `lessons.py rules --style <s> --client <c>`.
+2. Split the script into beats in `plan.json` (`n`, `start`, `end`, `script`, `beat_types` such as
+   `list`, `story`, `person`; optionally `message_type` for the creator's way). Times are on the
+   edit-ready clip; the beats cover it end to end.
+3. `plan.py candidates <project>`: per beat the laws that fire (word triggers: number, date,
+   question), banked ideas that fit, the creator's ideas (`creator.py ideate`), and the blocked
+   concepts (already shown, rejected by the client, used for the client, picked for another beat).
+4. Write 3 options per beat into `options`: one from a law when a rule-candidate law fires
+   (`source: law`, `law: "<when>-><then>"`), one from the bank when an idea fits (`source: idea`,
+   `idea_id`), and one new invention as the wild card (`source: invention`, `wild: true`). Each
+   option answers the five design questions (`design_q`: point, real_thing, invisible, reference,
+   new; craft-rules §1) and has `concept_key`, `fit` (0..1, your judgement), `tags`, and `recipe`
+   when it needs AI generation.
+5. `plan.py finalize <project>` (it runs `check`; fix every line it prints), then the page: the
+   Studio when it runs, else `pickpage.py export <project> --step plan --out <html>` and publish it
+   with the `files` map it prints. Say in Hebrew when the client's taste decided a recommendation
+   ("הטעם של הלקוח הכריע").
+6. "עוד רעיונות" for a beat: `plan.py more <project> --beat N`, at most 3 extra sets; after that the
+   script refuses and you ask the owner (`--owner-ok-more --owner-words "<his words>"`).
+
+### The cost gate (right after the plan picks, before any frame)
+1. For every AI beat: `genprep.py add <project> --beat N --stage frames --recipe <kind> --variant a`
+   (and b, c: one item per planned frame variant) and one `--stage build` item. Slots the template
+   needs come from `--slot name=value`; words, palette, look and aspect fill themselves.
+2. Prices: call the tool's own cost-estimate tool when the capability map has one, else ask the
+   owner. Record each with `spend.py price set --tool --model --unit --cost --currency --source`.
+3. `spend.py estimate <project>`: show the one Hebrew table for the whole video (base + retry
+   allowance, per currency). Wait for the owner's yes, then
+   `spend.py approve <project> --batch S01 --owner-words "<his exact message>" --total <the total he saw>`.
+4. Loop: `spend.py next <project>` releases one item → you call the MCP/CLI tool with exactly that
+   prompt, negative, model, seed and params → save the file under `gen/files/` →
+   `spend.py record <project> --item G001 --file gen/files/<f> --cost <c> --model <m> --seed <s>`.
+   Never call a paid tool for an item `next` did not release. If the `paid-spend-gate` skill (or an
+   equivalent) is in the session, follow it too. Cloud ASR is a paid call as well: `spend.py add`,
+   unless `settings.json` has `cloud_asr_preapproved: true` (set only on the owner's own machine,
+   on his request).
+5. Look check of every generated image: `lookcheck.py <project> --item G001` (metrics against the
+   reference frames and the recipe), then LOOK at the image yourself and give your verdict:
+   `--claude pass|fail --why "<what you saw>"`. On a fail: `genprep.py refine <project> --item G001
+   --add "..." --drop "..." --why "..."`, then `next` again. Past the retry allowance: a new
+   estimate and a new yes.
+
+### B3. Frames: 3 real stills per beat
+1. `frames.py new-set <project> --beat N` makes `frames/B0N/s1/{a,b,c}/` from the scaffold with the
+   client's tokens (`tokens.css`), the beat's words (`words.json`) and a `variant.json` to fill.
+2. Build each variant's `index.html`: the style kit first, or a banked idea
+   (`ideas.py render <id> --client <c> --out <file>`); without a kit, from the library refs. Fill
+   `variant.json` (`title`, `composition`, `treatment`, one `wild: true`). AI beats use only
+   `gen/files/` images whose item passed the look check. Details: `references/frames-and-motion.md`.
+3. `frames.py check <project> --beat N --set 1` until clean, then `frames.py snap ...`, then the page
+   (`pickpage.py export --step frames`). "עוד רעיונות" = `frames.py new-set --beat N --more`.
+
+### B4. Motion
+1. Ask once, word for word: "3 גרסאות אנימציה לכל פריים, או להמשיך עם אחת?". Then
+   `motion.py mode <project> three|one` (and `--beat N` for each beat the owner names otherwise).
+2. Per beat: `motion.py variants <project> --beat N` (copies the picked frame, writes
+   `motion-params.js`: entrance, ease, timing, camera from the style's measured motion), make the
+   beat's HTML read `motion-params.js` (`window.SL_MOTION`), then `motion.py check`, `motion.py
+   render` (2-4 s drafts) and the page (`--step motion`). In mode one there is no render and the
+   pick is yours.
+
+### Picks
+"בחרתי" in the Studio or on a page → `picks.py sync <project>` (logs the owner's picks to taste once,
+counts idea picks), then act on its "עוד רעיונות" and own-design lists. A pasted copy text →
+`pickpage.py import <project> --text-file <txt>`. A pick in chat → `picks.py pick <project> --step
+plan|frames|motion --beat N --id <id>`. `picks.py validate` refuses a frames pick before the plan
+pick, a motion pick before the frames pick, and one concept on two beats.
+
+### B5. Build gates and one draft
+1. Captions for the whole video first, then `buildcheck.py captions-done <project>`.
+2. Per beat in plan order: `buildcheck.py start-beat <project> --beat N`, build it,
+   `buildcheck.py beat-done <project> --beat N [--snippet build/bN.html --params params.json]` (a
+   snippet with parameters makes the beat eligible for the ideas bank at B7).
+3. The first 2 non-a-roll beats: snapshot each at its frame's `at_s` and run
+   `buildcheck.py compare <project> --beat N --snapshot <png>` until both pass (SSIM ≥ 0.60, palette
+   ΔE ≤ 10). Later beats are refused until then (`--override "<reason>"` only on the owner's say).
+4. AI beats: `genprep.py animate <project> --from G00x` (only a still that passed), the cost gate,
+   the look check on the clip; apply the recipe's camera curve (`camera_curve.custom_ease`) to the
+   camera layer in HyperFrames.
+5. `buildcheck.py checklist <project>`, tick each item after checking it (`tick --phase pre --n K`),
+   then `buildcheck.py draft <project> --file <mp4>` (one per round), then
+   `prove.py qa <pack> --build <draft>`, the post ticks, then `buildcheck.py present <project>`.
+
+### B6. Review rounds
+As in `references/review-loop.md` and the learning loop; `buildcheck.py next-round <project>` at the
+start of every round.
+
+### B7. Final and the ideas bank
+The final render only on the owner's explicit OK. Then `ideas.py from-final <project>` shows the
+pre-ticked beats; the owner unticks what he does not want banked;
+`ideas.py commit-final <project> --final <mp4> [--untick 2,5]` banks the rest and closes the project.

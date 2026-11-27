@@ -37,6 +37,8 @@ STAGES = {
     "cut_other_languages": ["ffmpeg", "torch", "torchaudio", "faster_whisper",
                             "model_mms_fa", "model_whisper_multi"],
     "frames": ["node", "hyperframes"],
+    "motion": ["node", "hyperframes", "ffmpeg", "ffprobe"],
+    "ideas": ["ffmpeg", "ffprobe"],
     "build": ["node", "hyperframes", "ffmpeg"],
     "3d": ["blender"],
     "cloud_asr": ["RUNPOD_API_KEY", "RUNPOD_ENDPOINT_ID"],

@@ -143,43 +143,29 @@ Run `doctor.py --style <slug>` before planning; a missing `required` connection 
 5. `check_cut.py <final stem>` (for vsl the tighten output) until clean or every item is
    explained; only then planning, on `<final stem>.mp4` and `<final stem>.words.json`. `cut_silences.py`/`verify_cut.py`: fallback, user must accept.
 
-### B2. The edit plan (show it unasked)
-First read the rules that apply: `python scripts/lessons.py rules --style <s> --client <c>`
-(`references/learning-loop.md` §7). Split the script into **beats** (one idea or line each).
-For each beat, three designs from the style's library, placed the way the references place
-them, one marked **ההמלצה שלי**. Each option: title, category, scene type (פנים + כתוביות /
-שכבה מעל הפנים / סצנה מלאה), a concrete description, `Ref V##-A##`; each beat: why it fits
-(cite references, hand rule numbers, learned rules by lesson id such as L0007) and a camera
-note. Design each beat with the five questions in `references/craft-rules.md` §1 (metaphor,
-the real thing working, invisible made visible, a reference for the move, never repeated).
-Recommendations read
-`taste.py summary --client <c> --style <s>`; say when taste decided one (§8). Build `plan.html`
-from `assets/plan-template.html`, publish with a 540p proxy as `clip.mp4`, stills as `thumbs/`.
+### B2-B5. Plan, cost gate, frames, motion, build (details: `references/stage-b-edit.md`)
+1. **B2 plan** (show it unasked): read `lessons.py rules`; beats into `plan.json`; `plan.py candidates`;
+   3 options per beat (a law when one fires, a banked idea when one fits, a new invention as the wild
+   card), each answering the five design questions (`references/craft-rules.md` §1); `plan.py finalize`;
+   the page (Studio, or `pickpage.py export --step plan`). Say when taste decided a recommendation.
+2. **Cost gate** (AI beats): `genprep.py add` per item, prices with `spend.py price set`,
+   `spend.py estimate` → the owner's yes → `spend.py approve --owner-words --total` → `spend.py next` /
+   the tool call / `spend.py record`; every image through `lookcheck.py` and your own look. Nothing
+   paid runs outside an approved batch.
+3. **B3 frames**: `frames.py new-set` → 3 real variants with the client's tokens and the beat's
+   words → `check` → `snap` → the page. **B4 motion**: ask once "3 גרסאות אנימציה לכל פריים, או להמשיך
+   עם אחת?", `motion.py mode`, `variants`, `check`, `render`, the page. Contracts:
+   `references/frames-and-motion.md`.
+4. **Picks**: `picks.py sync` after the owner picks; a pasted text: `pickpage.py import`.
+5. **Build**: captions first (`buildcheck.py captions-done`), beats in order (`start-beat`/`beat-done`),
+   the first 2 non-a-roll beats compared with their picked frames (`compare`), AI beats animated from a
+   passed still (`genprep.py animate`, the recipe's camera curve in code), then `checklist`, ticks,
+   one `draft` per round, `prove.py qa` on it, post ticks, `present`. Say plainly that a first draft is
+   60-70 % of the way. Load the HyperFrames skill first; follow `references/craft-rules.md` and
+   `references/pitfalls.md`.
 
-### B3. Checkpoint 2: the human plans
-The user picks a design per beat or writes their own, presses **העתקת התוכנית** and pastes it
-back. Offer the planning patterns as advice: open on the speaker; the hook is one strong beat;
-announce on the face, describe with a visual; a person → a callout; a story → B-roll; balance
-the scene types. If the user gives full control ("אתה מחליט"), take your picks and say so.
-Log each of the owner's own picks per beat (not yours): `taste.py log --step plan ... --tags` (§8).
-
-### B4. Build
-1. Re-read `lessons.py rules --style <s> --client <c>`. For every chosen design open its
-   library folder and write down the exact design to copy.
-2. **Asset list** with a source per item (real UIs, official logos, the tool maker's own
-   showcase clips, the user's files, licensed music/SFX, optional generated images or 3D); show
-   it; ask before downloading. Log every source in `SOURCES.md`.
-3. Build in HyperFrames (load its skill first) or the fallback engine: one 1080x1920
-   composition with `edit_ready.mp4` as the speaker track; style tokens; the style's kit first.
-   Order: captions for the whole video from the words file, then each beat in plan order.
-   **Build 2 beats first**, snapshot, compare with the style's reference frames, adjust, then
-   the rest. Follow `references/craft-rules.md` and check `references/pitfalls.md`.
-4. Validate (0 errors), snapshot every 0.5 s (0.2 s over dense beats and the CTA), read every
-   snapshot, fix. Then render a **draft** (low quality, with music) and open the review page.
-   Say plainly that a first draft is 60-70 % of the way.
-
-### B5. Review rounds
-Follow `references/review-loop.md` and `references/learning-loop.md`: the review room page
+### B6. Review rounds
+`buildcheck.py next-round` per round. Follow `references/review-loop.md` and `references/learning-loop.md`: the review room page
 (`assets/review-template.html`) opens unasked after every draft; read every note, unsent drafts
 too. Before any fix show one line per note: his words → what I understood (measurable) → where
 → layer (two readings when unsure); save each with `lessons.py add` or `match`. Batch all notes
@@ -187,12 +173,12 @@ too. Before any fix show one line per note: his words → what I understood (mea
 owner's yes (`lessons.py approve`) makes it a rule, then fix it in every video. Log rounds in
 `revisions.md`. After each round ask: "יש עוד הערות, או שאפשר לעבור לסאונד ולרינדור הסופי?"
 
-### B6. Sound and final
+### B7. Sound, final and the ideas bank
 Sound per `references/craft-rules.md` (SFX on visible events, a file at most twice and never
 twice within 4 s, -15 to -20 dB under the voice; instrumental music ducked, final about -14
 LUFS), only sound the user is licensed to use. **Final render only on the owner's explicit
 OK**, then a 2.5 s contact-sheet check for empty frames and leftovers, delivery with
-`SOURCES.md`. End of project: open lessons for approval, `lessons.py feedback list` as concrete
+`SOURCES.md`. Then `ideas.py from-final` (pre-ticked beats) and `ideas.py commit-final` after the owner unticks. End of project: open lessons for approval, `lessons.py feedback list` as concrete
 skill edits (never edited without a yes) and new ideas (learning-loop §9).
 
 ## Guardrails
@@ -206,6 +192,7 @@ skill edits (never edited without a yes) and new ideas (learning-loop §9).
 ## References
 - `references/stage-a-train.md`: training step by step (A0 sources, measuring, hold-out, laws, assets, recipes, create, prove, what to show the owner). Read before Phase A.
 - `references/creator-mind.md`: how to write `creator.json` (the creator's visual ideas, story, decisions, retention, toolchain). Read before A2's watching step.
+- `references/frames-and-motion.md`: the frame scaffold, tokens, variant rules, motion params, signatures and the render budget. Read before B3 and B4.
 - `references/craft-rules.md`: the way of thinking and the rules that survived real review rounds (composition, motion, speaker, captions, cuts, sound, sources, build hygiene). Read before B2 and B4.
 - `references/review-loop.md`: drafts, the review room page, reading notes, rounds, final.
 - `references/learning-loop.md`: notes into lessons, layers, rules on the owner's yes, conflicts, exceptions, taste, skill feedback. Read before B2 and B5.
