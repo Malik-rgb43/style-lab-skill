@@ -27,7 +27,8 @@ All notable changes to this skill. The format follows [Keep a Changelog](https:/
 - **Profile input:** read a profile, rank, pick, consent-gated download into `refs/`
   (`profile_fetch.py list|page|pick|download`).
 - **Studio:** styles, clients, ideas, learning and the project pick room, as a claude.ai artifact whose
-  clicks Claude applies (`studio_artifact.py`) or as a local app (`studio.py`).
+  clicks Claude applies (`studio_artifact.py`) or as a local app (`studio.py`); one dark look with
+  Karantina headings and bundled Heebo text.
 - **Install:** install, update, seed and roll back with a dated backup (`install.py`).
 - **Publishing guard:** private files, machine paths and the owner's names file (`publish_guard.py`).
 

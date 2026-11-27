@@ -106,3 +106,5 @@ The tests never use the network and never touch your real store.
 
 ## Licence and credit
 Apache-2.0 (see `LICENSE`). Part of the "וידאו עם AI" course skills.
+The Studio bundles two fonts under the SIL Open Font License 1.1: Karantina and Heebo
+(`assets/studio/fonts/OFL_karantina.txt`, `assets/studio/fonts/OFL_heebo.txt`).

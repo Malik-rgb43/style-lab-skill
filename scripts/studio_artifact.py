@@ -183,8 +183,7 @@ def build(out, project=None, no_video=False):
         p["room_file"] = rel
     ov["built_at"] = built_at
     b.write_json("data/overview.json", ov)
-    font = APP / "fonts" / "Karantina-Bold.ttf"
-    if font.is_file():
+    for font in sorted((APP / "fonts").glob("*.ttf")):
         dst = out / "fonts" / font.name
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(font, dst)

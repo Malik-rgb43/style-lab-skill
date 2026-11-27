@@ -131,7 +131,19 @@
   // ------------------------------------------------------------ shell
   function crumb(parts) { $("#crumb").innerHTML = parts.map((p, i) => i === parts.length - 1 ? `<b>${esc(p)}</b>` : esc(p)).join(" / "); }
   function nav(on) { document.querySelectorAll("#nav .ni").forEach(b => b.classList.toggle("is-on", b.dataset.go === on)); }
-  function pad(html) { screen.innerHTML = `<div class="pad">${html}</div>`; }
+  // two-tone title: the last word in the light violet (text only, built with DOM nodes)
+  function twoTone(root) {
+    root.querySelectorAll(".h1 h1, .selhead h2").forEach(h => {
+      const t = h.textContent.trim(), i = t.lastIndexOf(" ");
+      if (i < 1) return;
+      const em = document.createElement("em");
+      em.textContent = t.slice(i + 1);
+      h.textContent = t.slice(0, i + 1);
+      h.append(em);
+      h.classList.add("tt");
+    });
+  }
+  function pad(html) { screen.innerHTML = `<div class="pad">${html}</div>`; twoTone(screen); }
   const thumb = (url, ar) => url
     ? (/\.(mp4|webm|mov)$|\/clip$/.test(url) ? `<div class="thbox"><video src="${esc(url)}" muted loop playsinline preload="metadata"></video></div>`
       : `<div class="thbox"><img src="${esc(url)}" alt="" loading="lazy"></div>`)
