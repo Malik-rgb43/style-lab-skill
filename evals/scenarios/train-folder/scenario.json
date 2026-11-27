@@ -51,14 +51,14 @@
   {
    "type": "transcript_order",
    "args": {
-    "before": "^(ASK|PUBLISH):.*(board|לוח)",
+    "before": "^(ASK|PUBLISH):.*(board|לוח|בורד)",
     "after": "transcribe_words|A3"
    }
   },
   {
    "type": "transcript_has",
    "args": {
-    "regex": "(?m)^ASK:.*(לוח|board)",
+    "regex": "(?m)^ASK:.*(לוח|בורד|board)",
     "min": 1
    }
   }

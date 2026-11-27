@@ -31,6 +31,8 @@ All notable changes to this skill. The format follows [Keep a Changelog](https:/
   Karantina headings and bundled Heebo text.
 - **Install:** install, update, seed and roll back with a dated backup (`install.py`).
 - **Publishing guard:** private files, machine paths and the owner's names file (`publish_guard.py`).
+- **Behaviour evals:** 8 scenarios run by fresh agents in isolated sandboxes, with a leak guard
+  (`evals/run_evals.py`, `evals/README.md`); all 8 pass.
 
 ### Changed
 - A1 takes a folder, a profile link, this conversation or a project folder.

@@ -111,6 +111,11 @@ def load_analysis(d):
     sj = _read(d / "source.json", None)
     if isinstance(sj, dict) and isinstance(sj.get("source"), str):
         src = sj["source"]
+    if not (isinstance(src, str) and src and Path(src).is_file()):
+        refs = d.parent.parent / "refs"  # <pack>/analysis/<id> -> <pack>/refs/<id>.*
+        hit = next((f for f in sorted(refs.glob(f"{d.name}.*")) if f.suffix.lower() in
+                    (".mp4", ".mov", ".mkv", ".webm", ".m4v")), None) if refs.is_dir() else None
+        src = str(hit) if hit else src
     manual = []
     if (d / "events.manual.json").exists():
         manual = _read(d / "events.manual.json", None)
