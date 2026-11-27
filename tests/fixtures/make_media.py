@@ -193,3 +193,16 @@ def make_motion_clip(path, *, dur_s, fps, moves=(), cuts=(), size="320x180", ste
         if proc.poll() is None:
             proc.kill()
     return path
+
+
+def make_image(path, rgb):
+    """Write an (h, w, 3) image (uint8, or float 0..1) as a PNG through an ffmpeg rawvideo pipe."""
+    import numpy as _np
+    a = _np.asarray(rgb)
+    if a.dtype != _np.uint8:
+        a = (_np.clip(a, 0, 1) * 255 + 0.5).astype(_np.uint8)
+    h, w = a.shape[:2]
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}",
+                    "-i", "-", "-frames:v", "1", str(path)], input=a.tobytes(), check=True)
+    return Path(path)
