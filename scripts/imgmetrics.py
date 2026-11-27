@@ -6,7 +6,7 @@ Python only (imported by lookcheck.py and buildcheck.py):
     frames_of(video, n=5, width=256) -> [image]
     look_stats(img) -> {mean_L, contrast, chroma, grain, vignette, sharpness, palette: [{hex, share}]}
     palette_distance(palette, ref_hexes) -> share-weighted mean of the minimum ΔE2000
-    ssim(a, b) -> 8x8 block SSIM on grey, both resized to the smaller size
+    ssim(a, b) -> 8x8 block SSIM on grey (resized to the smaller size), over the blocks with content
 """
 import shutil
 import subprocess
@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 KMEANS_K = 5
 KMEANS_SEED = 7
 KMEANS_ITERS = 12
+FLAT_VAR = 1e-4   # an 8x8 block with less L variance than this is flat
 
 
 class MissingTool(Exception):
@@ -184,5 +185,9 @@ def ssim(a, b):
             mp, mq = p.mean(), q.mean()
             vp, vq = p.var(), q.var()
             cov = ((p - mp) * (q - mq)).mean()
-            vals.append(((2 * mp * mq + c1) * (2 * cov + c2)) / ((mp ** 2 + mq ** 2 + c1) * (vp + vq + c2)))
-    return round(float(np.mean(vals)), 4) if vals else 1.0
+            v = ((2 * mp * mq + c1) * (2 * cov + c2)) / ((mp ** 2 + mq ** 2 + c1) * (vp + vq + c2))
+            vals.append((v, max(vp, vq) > FLAT_VAR or abs(mp - mq) > 0.05))
+    # flat blocks that match (an empty ground in both) would read as perfect agreement and hide a different
+    # design: only blocks with content in either image, or a different flat level, are scored
+    live = [v for v, keep in vals if keep]
+    return round(float(np.mean(live)), 4) if live else 1.0
