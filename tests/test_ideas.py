@@ -273,3 +273,93 @@ def test_failed_add_leaves_no_orphans(home, tmp_path, monkeypatch):
     monkeypatch.undo()
     assert not list((home / "ideas").glob("I*")) and not list((home / "ideas").glob("_new-*"))
     assert ideas.load_index()["ideas"] == []
+
+
+# ---------------------------------------------------------------- Task 3: seeding
+
+def _pack(home, tmp_path):
+    import store
+    pack = tmp_path / "pack"
+    lib = pack / "library"
+    anims = []
+    for k, (cat, reusable) in enumerate((("Kinetic Text", True), ("B-roll", False), ("Transition", None)), 1):
+        rel = f"V01-A0{k} t{k}"
+        (lib / rel).mkdir(parents=True)
+        (lib / rel / "still.png").write_bytes(b"png")
+        e = {"id": f"V01-A0{k}", "title": f"t{k}", "category": cat, "scene_type": "overlay",
+             "folder": rel, "still": f"{rel}/still.png", "clip": f"{rel}/clip.mp4"}
+        if reusable:
+            e["reusable"] = True
+        anims.append(e)
+    store.write_json(lib / "index.json", {"animations": anims})
+    store.write_json(pack / "animations.json", {"animations": [{"id": "V01-A03", "reusable": True}]})
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "styles.json").write_text(json.dumps({"version": 2, "styles": [
+        {"slug": "paper-3d", "name": "Paper 3D", "pack": str(pack), "aspect": "9:16"}]}), encoding="utf-8")
+    return pack
+
+
+def test_seed_style_links_not_copies(home, tmp_path):
+    pack = _pack(home, tmp_path)
+    r = ideas.seed_style("paper-3d")
+    assert len(r["added"]) == 2 and r["skipped"] == ["V01-A02"]
+    for iid in r["added"]:
+        i = ideas.get(iid)
+        assert i["source"] == "style-link" and str(pack) in i["still"]
+        assert [f.name for f in (home / "ideas" / iid).iterdir()] == ["meta.json"]
+    assert {ideas.get(i)["kind"] for i in r["added"]} == {"text-animation", "transition"}
+    assert ideas.seed_style("paper-3d")["added"] == []
+    assert len(ideas.seed_style("paper-3d", categories=["b-roll"])["added"]) == 1
+    rc = run_cli("ideas.py", "seed-style", "paper-3d")
+    assert rc.returncode == 0 and "0" in rc.stdout
+
+
+def _closing_project(home, tmp_path):
+    import project
+    import store
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "styles.json").write_text(json.dumps({"version": 2, "styles": [{"slug": "paper-3d",
+                                                  "name": "Paper 3D"}]}), encoding="utf-8")
+    d = tmp_path / "proj"
+    project.init(d, "launch", "clip.mp4", "paper-3d")
+    (d / "build").mkdir(parents=True, exist_ok=True)
+    (d / "build" / "b1.html").write_text('<div style="color:{{brand}}">{{title}}</div>', encoding="utf-8")
+    (d / "build" / "b2.html").write_text('<div>{{title}}</div>', encoding="utf-8")
+    beats = {"1": {"built": True, "snippet": "build/b1.html", "params": PARAMS, "title": "one", "kind": "b-roll",
+                   "beat_types": ["number"]},
+             "2": {"built": True, "snippet": "build/b2.html", "params": {"title": PARAMS["title"]},
+                   "title": "two", "kind": "text-animation", "beat_types": []},
+             "3": {"built": True, "snippet": None, "params": None},
+             "4": {"built": True, "snippet": "build/b2.html", "params": {}}}
+    store.write_json(d / "build" / "state.json", {"version": 1, "beats": beats})
+    store.write_json(d / "plan.json", {"beats": [{"n": 1, "start": 0.0, "end": 2.0}, {"n": 2, "start": 2.0, "end": 8.0},
+                                                 {"n": 3, "start": 8.0, "end": 9.0}, {"n": 4, "start": 9.0, "end": 10.0}]})
+    return d
+
+
+def test_final_candidates_only_snippets(home, tmp_path):
+    d = _closing_project(home, tmp_path)
+    c = ideas.final_candidates(d)
+    assert [x["beat"] for x in c] == [1, 2] and all(x["ticked"] for x in c)
+    assert c[1]["end_s"] - c[1]["start_s"] == pytest.approx(4.0)
+    assert (d / "closing.json").is_file()
+    r = run_cli("ideas.py", "from-final", d)
+    assert r.returncode == 0 and "one" in r.stdout and "two" in r.stdout
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg missing")
+def test_commit_final_untick_and_close(home, tmp_path):
+    import project
+    d = _closing_project(home, tmp_path)
+    final = tmp_path / "final.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=1080x1920:d=10:r=25",
+                    "-pix_fmt", "yuv420p", str(final)], check=True)
+    r = run_cli("ideas.py", "commit-final", d, "--final", final, "--untick", "2")
+    assert r.returncode == 0, r.stderr
+    banked = [i for i in ideas.load_index()["ideas"] if i["source"] == "final"]
+    assert len(banked) == 1 and banked[0]["approved"] and banked[0]["made_for"]["style"] == "paper-3d"
+    clip = ideas._abs(banked[0]["clip"])
+    dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                str(clip)], capture_output=True, text=True).stdout)
+    assert dur <= 4.05
+    assert project.load(d)["status"] == "final"

@@ -19,6 +19,9 @@ Commands:
     ideas.py show <id>
     ideas.py render <id> [--client C] [--param k=v]... --out FILE
     ideas.py remove <id>
+    ideas.py seed-style <style> [--categories a,b]     link a style's reusable library beats (no copies)
+    ideas.py from-final <project>                     the final's beats that can become ideas (pre-ticked)
+    ideas.py commit-final <project> --final <mp4> [--untick 2,5]   bank them and close the project
 Exit codes: 0 ok, 1 refused, 2 bad input, 3 missing tool.
 """
 import argparse
@@ -610,6 +613,178 @@ def _bad(msg):
     return 2
 
 
+
+# ---- seeding: a style's library (links) and an approved final
+
+def _kind_of(category, scene_type=None):
+    c = f"{category or ''} {scene_type or ''}".lower()
+    for word, kind in (("caption", "caption"), ("transition", "transition"), ("cta", "cta"),
+                       ("call to action", "cta"), ("camera", "camera"), ("zoom", "camera"),
+                       ("text", "text-animation"), ("title", "text-animation"), ("type", "text-animation")):
+        if word in c:
+            return kind
+    return "b-roll"
+
+
+def _style_entry(style):
+    import styles
+    s = styles.find(styles.load_registry(), style)
+    if not s:
+        raise KeyError(style)
+    if not str(s.get("pack") or "").strip() or not Path(s["pack"]).is_dir():
+        raise ValueError(f"style {s['slug']} has no pack folder")
+    return s
+
+
+def seed_style(style, categories=()):
+    """Link a style's reusable library entries into the bank. Idempotent per (style, entry)."""
+    s = _style_entry(style)
+    pack = Path(s["pack"])
+    lib = pack / "library"
+    index = store.read_json(lib / "index.json", None)
+    if not isinstance(index, dict):
+        raise ValueError(f"style {s['slug']} has no library/index.json (build_reference_library.py)")
+    flags = {}
+    anim = store.read_json(pack / "animations.json", None)
+    rows = anim.get("animations", []) if isinstance(anim, dict) else anim if isinstance(anim, list) else []
+    for a in rows:
+        if isinstance(a, dict) and a.get("id") is not None:
+            flags[str(a["id"])] = bool(a.get("reusable"))
+    cats = {c.strip().lower() for c in categories if c and c.strip()}
+    added, skipped = [], []
+    for e in index.get("animations", []):
+        if not isinstance(e, dict) or e.get("id") is None:
+            continue
+        eid = str(e["id"])
+        reusable = bool(e.get("reusable")) or flags.get(eid, False) or \
+            (str(e.get("category") or "").strip().lower() in cats)
+        if not reusable or find_by_link(s["slug"], eid):
+            skipped.append(eid)
+            continue
+        still = lib / e["still"] if e.get("still") else None
+        clip = lib / e["clip"] if e.get("clip") else None
+        if still is None or not still.is_file():
+            skipped.append(eid)
+            continue
+        idea = add(e.get("title") or eid, _kind_of(e.get("category"), e.get("scene_type")),
+                   [e["scene_type"]] if e.get("scene_type") else [], s.get("aspect") or "9:16", None, {},
+                   still=still, clip=clip if clip and clip.is_file() else None,
+                   made_for={"style": s["slug"], "client": None, "project": None},
+                   tags=[t for t in (e.get("category"),) if t],
+                   link={"style": s["slug"], "entry": eid, "path": str(e.get("folder") or "")},
+                   approved=True)
+        added.append(idea["id"])
+    return {"added": added, "skipped": skipped}
+
+
+def _beat_times(project_dir):
+    plan = store.read_json(Path(project_dir) / "plan.json", {}) or {}
+    out = {}
+    for b in plan.get("beats", []) if isinstance(plan, dict) else []:
+        if isinstance(b, dict) and b.get("n") is not None:
+            try:
+                out[str(b["n"])] = (float(b["start"]), float(b["end"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+    return out
+
+
+def final_candidates(project_dir):
+    """Built beats with a snippet file and non-empty params, pre-ticked; also written to closing.json."""
+    d = Path(project_dir)
+    state = store.read_json(d / "build" / "state.json", {}) or {}
+    times = _beat_times(d)
+    out = []
+    beats = state.get("beats", {}) if isinstance(state, dict) else {}
+    for key in sorted(beats, key=lambda k: int(k) if str(k).isdigit() else 10 ** 9):
+        b = beats[key]
+        if not isinstance(b, dict) or not b.get("snippet") or not b.get("params"):
+            continue
+        if not (d / b["snippet"]).is_file() or str(key) not in times:
+            continue
+        t0, t1 = times[str(key)]
+        end = min(t1, t0 + CLIP_SECONDS)
+        out.append({"beat": int(key) if str(key).isdigit() else key, "title": b.get("title") or f"beat {key}",
+                    "kind": b.get("kind") or "b-roll", "beat_types": list(b.get("beat_types") or []),
+                    "snippet": b["snippet"], "params": b["params"], "start_s": round(t0, 3),
+                    "end_s": round(end, 3), "still_t": round((t0 + end) / 2, 3), "ticked": True})
+    store.write_json(d / "closing.json", {"version": 1, "candidates": out})
+    return out
+
+
+def _cut(final, t0, dur, dst, still=False):
+    ff = shutil.which("ffmpeg")
+    if not ff:
+        raise MissingTool("ffmpeg is missing: install it (winget install Gyan.FFmpeg, or brew install ffmpeg)")
+    cmd = [ff, "-y", "-v", "error", "-ss", f"{t0:.3f}", "-i", str(final)]
+    if still:
+        cmd += ["-frames:v", "1", str(dst)]
+    else:
+        cmd += ["-t", f"{dur:.3f}", "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(dst)]
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not Path(dst).is_file():
+        raise ValueError(f"ffmpeg could not cut the final at {t0:.2f} s: {r.stderr.strip()[:200]}")
+
+
+def _aspect(video):
+    ffp = shutil.which("ffprobe")
+    try:
+        r = subprocess.run([ffp, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "stream=width,height", "-of", "csv=p=0", str(video)],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        w, h = (int(x) for x in r.stdout.strip().split(",")[:2])
+    except (OSError, TypeError, ValueError):
+        return "9:16"
+    return min((("9:16", 9 / 16), ("16:9", 16 / 9), ("1:1", 1.0), ("4:5", 0.8)),
+               key=lambda a: abs(a[1] - w / h))[0]
+
+
+def _set_field(idea_id, key, value):
+    def fn(idx):
+        for i in idx["ideas"]:
+            if i["id"] == idea_id:
+                i[key] = value
+                _write_meta(i)
+                return
+    store.update_json(_index_path(), _empty(), fn)
+
+
+def commit_final(project_dir, final_mp4, untick=()):
+    """Bank every ticked candidate (still + clip cut from the final), then close the project.
+    A candidate refused by the client-literal check is reported, not banked. Returns (added ids, refused)."""
+    import project
+    d = Path(project_dir)
+    final = Path(final_mp4)
+    if not final.is_file():
+        raise ValueError(f"final not found: {final_mp4}")
+    entry = project.load(d)
+    skip = {str(u) for u in untick}
+    cands = final_candidates(d)
+    added, refused = [], []
+    today = time.strftime("%Y-%m-%d")
+    aspect = _aspect(final)
+    with tempfile.TemporaryDirectory() as tmp:
+        for c in cands:
+            if str(c["beat"]) in skip:
+                c["ticked"] = False
+                continue
+            still, clip = Path(tmp) / f"b{c['beat']}.png", Path(tmp) / f"b{c['beat']}.mp4"
+            _cut(final, c["still_t"], 0, still, still=True)
+            _cut(final, c["start_s"], c["end_s"] - c["start_s"], clip)
+            try:
+                idea = add(c["title"], c["kind"], c["beat_types"], aspect, d / c["snippet"], c["params"],
+                           still=still, clip=clip, source="final", approved=True,
+                           made_for={"style": entry.get("style"), "client": entry.get("client"),
+                                     "project": entry.get("id")})
+            except Refused as e:
+                refused.append({"beat": c["beat"], "why": str(e)})
+                continue
+            _set_field(idea["id"], "approved_date", today)
+            added.append(idea["id"])
+    store.write_json(d / "closing.json", {"version": 1, "candidates": cands, "added": added, "refused": refused})
+    project.close(d, str(final))
+    return added, refused
+
 def main(argv=None):
     return store.exit_on_lock_timeout(_main, argv)
 
@@ -636,6 +811,10 @@ def _main(argv=None):
     a.add_argument("id"); a.add_argument("--client"); a.add_argument("--param", action="append", default=[])
     a.add_argument("--out", required=True)
     a = sub.add_parser("remove"); a.add_argument("id")
+    a = sub.add_parser("seed-style"); a.add_argument("style"); a.add_argument("--categories", default="")
+    a = sub.add_parser("from-final"); a.add_argument("project")
+    a = sub.add_parser("commit-final"); a.add_argument("project"); a.add_argument("--final", required=True)
+    a.add_argument("--untick", default="")
     args = p.parse_args(argv)
     store.print_utf8()
 
@@ -680,6 +859,26 @@ def _main(argv=None):
             Path(args.out).write_text(out, encoding="utf-8")
             print(f"wrote {args.out}")
             return 0
+        if args.cmd == "seed-style":
+            r = seed_style(args.style, [c for c in args.categories.split(",") if c.strip()])
+            print(f"נוספו {len(r['added'])} רעיונות (קישורים לסגנון), דולגו {len(r['skipped'])}")
+            return 0
+        if args.cmd == "from-final":
+            cands = final_candidates(args.project)
+            if not cands:
+                print("אין בסרטון קטעים עם סניפט ופרמטרים")
+                return 0
+            print("הקטעים האלה ייכנסו לבנק הרעיונות (כולם מסומנים; --untick כדי להוציא):")
+            for c in cands:
+                print(f"  [x] {c['beat']}: {c['title']} ({c['kind']}, {c['start_s']:.1f}-{c['end_s']:.1f} שניות)")
+            return 0
+        if args.cmd == "commit-final":
+            untick = [u.strip() for u in args.untick.split(",") if u.strip()]
+            added, refused = commit_final(args.project, args.final, untick)
+            print(f"נוספו לבנק: {', '.join(added) or 'אף אחד'}; הפרויקט נסגר")
+            for r in refused:
+                print(f"  לא נוסף קטע {r['beat']}: {r['why']}", file=sys.stderr)
+            return 0
         remove(args.id)
         print(f"removed {args.id} (archived in ideas/_removed)")
         return 0
@@ -687,6 +886,10 @@ def _main(argv=None):
         what = e.args[0] if e.args else ""
         if args.cmd == "render" and isinstance(what, str) and not re.fullmatch(r"I\d+", what):
             return _bad(f"missing value for client-bound parameter {what!r}: pass --param {what}=<value>")
+        if args.cmd == "seed-style":
+            return _bad(f"no style {what!r}")
+        if args.cmd in ("from-final", "commit-final"):
+            return _bad(str(what))
         return _bad(f"no idea {what!r}")
     except ValueError as e:
         return _bad(str(e))
