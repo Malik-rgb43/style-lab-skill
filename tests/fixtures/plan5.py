@@ -21,10 +21,21 @@ FINGERPRINT = {"schema": "fingerprint/1", "trained_on": ["V01", "V02", "V03"], "
                    "look": {"source": "refs", "metrics": {"grain_std": {"median": 2.0, "p10": 1.5, "p90": 2.5,
                                                                         "n": 3, "seen_in": 3}}}}}
 
-RECIPES = {"recipes": [{"kind": "paper-cutout", "how": "ai_image+i2v", "test": "passed",
-                        "prompt_template": "a paper cut-out of {subject}, soft light", "negative": "text",
-                        "tool": [{"capability": "image_generator", "level": "required", "fallback": "stock"}],
-                        "look": {"grain_std": 2.0}}]}
+RECIPES = {"recipes": [
+    {"kind": "paper-cutout", "how": "ai_image+i2v",
+     "look": {"grain": "fine", "vignette": "soft", "blur": None, "palette_ref": None, "lens": "35mm",
+              "light": "soft window light", "composition": None},
+     "prompt_template": "{subject}, {look}, colours {palette}", "negative": "blurry",
+     "motion": {"camera_ease": "M0,0 C0.165,0.84 0.44,1 1,1", "dur_s": {"median": 3.4, "p10": 2.8, "p90": 4.0},
+                "subject_motion": "the paper pieces drift apart"},
+     "tools": [{"capability": "image_generator", "level": "required", "fallback": "stock"}],
+     "test": {"status": "passed", "sample_paths": [], "notes": ""}, "source_evidence": ["V01@2.0"]},
+    {"kind": "era-scene", "how": "ai_video", "look": {}, "prompt_template": "{subject} in the {era}",
+     "negative": "", "motion": {"camera_ease": "power2.inOut", "dur_s": 5, "subject_motion": "people walk"},
+     "tools": [{"capability": "video_generator", "level": "required", "fallback": "stock"}],
+     "test": {"status": "passed"}, "source_evidence": []},
+    {"kind": "code-card", "how": "code", "look": {}, "prompt_template": "", "negative": "", "motion": {},
+     "tools": [], "test": {"status": "untested"}, "source_evidence": []}]}
 
 WORDS = [("יש", 0.0, 0.3), ("3", 0.3, 0.5), ("דרכים", 0.5, 1.0), ("להתחיל", 1.0, 1.9),
          ("ומה", 2.0, 2.4), ("עושים", 2.4, 2.9), ("עכשיו", 2.9, 3.4), ("?", 3.4, 3.5), ("בואו", 3.6, 5.9)]
