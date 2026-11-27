@@ -15,7 +15,7 @@ Ask once, in one message, where the style comes from. Any mix is allowed:
 | Source | What it gives | How |
 |---|---|---|
 | Reference videos (files or a folder) | timing, motion, look, sound, laws | A1-A4 below |
-| A profile link | the videos, downloaded with a yes | `profile_fetch.py` (see its `--help`); then A1 |
+| A profile link | the videos, downloaded with a yes | A1 "From a profile link" below |
 | This conversation | decisions, notes, rejected options | the learning loop (`references/learning-loop.md`) |
 | A project folder (HyperFrames) | exact type, colour, motion and sound tokens | `code_tokens.py` |
 | A description only | adjectives turned into numbers | interview, then a `derived` style |
@@ -56,6 +56,23 @@ then reads that layer from tokens.json and never from the references; `look` is 
   the YuNet face model. Say in one line what will run and what will not.
 - The YuNet face model is a 232,589-byte download from the OpenCV model zoo: name it, ask, then
   `fetch_model.py yunet --yes`. Without it faces use the Haar cascade or mediapipe, or are not run.
+
+### From a profile link (TikTok, YouTube, Instagram)
+1. `profile_fetch.py list <url> --pack <pack>` (or `--style <slug>`): reads the profile's listing only,
+   ranks the posts (by views, else engagement, else "pick" mode: the latest, nothing proposed) and writes
+   `refs/proposal.json`. Show the table in Hebrew. In pick mode: `profile_fetch.py page --pack <pack>
+   --out <html>`, publish it privately; the owner ticks posts and pastes back `profile picks: id,id,...`.
+2. Fewer than 12 posts: say so and ask whether to continue.
+3. The owner's answer → `profile_fetch.py pick --pack <pack> --ranks "1-5,8"` (or `--ids a,b`, or
+   `--proposed` to take the ticked proposal).
+4. Ask word for word: "ההורדה היא ללימוד פרטי בלבד: הסרטונים נשמרים רק אצלך במחשב, לא מתפרסמים ולא עולים
+   לשום מקום. מאשר/ת?"
+5. Only on a yes: `profile_fetch.py download --pack <pack> --i-confirm-private-study`. Files land in
+   `refs/V01.mp4 ...` (never renumbered; a re-run skips what is already in `refs/sources.json`), each with
+   its sha256, and `refs/sources.md` gets the private-study note and a table.
+6. Report what `failed` (the exit is 1 then); then A2.
+7. If the platform asks for a login: `--cookies-from-browser <the owner's own browser>`; never a password.
+   Instagram falls back to `instaloader` (anonymous) when yt-dlp cannot list the profile.
 
 ## A2. Measure every video
 

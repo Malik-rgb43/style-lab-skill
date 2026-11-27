@@ -295,3 +295,11 @@ def test_motion_and_ideas_stages(home, everything, monkeypatch):
 def test_cloud_asr_preapproved_setting(home):
     import store
     assert store.settings()["cloud_asr_preapproved"] is False
+
+
+def test_train_profile_instaloader_optional(home, everything, monkeypatch):
+    monkeypatch.setattr(doctor.importlib.util, "find_spec", lambda n: None if n == "instaloader" else object())
+    doctor.main([])
+    st = caps()["stages"]["train_profile"]
+    assert st["missing"] == [] and st["optional_missing"] == ["instaloader"]
+    assert "instaloader" in caps()["local"]["instaloader"]["hint"]

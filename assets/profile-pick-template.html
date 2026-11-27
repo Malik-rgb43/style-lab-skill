@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Profile picks</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Karantina:wght@400;700&family=Heebo:wght@300;400;500;600;700;800&display=swap">
+<style>
+/* Course brand tokens ("וידאו עם AI"): Karantina 700 headlines, Heebo body (-0.04em), Consolas code;
+   white / black / violet. Light by default, dark by system setting or the theme button. */
+:root{
+  --bg:#ffffff; --bg2:#f5f5f5; --surface:#ffffff; --surface2:#f7f7f8; --line:rgba(0,0,0,.08); --line2:rgba(0,0,0,.14);
+  --fg:#000000; --muted:#555555; --dim:#959595;
+  --accent:#7c5cff; --accent-hi:#9a82ff; --accent-text:#5b3fe0; --accent-ink:#ffffff; --accent-soft:#ece8ff;
+  --ok:#0b8a56; --danger:#d93a55; --note:#b07800; --callout:#d93a55;
+  --shadow:0 10px 30px rgba(0,0,0,.08); --glow:none;
+  --display:"Karantina","Heebo",system-ui,sans-serif; --body:"Heebo",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:ui-monospace,Consolas,"Courier New",monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0b0910; --bg2:#110e18; --surface:#17131f; --surface2:#1e1929; --line:rgba(237,233,255,.09); --line2:rgba(237,233,255,.16);
+  --fg:#f4f1fb; --muted:#aba4bf; --dim:#7e7791;
+  --accent-text:#b8a8ff; --accent-soft:rgba(124,92,255,.16); --ok:#5cffb0; --danger:#ff7a90; --note:#ffc94d; --callout:#ff7a90;
+  --shadow:0 18px 40px -24px rgba(0,0,0,.8); --glow:radial-gradient(80% 60% at 50% 0%,rgba(124,92,255,.22),transparent 70%);
+  color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0b0910; --bg2:#110e18; --surface:#17131f; --surface2:#1e1929; --line:rgba(237,233,255,.09); --line2:rgba(237,233,255,.16);
+  --fg:#f4f1fb; --muted:#aba4bf; --dim:#7e7791;
+  --accent-text:#b8a8ff; --accent-soft:rgba(124,92,255,.16); --ok:#5cffb0; --danger:#ff7a90; --note:#ffc94d; --callout:#ff7a90;
+  --shadow:0 18px 40px -24px rgba(0,0,0,.8); --glow:radial-gradient(80% 60% at 50% 0%,rgba(124,92,255,.22),transparent 70%);
+  color-scheme:dark}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);background-image:var(--glow),linear-gradient(var(--line) 1px,transparent 1px),linear-gradient(90deg,var(--line) 1px,transparent 1px);
+  background-size:100% 600px,32px 32px,32px 32px;background-repeat:no-repeat,repeat,repeat;
+  color:var(--fg);font-family:var(--body);letter-spacing:-.04em;font-size:15px;line-height:1.55}
+h1,h2,h3,.display{font-family:var(--display);font-weight:700;letter-spacing:0;line-height:1}
+code,kbd,.mono{font-family:var(--mono);letter-spacing:0}
+.on-accent{background:var(--accent);color:var(--accent-ink);font-family:var(--display);font-weight:700;letter-spacing:0;border-radius:10px;padding:0 .22em .06em}
+button,input,textarea,select{font:inherit;letter-spacing:inherit;color:inherit}
+.btn{font-weight:600;border:1px solid var(--line2);background:var(--surface);color:var(--fg);border-radius:12px;padding:8px 16px;cursor:pointer}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-family:var(--display);font-weight:700;letter-spacing:0;font-size:20px;line-height:1.1;padding:6px 18px 8px}
+.btn.ok{color:var(--ok);border-color:var(--ok)}
+:focus-visible{outline:2px solid var(--accent-hi);outline-offset:2px}
+textarea,input[type=text]{width:100%;background:var(--surface);border:1px solid var(--line2);border-radius:12px;padding:10px 12px}
+.theme-btn{position:fixed;inset-block-start:12px;inset-inline-end:12px;z-index:20;border-radius:999px;padding:6px 12px;font-size:13px}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+/* Profile pick page: a grid of the profile's posts (thumbnail, date, views), the proposed ones ticked.
+   The whole card is the click target (>= 44 px), 14 px between cards. No video and no script file. */
+body{padding-inline:max(16px,env(safe-area-inset-left,0px));padding-block:28px 64px}
+.wrap{max-width:1240px;margin:0 auto;display:flex;flex-direction:column;gap:22px}
+.card{background:var(--surface);border:1px solid var(--line2);border-radius:22px;padding:clamp(18px,3vw,32px);box-shadow:var(--shadow)}
+.head h1{margin:0 0 6px;font-size:clamp(34px,5vw,54px)}
+.meta{color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px}
+.actions{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-top:16px}
+.count{font-family:var(--display);font-size:26px;letter-spacing:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}
+.post{position:relative;display:flex;flex-direction:column;gap:6px;border:1.5px solid var(--line2);border-radius:16px;padding:8px;background:var(--surface);cursor:pointer;min-height:44px}
+.post:has(input:checked){border-color:var(--accent);background:linear-gradient(var(--accent-soft),var(--surface) 70%)}
+.post input{position:absolute;inset-block-start:14px;inset-inline-start:14px;width:22px;height:22px;accent-color:var(--accent)}
+.post img{width:100%;aspect-ratio:9/16;object-fit:cover;border-radius:10px;background:var(--bg2)}
+.post .rank{position:absolute;inset-block-start:14px;inset-inline-end:14px;background:var(--surface);border-radius:999px;padding:1px 9px;font-size:13px;font-family:var(--mono)}
+.post .t{font-size:13px;line-height:1.35;max-height:2.7em;overflow:hidden}
+.post .n{font-size:12px;color:var(--muted);display:flex;gap:10px}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+
+<!-- profile_fetch.py page fills this block from refs/proposal.json. -->
+<script type="application/json" id="profile-data">
+{"url": "", "platform": "", "handle": "", "mode": "views", "total_posts": 0, "entries": []}
+</script>
+<script>
+(function(){
+  const data = JSON.parse(document.getElementById('profile-data').textContent);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const num = v => v == null ? '' : Number(v).toLocaleString('he-IL');
+  const safe = u => /^https:\/\//.test(u || '') ? u : '';
+  const KEY = 'style-lab:profile:' + data.handle;
+  let picked;
+  try { picked = new Set(JSON.parse(localStorage.getItem(KEY) || 'null') || data.entries.filter(e => e.proposed).map(e => e.id)); }
+  catch (e) { picked = new Set(data.entries.filter(e => e.proposed).map(e => e.id)); }
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify([...picked])); } catch (e) {} };
+  const app = document.getElementById('app');
+  const head = document.createElement('section');
+  head.className = 'card head';
+  head.innerHTML = `<h1 dir="auto"><span class="on-accent">בחירת סרטונים</span> @${esc(data.handle)}</h1>
+    <div class="meta"><span>${esc(data.platform)}</span><span>${data.total_posts} סרטונים</span>
+      <span>${data.mode === 'pick' ? 'אין מספרי צפיות: בוחרים ידנית' : 'מסודר לפי ' + (data.mode === 'views' ? 'צפיות' : 'מעורבות')}</span></div>
+    <div class="actions"><span class="count" id="count"></span>
+      <button class="btn primary" id="copy" type="button">העתקת הבחירה</button></div>
+    <p class="meta">הסרטונים נשמרים רק אצלך במחשב, ללימוד פרטי בלבד.</p>`;
+  app.appendChild(head);
+  const grid = document.createElement('section');
+  grid.className = 'grid';
+  grid.innerHTML = data.entries.map(e => `<label class="post">
+      <input type="checkbox" value="${esc(e.id)}" ${picked.has(e.id) ? 'checked' : ''}>
+      <span class="rank">${e.rank}</span>
+      ${safe(e.thumbnail) ? `<img src="${esc(safe(e.thumbnail))}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<img alt="">'}
+      <span class="t" dir="auto">${esc(e.title)}</span>
+      <span class="n"><span>${esc(e.upload_date || '')}</span>${e.views != null ? `<span>${num(e.views)} צפיות</span>` : ''}</span>
+    </label>`).join('');
+  app.appendChild(grid);
+  const count = () => document.getElementById('count').textContent = `נבחרו ${picked.size} מתוך ${data.entries.length}`;
+  grid.addEventListener('change', ev => { const i = ev.target; if (i.checked) picked.add(i.value); else picked.delete(i.value); save(); count(); });
+  count();
+  const copyBtn = document.getElementById('copy');
+  copyBtn.addEventListener('click', () => {
+    const ids = data.entries.map(e => e.id).filter(id => picked.has(id));
+    const txt = 'profile picks: ' + ids.join(',');
+    const done = () => { copyBtn.textContent = '✓ הועתק, הדביקו ל־Claude'; setTimeout(() => copyBtn.textContent = 'העתקת הבחירה', 2600); };
+    const fallback = () => {
+      let pre = document.getElementById('pick-out');
+      if (!pre) { pre = document.createElement('textarea'); pre.id = 'pick-out'; pre.rows = 3; head.appendChild(pre); }
+      pre.value = txt; pre.focus(); pre.select(); copyBtn.textContent = 'סמנו והעתיקו את הטקסט למטה';
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done, fallback); else fallback();
+  });
+})();
+</script>
+<script>
+(function(){
+  var KEY='style-lab:theme', root=document.documentElement;
+  try{var t=localStorage.getItem(KEY); if(t) root.dataset.theme=t;}catch(e){}
+  var b=document.createElement('button'); b.type='button'; b.className='btn theme-btn';
+  var label=function(){var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches; b.textContent=dark?'☀ בהיר':'☾ כהה';};
+  b.onclick=function(){var dark=root.dataset.theme?root.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme=dark?'light':'dark'; try{localStorage.setItem(KEY,root.dataset.theme);}catch(e){} label();};
+  label(); document.body.appendChild(b);
+})();
+</script>
+</body>
+</html>
+

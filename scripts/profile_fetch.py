@@ -1,11 +1,16 @@
 """Read a public TikTok / YouTube / Instagram profile, rank its posts and propose a study list.
 
-It only READS the profile listing through yt-dlp (`--flat-playlist -J`). It never downloads a video.
-The proposal is written to <pack>/refs/proposal.json for the user to look at and choose from.
+`list` only READS the profile listing (yt-dlp `--flat-playlist -J`; Instagram falls back to instaloader,
+anonymous). The proposal goes to <pack>/refs/proposal.json. Videos are downloaded only by `download`, after
+the user picked them and confirmed private study use; they are local study copies, never published.
 
     profile_fetch.py list <url> (--pack DIR | --style SLUG) [--limit 60] [--top 20] [--pick-count 40]
                          [--tab auto|shorts|videos|all] [--cookies-from-browser BROWSER]
                          [--max-duration SECONDS] [--timeout SECONDS] [--json]
+    profile_fetch.py page (--pack DIR | --style SLUG) --out FILE.html      the tick page (no video in it)
+    profile_fetch.py pick (--pack | --style) (--ranks "1-5,8" | --ids a,b | --proposed)
+    profile_fetch.py download (--pack | --style) --i-confirm-private-study [--cookies-from-browser B]
+                         [--max-height 1080]       into refs/V01.mp4 ..., with refs/sources.json and sources.md
 
 Ranking: by views when at least 60 % of the posts have views; else by engagement (likes + 2 x comments
 + 2 x reposts) when likes pass the same test; else "pick" mode (the latest posts, nothing proposed).
@@ -295,6 +300,21 @@ def _resolve_pack(args):
     return Path(s["pack"])
 
 
+
+def profile_ok(args):
+    try:
+        return parse_profile_url(args.url)["platform"]
+    except Exception:
+        return None
+
+
+def _fetch_failed(e):
+    print(f"could not read the profile: {e}", file=sys.stderr)
+    if getattr(e, "needs_login", False):
+        print("try --cookies-from-browser <your browser>: your own logged-in browser, nothing is stored",
+              file=sys.stderr)
+    return 1
+
 def cmd_list(args) -> int:
     tabs_failed = []
     try:
@@ -309,11 +329,27 @@ def cmd_list(args) -> int:
         print(f"missing tool: {e}", file=sys.stderr)
         return 3
     except FetchError as e:
-        print(f"could not read the profile: {e}", file=sys.stderr)
-        if e.needs_login:
-            print("try --cookies-from-browser <your browser>: your own logged-in browser, nothing is stored",
-                  file=sys.stderr)
-        return 1
+        raw = None
+        if profile_ok(args) == "instagram":
+            if _has_instaloader():
+                try:
+                    raw = instaloader_posts(parse_profile_url(args.url)["handle"], args.limit)
+                except Exception as e2:  # instaloader raises its own types
+                    print(f"instaloader could not read the profile: {e2}", file=sys.stderr)
+                    raw = None
+            if raw is None:
+                print(f"could not read the profile: {e}", file=sys.stderr)
+                print("missing tool: pip install instaloader, or pass --cookies-from-browser <your browser>",
+                      file=sys.stderr)
+                return 3
+        if raw is None:
+            return _fetch_failed(e)
+    if not raw and profile_ok(args) == "instagram" and _has_instaloader():
+        try:
+            raw = instaloader_posts(parse_profile_url(args.url)["handle"], args.limit)
+        except Exception:
+            pass
+    profile = parse_profile_url(args.url)
     posts = [p for p in (normalise(r, profile["platform"]) for r in raw) if p]
     if not posts:
         print("no video posts found on this profile", file=sys.stderr)
@@ -348,6 +384,268 @@ def cmd_list(args) -> int:
     return 0
 
 
+
+# ---------------------------------------------------------------- Instagram fallback
+
+def instaloader_posts(handle: str, limit: int, module=None) -> list:
+    """Raw entries in the yt-dlp shape, read anonymously with instaloader (no password, ever)."""
+    if module is None:
+        import instaloader as module  # noqa: N813
+    L = module.Instaloader(download_pictures=False, download_videos=False, download_video_thumbnails=False,
+                           save_metadata=False, quiet=True)
+    prof = module.Profile.from_username(L.context, handle)
+    out = []
+    for post in prof.get_posts():
+        if len(out) >= limit:
+            break
+        if not getattr(post, "is_video", False):
+            continue
+        when = getattr(post, "date_utc", None)
+        out.append({"id": post.shortcode, "url": f"https://www.instagram.com/reel/{post.shortcode}/",
+                    "title": (getattr(post, "caption", None) or "")[:200],
+                    "view_count": getattr(post, "video_view_count", None), "like_count": getattr(post, "likes", None),
+                    "comment_count": getattr(post, "comments", None),
+                    "timestamp": int(when.replace(tzinfo=dt.timezone.utc).timestamp()) if when else None,
+                    "duration": getattr(post, "video_duration", None), "thumbnail": getattr(post, "url", None)})
+    return out
+
+
+def _has_instaloader():
+    import importlib.util
+    try:
+        return importlib.util.find_spec("instaloader") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+# ---------------------------------------------------------------- the page and the pick
+
+PAGE_TEMPLATE = Path(__file__).resolve().parent.parent / "assets" / "profile-pick-template.html"
+
+
+def _proposal_path(pack):
+    return Path(pack) / "refs" / "proposal.json"
+
+
+def load_proposal(pack):
+    p = _proposal_path(pack)
+    data = store.read_json(p, None)
+    if not isinstance(data, dict) or data.get("schema") != SCHEMA:
+        raise BadInput(f"no proposal in {p} (run profile_fetch.py list first)")
+    return data
+
+
+def build_page(proposal: dict, template: str) -> str:
+    keep = {k: proposal.get(k) for k in ("url", "platform", "handle", "fetched", "mode", "total_posts")}
+    keep["entries"] = [{k: e.get(k) for k in ("id", "rank", "title", "upload_date", "views", "likes", "duration_s",
+                                              "thumbnail", "proposed", "url")} for e in proposal.get("entries", [])]
+    block = json.dumps(keep, ensure_ascii=False, indent=1).replace("<", "\\u003c")
+    out, n = re.subn(r'(<script type="application/json" id="profile-data">)(.*?)(</script>)',
+                     lambda m: m.group(1) + "\n" + block + "\n" + m.group(3), template, count=1, flags=re.S)
+    if n != 1:
+        raise BadInput("the page template has no profile-data block")
+    return out
+
+
+def _parse_ranks(spec, n):
+    out = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", part)
+        if not m:
+            raise BadInput(f"bad rank '{part}' (use 1-5,8)")
+        a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+        if a < 1 or b > n or a > b:
+            raise BadInput(f"rank {part} is out of range 1-{n}")
+        out.extend(range(a, b + 1))
+    return list(dict.fromkeys(out))
+
+
+def pick(pack, *, ranks=None, ids=None, proposed=False) -> list:
+    data = load_proposal(pack)
+    entries = data.get("entries", [])
+    if proposed:
+        if data.get("mode") == "pick":
+            raise BadInput("pick mode proposes nothing: pass --ranks or --ids")
+        chosen = [e["id"] for e in entries if e.get("proposed")]
+        how = "proposed"
+    elif ranks:
+        by_rank = {e["rank"]: e["id"] for e in entries}
+        chosen = [by_rank[r] for r in _parse_ranks(ranks, len(entries)) if r in by_rank]
+        how = f"ranks {ranks}"
+    elif ids:
+        known = {e["id"] for e in entries}
+        chosen = [i.strip() for i in str(ids).split(",") if i.strip()]
+        bad = [i for i in chosen if i not in known]
+        if bad:
+            raise BadInput(f"unknown id(s): {', '.join(bad)}")
+        how = "ids"
+    else:
+        raise BadInput("give --ranks, --ids or --proposed")
+    if not chosen:
+        raise BadInput("nothing selected")
+
+    def go(d):
+        d["selected"] = list(dict.fromkeys(chosen))
+        d["selected_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        d["selected_how"] = how
+    store.update_json(_proposal_path(pack), {}, go)
+    return chosen
+
+
+# ---------------------------------------------------------------- download
+
+SOURCES_START, SOURCES_END = "<!-- profile_fetch:start -->", "<!-- profile_fetch:end -->"
+PRIVATE_LINE = "Study copies for private style training only. Never publish, upload or share them."
+CONSENT_HE = "ההורדה רק אחרי אישור שהיא ללימוד פרטי בלבד (--i-confirm-private-study)"
+
+
+def next_ref_name(refs: Path) -> str:
+    n = 0
+    for p in Path(refs).glob("V*.*"):
+        m = re.fullmatch(r"V(\d+)", p.stem)
+        if m:
+            n = max(n, int(m.group(1)))
+    n += 1
+    return f"V{n:02d}.mp4" if n < 100 else f"V{n:03d}.mp4"
+
+
+def _sha256(p):
+    import hashlib
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def _duration(p):
+    ffp = shutil.which("ffprobe")
+    if not ffp:
+        return None
+    r = subprocess.run([ffp, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(p)],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def render_sources_md(existing: str, sources: list, proposal: dict) -> str:
+    fetched = str(proposal.get("fetched") or "")[:10]
+    rows = ["| file | post | posted | views | downloaded | sha256 |", "|---|---|---|---|---|---|"]
+    for s in sources:
+        rows.append(f"| {s['file']} | {s['url']} | {s.get('posted') or '-'} | "
+                    f"{_fmt(s.get('views'))} | {str(s.get('downloaded') or '')[:10]} | {s['sha256'][:12]} |")
+    block = "\n".join([SOURCES_START, PRIVATE_LINE, "",
+                       f"Profile: {proposal.get('url')} (fetched {fetched}, ranked by {proposal.get('mode')})", "",
+                       *rows, SOURCES_END])
+    text = existing or ""
+    if SOURCES_START in text and SOURCES_END in text:
+        a, b = text.index(SOURCES_START), text.index(SOURCES_END) + len(SOURCES_END)
+        return text[:a] + block + text[b:]
+    return (text.rstrip("\n") + "\n\n" if text.strip() else "") + block + "\n"
+
+
+def download_selected(pack: Path, *, cookies_browser=None, max_height=1080, run=subprocess.run) -> dict:
+    pack = Path(pack)
+    refs = pack / "refs"
+    data = load_proposal(pack)
+    sel = data.get("selected") or []
+    if not sel:
+        raise BadInput("nothing selected: run profile_fetch.py pick first")
+    if not data.get("consent"):
+        store.update_json(_proposal_path(pack), {}, lambda d: d.update(
+            consent={"private_study": True, "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}))
+    by_id = {e["id"]: e for e in data.get("entries", [])}
+    src_path = refs / "sources.json"
+    done = {s["id"] for s in (store.read_json(src_path, {"sources": []}) or {}).get("sources", [])}
+    partial = refs / ".partial"
+    out = {"downloaded": [], "skipped": [], "failed": []}
+    base = ytdlp_cmd()
+    cookies = ["--cookies-from-browser", cookies_browser] if cookies_browser else []
+    h = int(max_height)
+    try:
+        for pid in sel:
+            if pid in done:
+                out["skipped"].append(pid)
+                continue
+            e = by_id.get(pid)
+            if e is None:
+                out["failed"].append({"id": pid, "error": "not in the proposal"})
+                continue
+            partial.mkdir(parents=True, exist_ok=True)
+            cmd = [*base, "--no-playlist", "-f", f"bv*[height<={h}]+ba/b[height<={h}]", "--merge-output-format",
+                   "mp4", "-o", f"{partial}/{pid}.%(ext)s", *cookies, e["url"]]
+            try:
+                r = run(cmd, capture_output=True, timeout=1800)
+            except subprocess.TimeoutExpired:
+                out["failed"].append({"id": pid, "error": "yt-dlp timed out"})
+                continue
+            files = sorted(partial.glob(f"{pid}.*"))
+            got = next((f for f in files if f.suffix.lower() == ".mp4"), files[0] if files else None)
+            if getattr(r, "returncode", 1) != 0 or got is None or got.stat().st_size == 0:
+                err = getattr(r, "stderr", b"")
+                err = err.decode("utf-8", "replace") if isinstance(err, bytes) else str(err or "")
+                out["failed"].append({"id": pid, "error": (err.strip().splitlines() or ["download failed"])[-1][:200]})
+                continue
+            dur = _duration(got)
+            if dur is not None and dur <= 0:
+                out["failed"].append({"id": pid, "error": "the downloaded file has no duration"})
+                continue
+            name = next_ref_name(refs)
+            os.replace(got, refs / name)
+            entry = {"file": name, "id": pid, "url": e["url"], "posted": e.get("upload_date"), "views": e.get("views"),
+                     "likes": e.get("likes"), "downloaded": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                     "sha256": _sha256(refs / name)}
+
+            def add(d, entry=entry):
+                d.setdefault("sources", []).append(entry)
+            store.update_json(src_path, {"sources": []}, add)
+            done.add(pid)
+            out["downloaded"].append(name)
+            md = refs / "sources.md"
+            old = md.read_text(encoding="utf-8") if md.is_file() else ""
+            new = render_sources_md(old, store.read_json(src_path, {"sources": []})["sources"], data)
+            tmp = md.with_name(md.name + ".tmp")
+            tmp.write_text(new, encoding="utf-8")
+            os.replace(tmp, md)
+    finally:
+        if partial.exists():
+            shutil.rmtree(partial, ignore_errors=True)
+    return out
+
+
+def cmd_page(args) -> int:
+    pack = _resolve_pack(args)
+    html = build_page(load_proposal(pack), PAGE_TEMPLATE.read_text(encoding="utf-8"))
+    Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.out).write_text(html, encoding="utf-8")
+    print(f"page: {args.out} (publish it privately; it holds no video)")
+    return 0
+
+
+def cmd_pick(args) -> int:
+    pack = _resolve_pack(args)
+    chosen = pick(pack, ranks=args.ranks, ids=args.ids, proposed=args.proposed)
+    print(f"selected {len(chosen)}: {', '.join(chosen)}")
+    return 0
+
+
+def cmd_download(args) -> int:
+    if not args.i_confirm_private_study:
+        print(CONSENT_HE, file=sys.stderr)
+        print("Download only after confirming private study use (--i-confirm-private-study)", file=sys.stderr)
+        return 2
+    pack = _resolve_pack(args)
+    res = download_selected(pack, cookies_browser=args.cookies_from_browser, max_height=args.max_height)
+    print(json.dumps(res, ensure_ascii=False))
+    for f in res["failed"]:
+        print(f"failed: {f['id']}: {f['error']}", file=sys.stderr)
+    return 1 if res["failed"] else 0
+
 def _limit(v):
     n = int(v)
     if not 1 <= n <= 200:
@@ -371,9 +669,34 @@ def main(argv=None) -> int:
     a.add_argument("--cookies-from-browser")
     a.add_argument("--max-duration", type=float)
     a.add_argument("--json", action="store_true")
+    for name, helptext in (("page", "the tick page"), ("pick", "choose posts"), ("download", "download the picks")):
+        a = sub.add_parser(name, help=helptext)
+        g = a.add_mutually_exclusive_group(required=True)
+        g.add_argument("--pack")
+        g.add_argument("--style")
+        if name == "page":
+            a.add_argument("--out", required=True)
+        elif name == "pick":
+            h = a.add_mutually_exclusive_group(required=True)
+            h.add_argument("--ranks")
+            h.add_argument("--ids")
+            h.add_argument("--proposed", action="store_true")
+        else:
+            a.add_argument("--i-confirm-private-study", action="store_true")
+            a.add_argument("--cookies-from-browser")
+            a.add_argument("--max-height", type=int, default=1080)
     args = ap.parse_args(argv)
     store.print_utf8()
-    return cmd_list(args)
+    if args.cmd == "list":
+        return cmd_list(args)
+    try:
+        return {"page": cmd_page, "pick": cmd_pick, "download": cmd_download}[args.cmd](args)
+    except BadInput as e:
+        print(f"bad input: {e}", file=sys.stderr)
+        return 2
+    except MissingTool as e:
+        print(f"missing tool: {e}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":

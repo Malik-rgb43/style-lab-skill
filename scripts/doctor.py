@@ -48,13 +48,15 @@ PAID_STAGES = {"cloud_asr"}
 # Entries a stage works without: "recommended" (results are thinner without it) and "optional"
 # (one measurement is skipped and reported as not_run). Neither counts as missing.
 STAGE_EXTRAS = {
+    "train_profile": {"optional": ["instaloader"]},
     "train": {"recommended": ["cv2"],
               "optional": ["librosa", "fontTools", "PIL", "ocr", "faster_whisper", "model_yunet"]},
 }
 YUNET_FILE = "face_detection_yunet_2023mar.onnx"
 
 BINARIES = ["ffmpeg", "ffprobe", "node", "blender", "yt-dlp", "gh"]
-MODULES = ["numpy", "cv2", "torch", "torchaudio", "transformers", "faster_whisper", "PIL", "librosa", "fontTools"]
+MODULES = ["numpy", "cv2", "torch", "torchaudio", "transformers", "faster_whisper", "PIL", "librosa", "fontTools",
+           "instaloader"]
 # Precise cut models: presence in the cache only (same rule as align.py); a model is never loaded here.
 MODELS = {
     "model_wav2vec2_he": ("hf", "imvladikon/wav2vec2-large-xlsr-53-hebrew"),
@@ -81,6 +83,7 @@ HINTS = {
     "PIL": "pip install pillow",
     "librosa": "pip install librosa (optional: a second onset envelope for the tempo; numpy is used without it)",
     "fontTools": "pip install fonttools (optional: font matching and glyph coverage checks)",
+    "instaloader": "pip install instaloader (only for Instagram when yt-dlp needs a login)",
     "ocr": "pip install rapidocr-onnxruntime, or install tesseract (optional: reads on-screen text; boxes are found without it)",
     "model_yunet": "YuNet face model, about 230 KB from the OpenCV model zoo: python scripts/fetch_model.py yunet "
                    "after the user says yes (faces fall back to Haar without it)",

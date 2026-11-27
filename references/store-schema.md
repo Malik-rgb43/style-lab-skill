@@ -83,6 +83,8 @@ Writes go through `store.update_json` (locked, atomic), so the Studio and the ch
 | `look.json` (`look/1`) | `look.py` | `per_shot`, `summary{metric: stat}` (grain, vignette, sharpness, tone, split toning, halation, chroma, letterbox, flicker), `text_finish` |
 | `events.manual.json` | Claude, from the sheets | `[{t, type, label, attrs}]` |
 | `creator.json` (`creator/2`) | Claude (`references/creator-mind.md`) | story, visual ideas, decisions, retention, toolchain |
+| `refs/proposal.json` (`profile-proposal/1`) | `profile_fetch.py list/pick/download` | `{url, platform, handle, fetched, mode: views|engagement|pick, total_posts, entries: [{id, url, title, upload_date, duration_s, views, likes, comments, reposts, thumbnail, rank, score, proposed}], warnings, tabs_failed, selected, selected_at, selected_how, consent: {private_study, at}|null}` (in the pack's `refs/`) |
+| `refs/sources.json`, `refs/sources.md` | `profile_fetch.py download` | `{sources: [{file, id, url, posted, views, likes, downloaded, sha256}]}`; the .md block between `<!-- profile_fetch:start/end -->` (hand text around it is kept) |
 | `events.json` | optional | the actual events for the hold-out; measured from the folder when absent |
 
 Per pack:

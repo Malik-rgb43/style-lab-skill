@@ -318,3 +318,175 @@ def test_unwritable_pack_exit2(fake, tmp_path):
     blocker.write_text("x", encoding="utf-8")
     r = run_cli("profile_fetch.py", "list", "https://www.tiktok.com/@example.creator", "--pack", blocker / "pack")
     assert r.returncode == 2 and "Traceback" not in r.stderr
+
+
+# ---------------------------------------------------------------- Task 2: page, pick, download
+
+def _listed(fake, tmp_path, pack=None):
+    log = fake({"tiktok.com": "tiktok_flat.json"})
+    pack = pack or tmp_path / "כונן אחר" / "חבילה"
+    r = run_cli("profile_fetch.py", "list", "https://www.tiktok.com/@example.creator", "--pack", pack)
+    assert r.returncode == 0, r.stderr
+    return pack, log
+
+
+def _media(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg missing")
+    clip = tmp_path / "clip.mp4"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x64:d=1", str(clip)], check=True)
+    monkeypatch.setenv("FAKE_YTDLP_MEDIA", str(clip))
+    return clip
+
+
+def _calls(log):
+    rows = [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
+    return [c for c in rows if "-J" not in c["argv"]]
+
+
+def test_download_requires_consent_flag(fake, tmp_path):
+    pack, log = _listed(fake, tmp_path)
+    assert run_cli("profile_fetch.py", "pick", "--pack", pack, "--ranks", "1-3").returncode == 0
+    r = run_cli("profile_fetch.py", "download", "--pack", pack)
+    assert r.returncode == 2 and "--i-confirm-private-study" in r.stderr
+    assert not list((pack / "refs").glob("V*.mp4")) and _calls(log) == []
+
+
+def test_download_requires_selection(fake, tmp_path):
+    pack, _ = _listed(fake, tmp_path)
+    r = run_cli("profile_fetch.py", "download", "--pack", pack, "--i-confirm-private-study")
+    assert r.returncode == 2
+
+
+def test_download_writes_refs_and_sources(fake, tmp_path, monkeypatch):
+    import datetime as dt
+    import hashlib
+    pack, log = _listed(fake, tmp_path)
+    _media(tmp_path, monkeypatch)
+    run_cli("profile_fetch.py", "pick", "--pack", pack, "--ranks", "1-3")
+    r = run_cli("profile_fetch.py", "download", "--pack", pack, "--i-confirm-private-study")
+    assert r.returncode == 0, r.stderr
+    refs = pack / "refs"
+    assert sorted(p.name for p in refs.glob("V*.mp4")) == ["V01.mp4", "V02.mp4", "V03.mp4"]
+    src = json.loads((refs / "sources.json").read_text(encoding="utf-8"))["sources"]
+    for s in src:
+        assert hashlib.sha256((refs / s["file"]).read_bytes()).hexdigest() == s["sha256"]
+    md = (refs / "sources.md").read_text(encoding="utf-8")
+    assert md.count("| V0") == 3 and "private style training only" in md
+    prop = json.loads((refs / "proposal.json").read_text(encoding="utf-8"))
+    first = min(c["t"] for c in _calls(log))
+    assert dt.datetime.fromisoformat(prop["consent"]["at"]).timestamp() <= first + 1
+    assert not (refs / ".partial").exists()
+
+
+def test_download_resume_no_renumber(fake, tmp_path, monkeypatch):
+    pack, log = _listed(fake, tmp_path)
+    _media(tmp_path, monkeypatch)
+    (pack / "refs" / "V01.mp4").write_bytes(b"hand file")
+    run_cli("profile_fetch.py", "pick", "--pack", pack, "--ranks", "1-3")
+    assert run_cli("profile_fetch.py", "download", "--pack", pack, "--i-confirm-private-study").returncode == 0
+    names = sorted(p.name for p in (pack / "refs").glob("V*.mp4"))
+    assert names == ["V01.mp4", "V02.mp4", "V03.mp4", "V04.mp4"]
+    n = len(_calls(log))
+    before = {p.name: p.read_bytes() for p in (pack / "refs").glob("V*.mp4")}
+    assert run_cli("profile_fetch.py", "download", "--pack", pack, "--i-confirm-private-study").returncode == 0
+    assert len(_calls(log)) == n
+    assert {p.name: p.read_bytes() for p in (pack / "refs").glob("V*.mp4")} == before
+
+
+def test_partial_failure_continues_exit1(fake, tmp_path, monkeypatch):
+    pack, _ = _listed(fake, tmp_path)
+    _media(tmp_path, monkeypatch)
+    run_cli("profile_fetch.py", "pick", "--pack", pack, "--ranks", "1-3")
+    prop = json.loads((pack / "refs" / "proposal.json").read_text(encoding="utf-8"))
+    bad = prop["selected"][1]
+    monkeypatch.setenv("FAKE_YTDLP_FAIL_IDS", bad)
+    r = run_cli("profile_fetch.py", "download", "--pack", pack, "--i-confirm-private-study")
+    assert r.returncode == 1 and bad in r.stderr
+    assert len(list((pack / "refs").glob("V*.mp4"))) == 2 and not (pack / "refs" / ".partial").exists()
+
+
+def test_sources_md_hand_text_kept():
+    prop = {"url": "https://www.tiktok.com/@example.creator", "fetched": "2026-01-01T00:00:00", "mode": "views"}
+    src = [{"file": "V01.mp4", "url": "https://www.tiktok.com/@example.creator/video/1", "posted": "2026-01-01",
+            "views": 5, "downloaded": "2026-01-02T00:00:00", "sha256": "a" * 64}]
+    hand = "# my notes\nabove\n"
+    once = pf.render_sources_md(hand, src, prop)
+    twice = pf.render_sources_md(once + "below\n", src, prop)
+    assert twice.startswith(hand) and twice.endswith("below\n") and twice.count(pf.SOURCES_START) == 1
+
+
+def test_pick_errors_exit2(fake, tmp_path):
+    pack, _ = _listed(fake, tmp_path)
+    assert run_cli("profile_fetch.py", "pick", "--pack", pack, "--ranks", "99").returncode == 2
+    assert run_cli("profile_fetch.py", "pick", "--pack", pack, "--ids", "nope").returncode == 2
+    prop = json.loads((pack / "refs" / "proposal.json").read_text(encoding="utf-8"))
+    prop["mode"] = "pick"
+    (pack / "refs" / "proposal.json").write_text(json.dumps(prop), encoding="utf-8")
+    assert run_cli("profile_fetch.py", "pick", "--pack", pack, "--proposed").returncode == 2
+
+
+def test_style_flag_resolves_pack_for_pick(fake, tmp_path):
+    import styles
+    pack = tmp_path / "stylepack"
+    styles.save_registry({"version": 2, "styles": [{"slug": "demo", "name": "Demo", "pack": str(pack)}]})
+    _listed(fake, tmp_path, pack)
+    assert run_cli("profile_fetch.py", "pick", "--style", "demo", "--ranks", "1").returncode == 0
+    assert json.loads((pack / "refs" / "proposal.json").read_text(encoding="utf-8"))["selected"]
+
+
+class _Post:
+    def __init__(self, k, video=True):
+        import datetime as dt
+        self.shortcode, self.is_video = f"SC{k:02d}", video
+        self.video_view_count, self.likes, self.comments = 1000 * (k + 1), 10 * k, k
+        self.date_utc = dt.datetime(2026, 1, (k % 28) + 1)
+        self.video_duration, self.caption, self.url = 20.0, f"post {k}", f"https://example.cdn/{k}.jpg"
+
+
+class _FakeInstaloader:
+    class Instaloader:
+        def __init__(self, **kw):
+            self.context = object()
+
+    class Profile:
+        @staticmethod
+        def from_username(ctx, handle):
+            class _P:
+                def get_posts(self):
+                    return [_Post(k) for k in range(15)] + [_Post(99, video=False)]
+            return _P()
+
+
+def test_instagram_falls_back_to_instaloader(fake, tmp_path, monkeypatch):
+    import sys
+    monkeypatch.setenv("FAKE_YTDLP_FAIL", "ERROR: login required")
+    monkeypatch.setitem(sys.modules, "instaloader", _FakeInstaloader)
+    monkeypatch.setattr(pf, "_has_instaloader", lambda: True)
+    pack = tmp_path / "pack"
+    assert pf.main(["list", "https://www.instagram.com/example.creator/", "--pack", str(pack)]) == 0
+    prop = json.loads((pack / "refs" / "proposal.json").read_text(encoding="utf-8"))
+    assert prop["mode"] == "views" and all("/reel/" in e["url"] for e in prop["entries"])
+    assert len(prop["entries"]) == 15
+
+
+def test_instagram_no_fallback_exit3(fake, tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_YTDLP_FAIL", "ERROR: login required")
+    monkeypatch.setattr(pf, "_has_instaloader", lambda: False)
+    assert pf.main(["list", "https://www.instagram.com/example.creator/", "--pack", str(tmp_path / "p")]) == 3
+
+
+def test_page_has_no_media_or_scripts(fake, tmp_path):
+    import re
+    pack, _ = _listed(fake, tmp_path)
+    out = tmp_path / "page.html"
+    assert run_cli("profile_fetch.py", "page", "--pack", pack, "--out", out).returncode == 0
+    html = out.read_text(encoding="utf-8")
+    prop = json.loads((pack / "refs" / "proposal.json").read_text(encoding="utf-8"))
+    assert all(e["id"] in html for e in prop["entries"])
+    assert "<video" not in html and "<script src" not in html
+    thumbs = {e["thumbnail"] for e in prop["entries"] if e.get("thumbnail")}
+    for url in re.findall(r"https://[^\"'\s)<>]+", html):
+        assert url in thumbs or "fonts.googleapis.com" in url or "fonts.gstatic.com" in url

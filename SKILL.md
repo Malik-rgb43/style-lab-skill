@@ -92,7 +92,8 @@ The full procedure, with every command, is `references/stage-a-train.md`. In sho
 1. **A0 sources.** Videos, a profile link, this conversation, a HyperFrames project (code beats
    video: `code_tokens.py`), or a description. Show "מה לקחתי מהשיחה" for a yes. Per-layer
    sources (`code_tokens.py layer`) when the owner wants fonts or hierarchy from a brand or project.
-2. **A1 inputs.** Register (`styles.py add`, status `training`); `V01.mp4 ...` in `refs/`, ~20 videos,
+2. **A1 inputs.** Register (`styles.py add`, status `training`); `V01.mp4 ...` in `refs/` (a profile link:
+   `profile_fetch.py list/pick/download`, consent first, see stage-a-train.md), ~20 videos,
    family vs contrast; `doctor.py` `[train]` block. References stay local: never published, uploaded
    or put in an artifact.
 3. **The style board (checkpoint 1).** Frames every 0.5 s and contact sheets, categories, 100-150
