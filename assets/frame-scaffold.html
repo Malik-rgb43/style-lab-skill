@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="{{LANG}}" dir="{{DIR}}">
+<head>
+<meta charset="utf-8">
+<title>B{{BEAT}} {{SET}}{{VARIANT}}</title>
+<link rel="stylesheet" href="tokens.css">
+<style>
+/* One frame variant of one beat. Colours only through the --sl-* tokens (the check refuses other hex
+   literals); the beat's real words only (words.json), never sample text. */
+html, body { margin: 0; background: var(--sl-background); }
+#root { position: relative; width: {{W}}px; height: {{H}}px; overflow: hidden; background: var(--sl-background);
+        color: var(--sl-text); font-family: var(--sl-font-body), system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<div id="root" data-composition-id="b{{BEAT}}-s{{SET}}-{{VARIANT}}" data-width="{{W}}" data-height="{{H}}"
+     data-start="0" data-duration="{{DUR}}">
+  <!-- Claude: build this variant here. Replace the line below with the beat's words (see words.json). -->
+  <div id="text" class="clip" data-start="0" data-duration="{{DUR}}">{{BEAT_TEXT}}</div>
+</div>
+<script>
+  const tl = gsap.timeline({ paused: true });
+  window.__timelines = window.__timelines || {};
+  window.__timelines["b{{BEAT}}-s{{SET}}-{{VARIANT}}"] = tl;
+</script>
+</body>
+</html>
