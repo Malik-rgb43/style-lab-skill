@@ -94,7 +94,7 @@ def test_list_has_clients_column(home):
 
 def test_write_on_v1_creates_backup(home):
     seed(home)
-    r = run_cli("styles.py", "set", "gabi-organic", "aspect=16:9")
+    r = run_cli("styles.py", "set", "example-organic", "aspect=16:9")
     assert r.returncode == 0, r.stderr
     baks = list(home.glob("styles.json.bak-*"))
     assert len(baks) == 1
@@ -114,7 +114,7 @@ def test_clients_lookup_failure_does_not_crash(home, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["styles.py", "list"])
     assert styles.main() == 0
     out = capsys.readouterr()
-    assert "gabi-organic" in out.out and "warning" in out.err
+    assert "example-organic" in out.out and "warning" in out.err
 
 
 def _seed_styles(home, styles):

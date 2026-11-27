@@ -1,6 +1,6 @@
 ---
 name: style-lab
-description: Learns a video editing style from reference videos or a description, keeps styles and clients (a brand profile with logo, fonts and a palette built from one colour) in one global store, and edits footage in a chosen style for a chosen client with an edit plan and review rounds, and learns from every note and pick (lessons become craft, style or client rules on the owner's yes). Starts every session with a connections check. Use when the user wants to train, save, learn or apply a reusable editing style, or add a client and its palette: style-lab, editing style, client, palette, סגנון עריכה, תלמד את הסגנון, תאמן סגנון, לקוח, לקוח חדש, פלטת צבעים. For a one-off "make mine like this reference" use reference-style-matching instead.
+description: Learns a video editing style from reference videos or a description, keeps styles and clients (a brand profile with logo, fonts and a palette built from one colour) in one global store, and edits footage in a chosen style for a chosen client with an edit plan and review rounds, and learns from every note and pick (lessons become craft, style or client rules on the owner's yes). Starts every session with a connections check. Use when the user wants to train, save, learn or apply a reusable editing style, or add a client and its palette: style-lab, editing style, client, palette, סגנון עריכה, תלמד את הסגנון, תאמן סגנון, לקוח, לקוח חדש, פלטת צבעים, profile link, לינק לפרופיל. For a one-off "make mine like this reference" use reference-style-matching instead.
 ---
 
 # style-lab
@@ -11,7 +11,8 @@ files) or a written description; a style board or guide; reference reels into a 
 edit a talking-head or short-form clip "in the style of" a trained style and fix it in review
 rounds; "make my videos look like this creator's", "save this look so every video matches", "the
 edit looks generic / AI". Hebrew: סגנון עריכה, ליצור סגנון, ללמד את Claude סגנון, בורד סגנון,
-לוח השראה, ריפרנסים, תערוך בסגנון, תוכנית עריכה, סבב הערות, סטייל לסרטונים.
+לוח השראה, ריפרנסים, תערוך בסגנון, תוכנית עריכה, סבב הערות, סטייל לסרטונים, פרופיל,
+לינק לפרופיל; a profile link (TikTok, YouTube, Instagram) to learn a creator's style.
 
 **סקיל = הוראות קבועות ל־Claude.** This skill is part of the "וידאו עם AI" course skills by
 Gabriel Gelman (Apache-2.0). It is an advanced bonus skill: it assumes Claude Code with
@@ -193,6 +194,7 @@ skill edits (never edited without a yes) and new ideas (learning-loop §9).
 ## References
 - `references/stage-a-train.md`: training step by step (A0 sources, measuring, hold-out, laws, assets, recipes, create, prove, what to show the owner). Read before Phase A.
 - `references/creator-mind.md`: how to write `creator.json` (the creator's visual ideas, story, decisions, retention, toolchain). Read before A2's watching step.
+- `references/stage-b-edit.md`: stage B step by step (B1 precise cut, B2 plan, the cost gate, B3 frames, B4 motion, picks, B5 build gates, B6 rounds, B7 final and the ideas bank). Read before Phase B.
 - `references/frames-and-motion.md`: the frame scaffold, tokens, variant rules, motion params, signatures and the render budget. Read before B3 and B4.
 - `references/craft-rules.md`: the way of thinking and the rules that survived real review rounds (composition, motion, speaker, captions, cuts, sound, sources, build hygiene). Read before B2 and B4.
 - `references/review-loop.md`: drafts, the review room page, reading notes, rounds, final.

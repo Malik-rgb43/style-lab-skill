@@ -12,6 +12,7 @@ Commands:
                                                  exit 4 when a required one is missing
     doctor.py session --set name=ok|missing [--note ".."]   record an MCP server / skill seen in this session
     doctor.py session --clear                    forget the recorded session block
+    doctor.py stages --markdown                  the connections table (for the README); runs no checks
 """
 import argparse
 import datetime as dt
@@ -419,6 +420,24 @@ def cmd_session(args):
     return 0
 
 
+
+def stages_markdown():
+    """The connections table for the README: per stage what it needs, what is optional, what costs money."""
+    rows = ["| Stage | Needs | Recommended / optional | Paid |", "|---|---|---|---|"]
+    for stage, names in STAGES.items():
+        ex = STAGE_EXTRAS.get(stage, {})
+        extra = [f"{n} (recommended)" for n in ex.get("recommended", [])] + [f"{n} (optional)" for n in ex.get("optional", [])]
+        rows.append(f"| {stage} | {', '.join(names)} | {', '.join(extra) or '-'} | {'yes' if stage in PAID_STAGES else 'no'} |")
+    rows += ["", "| Entry | How to add it |", "|---|---|"]
+    seen = []
+    for stage, names in STAGES.items():
+        ex = STAGE_EXTRAS.get(stage, {})
+        for n in list(names) + ex.get("recommended", []) + ex.get("optional", []):
+            if n not in seen and n in HINTS:
+                seen.append(n)
+                rows.append(f"| {n} | {HINTS[n].replace('|', '/')} |")
+    return "\n".join(rows)
+
 def main(argv=None):
     return store.exit_on_lock_timeout(_main, argv)
 
@@ -433,10 +452,15 @@ def _main(argv=None):
     s.add_argument("--set", action="append")
     s.add_argument("--note")
     s.add_argument("--clear", action="store_true")
+    m = sub.add_parser("stages", help="print the connections table (runs no checks)")
+    m.add_argument("--markdown", action="store_true")
     args = p.parse_args(argv)
     store.print_utf8()
     if args.cmd == "session":
         return cmd_session(args)
+    if args.cmd == "stages":
+        print(stages_markdown())
+        return 0
     data = run_checks(args.deep)
     rows = st = None
     if args.style:

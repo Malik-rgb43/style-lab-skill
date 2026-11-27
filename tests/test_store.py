@@ -80,16 +80,16 @@ def test_append_jsonl(home):
 
 
 def test_slugify():
-    assert store.slugify("Gabi Organic", set()) == "gabi-organic"
-    assert store.slugify("קורס גבי", set()) == "kvrs-gby"
-    assert store.slugify("Gabi Organic", {"gabi-organic"}) == "gabi-organic-2"
+    assert store.slugify("Example Organic", set()) == "example-organic"
+    assert store.slugify("קורס לדוגמה", set()) == "kvrs-ldvgmh"
+    assert store.slugify("Example Organic", {"example-organic"}) == "example-organic-2"
     assert re.match(r"^[a-z0-9][a-z0-9-]*$", store.slugify("!!!", set()))
     assert store.slugify("!!!", {"item"}) == "item-2"
 
 
 def test_slugify_mixed_and_hebrew_words():
     assert store.slugify("קורס AI", set()) == "kvrs-ai"
-    assert store.slugify("גבי-אורגני", set()) == "gby-vrgny"
+    assert store.slugify("חנות-אורגנית", set()) == "chnvt-vrgnyt"
     assert store.slugify("קורס 2", set()) == "kvrs-2"
 
 
