@@ -1,5 +1,7 @@
 /* Style Studio: reads the store through /api, writes picks and owner actions through POST /api.
-   All values from files are text: set with textContent or escaped before they join HTML. */
+   Artifact mode (window.STUDIO_ARTIFACT set by studio_artifact.py): reads the published snapshot files and
+   saves every action as a row in the artifact's db ("actions"); Claude applies the rows with
+   studio_artifact.py apply. All values from files are text: set with textContent or escaped before HTML. */
 (function () {
   "use strict";
   const $ = (s, el = document) => el.querySelector(s);
@@ -10,21 +12,104 @@
   const STEP = {plan: "תוכנית", frames: "פריימים", motion: "תנועה"};
   const SOURCE = {law: "חוק של הסגנון", idea: "מבנק הרעיונות", invention: "רעיון חדש"};
   let data = null;
+  const ART = window.STUDIO_ARTIFACT || null;
+  let db, pending = [];
+  let cur = location.hash;
+  const go = h => { if (ART) { cur = h; route(); } else location.hash = h; };
 
   // ------------------------------------------------------------ io
+  async function useDb() {
+    if (db !== undefined) return db;
+    try { db = (window.claude && window.claude.use) ? await window.claude.use("db") : null; } catch (e) { db = null; }
+    return db;
+  }
+  const docsOf = s => ((s && (s.docs || s.documents)) || (Array.isArray(s) ? s : [])).map(x => typeof x.data === "function" ? x.data() : (x.data || x));
+  async function loadPending() {
+    const d = await useDb();
+    if (!d) return;
+    try {
+      const rows = docsOf(await d.collection("actions").get());
+      pending = rows.filter(r => r && r.route && r.at > (ART.built_at || "")).sort((a, b) => a.at < b.at ? -1 : 1);
+    } catch (e) { pending = []; }
+  }
+  function overlayOverview(o) {
+    for (const r of pending) {
+      let m;
+      if ((m = r.route.match(/^\/api\/lesson\/([^/]+)\/(approve|reject)$/))) {
+        const l = o.lessons.find(x => x.id === m[1]); if (l) { l.status = m[2] === "approve" ? "rule" : "rejected"; l.queued = true; }
+      } else if ((m = r.route.match(/^\/api\/idea\/([^/]+)\/remove$/))) {
+        o.ideas = o.ideas.filter(i => i.id !== m[1]);
+      } else if ((m = r.route.match(/^\/api\/style\/([^/]+)\/rename$/))) {
+        const s = o.styles.find(x => x.slug === m[1]); if (s) { s.name = (r.body || {}).name || s.name; s.queued = true; }
+      }
+    }
+    return o;
+  }
+  function overlayRoom(pid, room) {
+    for (const r of pending) {
+      const m = r.route.match(/^\/api\/project\/([^/]+)\/(pick|motion-mode)$/);
+      if (!m || decodeURIComponent(m[1]) !== pid) continue;
+      const b = r.body || {};
+      room.picks = room.picks || {};
+      if (m[2] === "motion-mode") { room.picks.motion = room.picks.motion || {beats: {}}; room.picks.motion.mode = b.mode; continue; }
+      let sec;
+      if (b.step === "motion") { room.picks.motion = room.picks.motion || {beats: {}}; sec = room.picks.motion.beats = room.picks.motion.beats || {}; }
+      else sec = room.picks[b.step] = room.picks[b.step] || {};
+      sec[String(b.beat)] = {picked: b.id || null, more: !!b.more, own: b.own || "", queued: true};
+      if (b.note != null) (room.picks.notes = room.picks.notes || {})[String(b.beat)] = b.note;
+    }
+    return room;
+  }
   async function get(url) {
+    if (ART) {
+      const m = url.match(/^\/api\/project\/(.+)$/);
+      const pid = m && decodeURIComponent(m[1]);
+      const entry = m && data && data.projects.find(p => p.id === pid);
+      const file = url === "/api/overview" ? "data/overview.json" : entry && entry.room_file;
+      if (!file) throw new Error("לא נמצא");
+      const r = await fetch(file);
+      if (!r.ok) throw new Error("הקובץ חסר בארטיפקט");
+      const j = await r.json();
+      if (!m) { await loadPending(); return overlayOverview(j); }
+      return overlayRoom(pid, j);
+    }
     const r = await fetch(url, {credentials: "same-origin"});
     const j = await r.json().catch(() => ({error: "bad response"}));
     if (!r.ok) throw new Error(j.error || r.status);
     return j;
   }
   async function post(url, body) {
+    if (ART) {
+      const d = await useDb();
+      if (!d) throw new Error("השמירה לא זמינה כאן. פתחו את הארטיפקט ב־claude.ai כשאתם מחוברים");
+      const row = {route: url, body: body || {}, at: new Date().toISOString(), applied: false};
+      const id = row.at.replace(/[^0-9]/g, "") + "-" + Math.random().toString(36).slice(2, 6);
+      await d.collection("actions").doc(id).set(row);
+      pending.push(row);
+      return {ok: true, queued: true, out: "", err: ""};
+    }
     const r = await fetch(url, {method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body || {})});
     const j = await r.json().catch(() => ({error: "bad response"}));
     if (!r.ok) throw new Error(j.error || r.status);
     return j;
   }
+  function ask(text, input) {
+    return new Promise(res => {
+      const m = document.createElement("div");
+      m.className = "modal";
+      m.innerHTML = `<div class="mbox" role="dialog" aria-modal="true"><p></p>${input != null ? '<input class="note-in" id="ask-in">' : ""}<div class="acts"><button class="btn pri" data-a="ok" type="button">אישור</button><button class="btn" data-a="no" type="button">ביטול</button></div></div>`;
+      m.querySelector("p").textContent = text;
+      const inp = m.querySelector("#ask-in");
+      if (inp) inp.value = input;
+      document.body.append(m);
+      (inp || m.querySelector("[data-a=ok]")).focus();
+      const done = ok => { m.remove(); res(ok ? (inp ? inp.value : true) : (inp ? null : false)); };
+      m.addEventListener("click", e => { const a = e.target.dataset && e.target.dataset.a; if (a) done(a === "ok"); else if (e.target === m) done(false); });
+      m.addEventListener("keydown", e => { if (e.key === "Escape") done(false); if (e.key === "Enter" && inp) done(true); });
+    });
+  }
+  const saved = r => r && r.queued ? "נשמר. Claude יחיל אחרי \"בחרתי\"" : null;
   function toast(msg) {
     const t = $("#toast"); t.textContent = msg; t.classList.add("on");
     clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("on"), 2400);
@@ -65,7 +150,7 @@
           <div class="kv"><span class="k">לקוחות</span><span class="v">${s.clients.length ? s.clients.map(c => `<span class="av"><i>${esc((c || "?")[0])}</i>${esc(c)}</span>`).join("") : '<span class="none">אין</span>'}</span></div>
           <div class="kv"><span class="k">חיבורים</span><span class="v">${(s.requires || []).map(r => `<span class="cx${(data.caps.missing && Object.values(data.caps.missing).flat().includes(r.name)) ? " missing" : ""}"><i></i>${esc(r.name)}</span>`).join("") || '<span class="none">-</span>'}</span></div>
         </div></article>`).join("")}</div>`);
-    screen.querySelectorAll("[data-style]").forEach(c => c.addEventListener("click", () => location.hash = "#/style/" + c.dataset.style));
+    screen.querySelectorAll("[data-style]").forEach(c => c.addEventListener("click", () => go("#/style/" + c.dataset.style)));
   }
 
   function styleOne(slug) {
@@ -81,9 +166,9 @@
       <h2 class="meta" style="margin:8px 0">חוקים של הסגנון</h2>
       <div class="list">${rules.map(r => `<div class="row-item"><span class="mono">${esc(r.id)}</span><div class="grow"><b>${esc(r.measurable)}</b><p>${esc(r.text)}</p></div></div>`).join("") || '<div class="empty">עוד אין חוקים שאושרו לסגנון הזה</div>'}</div>`);
     $("#rename").addEventListener("click", async () => {
-      const name = prompt("שם חדש לסגנון", s.name);
+      const name = await ask("שם חדש לסגנון", s.name);
       if (!name || name === s.name) return;
-      try { const r = await post(`/api/style/${encodeURIComponent(slug)}/rename`, {name}); if (!r.ok) throw new Error(r.err); toast("השם נשמר"); await load(); styleOne(slug); }
+      try { const r = await post(`/api/style/${encodeURIComponent(slug)}/rename`, {name}); if (!r.ok) throw new Error(r.err); toast(saved(r) || "השם נשמר"); await load(); styleOne(slug); }
       catch (e) { toast("לא נשמר: " + e.message); }
     });
   }
@@ -98,7 +183,7 @@
           <div class="swatch">${Object.values(c.palette).map(h => `<i style="background:${/^#[0-9a-f]{3,8}$/i.test(h) ? h : "transparent"}" title="${esc(h)}"></i>`).join("")}</div>
           <div class="kv"><span class="k">סגנונות</span><span class="v">${c.styles.map(x => esc(x)).join(", ") || '<span class="none">אין</span>'}</span></div>
         </div></article>`).join("")}</div>`);
-    screen.querySelectorAll("[data-client]").forEach(c => c.addEventListener("click", () => location.hash = "#/client/" + c.dataset.client));
+    screen.querySelectorAll("[data-client]").forEach(c => c.addEventListener("click", () => go("#/client/" + c.dataset.client)));
   }
 
   function clientOne(slug) {
@@ -134,8 +219,8 @@
     screen.querySelectorAll("video").forEach(v => { v.closest(".card").addEventListener("mouseenter", () => v.play().catch(() => {})); v.closest(".card").addEventListener("mouseleave", () => v.pause()); });
     screen.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", async e => {
       e.stopPropagation();
-      if (!confirm("להסיר את הרעיון? הוא עובר לארכיון, לא נמחק.")) return;
-      try { const r = await post(`/api/idea/${b.dataset.rm}/remove`); if (!r.ok) throw new Error(r.err); toast("הוסר לארכיון"); await load(); ideas(); }
+      if (!await ask("להסיר את הרעיון? הוא עובר לארכיון, לא נמחק.")) return;
+      try { const r = await post(`/api/idea/${b.dataset.rm}/remove`); if (!r.ok) throw new Error(r.err); toast(saved(r) || "הוסר לארכיון"); await load(); ideas(); }
       catch (err) { toast("לא הוסר: " + err.message); }
     }));
   }
@@ -144,7 +229,7 @@
     nav("learning"); crumb(["למידה"]);
     const open = data.lessons.filter(l => l.status === "candidate" || l.status === "proposed");
     const rules = data.lessons.filter(l => l.status === "rule");
-    const row = (l, acts) => `<div class="row-item"><span class="mono">${esc(l.id)}</span><div class="grow"><b>${esc(l.measurable)}</b><p>${esc(l.text)}</p><p class="meta sm">${esc(l.layer)}${l.target ? " · " + esc(l.target) : ""}${l.scope ? " · " + esc(l.scope) : ""}</p></div>${acts ? `<div class="acts"><button class="btn pri" data-ok="${esc(l.id)}" data-st="${esc(l.status)}" type="button">לאשר כחוק</button><button class="btn" data-no="${esc(l.id)}" type="button">לדחות</button></div>` : ""}</div>`;
+    const row = (l, acts) => `<div class="row-item"><span class="mono">${esc(l.id)}</span><div class="grow"><b>${esc(l.measurable)}</b>${l.queued ? ' <span class="queued">ממתין ל־Claude</span>' : ""}<p>${esc(l.text)}</p><p class="meta sm">${esc(l.layer)}${l.target ? " · " + esc(l.target) : ""}${l.scope ? " · " + esc(l.scope) : ""}</p></div>${acts ? `<div class="acts"><button class="btn pri" data-ok="${esc(l.id)}" data-st="${esc(l.status)}" type="button">לאשר כחוק</button><button class="btn" data-no="${esc(l.id)}" type="button">לדחות</button></div>` : ""}</div>`;
     pad(`<div class="h1"><h1>למידה</h1><span>${open.length} ממתינים</span></div>
       <p class="lead">הערות שחזרו על עצמן. רק האישור שלך הופך אותן לחוק.</p>
       <div class="list">${open.map(l => row(l, true)).join("") || '<div class="empty">אין הצעות שממתינות לך</div>'}</div>
@@ -153,15 +238,16 @@
     screen.querySelectorAll("[data-ok]").forEach(b => b.addEventListener("click", async () => {
       try {
         let r = await post(`/api/lesson/${b.dataset.ok}/approve`, {one_note: b.dataset.st === "candidate"});
-        if (!r.ok && /yes-no-conflict/.test(r.err) && confirm("יש חוקים שאולי סותרים:\n" + r.out + "\nלאשר בכל זאת?"))
+        if (!r.ok && /yes-no-conflict/.test(r.err) && await ask("יש חוקים שאולי סותרים:\n" + r.out + "\nלאשר בכל זאת?"))
           r = await post(`/api/lesson/${b.dataset.ok}/approve`, {one_note: b.dataset.st === "candidate", yes_no_conflict: true});
         if (!r.ok) throw new Error(r.err || r.out);
-        toast("אושר כחוק"); await load(); learning();
+        toast(saved(r) || "אושר כחוק"); await load(); learning();
       } catch (e) { toast("לא אושר: " + e.message); }
     }));
     screen.querySelectorAll("[data-no]").forEach(b => b.addEventListener("click", async () => {
-      const reason = prompt("למה לדחות? (לא חובה)") || "";
-      try { const r = await post(`/api/lesson/${b.dataset.no}/reject`, {reason}); if (!r.ok) throw new Error(r.err); toast("נדחה"); await load(); learning(); }
+      const reason = await ask("למה לדחות? (לא חובה)", "");
+      if (reason == null) return;
+      try { const r = await post(`/api/lesson/${b.dataset.no}/reject`, {reason}); if (!r.ok) throw new Error(r.err); toast(saved(r) || "נדחה"); await load(); learning(); }
       catch (e) { toast("לא נדחה: " + e.message); }
     }));
   }
@@ -204,7 +290,7 @@
     const media = o => step === "frames" ? (o.still ? r.media + o.still : null) : step === "motion" ? (o.clip ? r.media + o.clip : null) : null;
     screen.innerHTML = `<div class="three">
       <div class="col"><h5>ביטים</h5>${beats.map(b => { const p = sec[String(b.n)] || {};
-        return `<button class="beat${+b.n === n ? " now" : p.picked || p.own ? " done" : ""}" data-n="${b.n}" type="button"><span class="n">${b.n}</span><span>${esc((b.script || "").slice(0, 34))}</span><small>${p.picked ? esc(p.picked) : p.more ? "עוד רעיונות" : ""}</small></button>`; }).join("")}</div>
+        return `<button class="beat${+b.n === n ? " now" : p.picked || p.own ? " done" : ""}" data-n="${b.n}" type="button"><span class="n">${b.n}</span><span>${esc((b.script || "").slice(0, 34))}</span><small>${p.picked ? esc(p.picked) : p.more ? "עוד רעיונות" : ""}${p.queued ? ' <span class="queued">ממתין</span>' : ""}</small></button>`; }).join("")}</div>
       <div class="center">
         <div class="steps">${Object.keys(STEP).map(s => `<a class="chip${s === step ? " is-on" : ""}" href="#/project/${encodeURIComponent(pid)}/${s}/${n}">${STEP[s]}</a>`).join("")}</div>
         ${r.problems.length ? `<div class="probs">${r.problems.map(esc).join("<br>")}</div>` : ""}
@@ -220,22 +306,22 @@
           : `<div class="empty">עוד אין אפשרויות לשלב הזה בביט הזה</div>`}
         <div class="morebar"><button class="btn${pick.more ? " pri" : ""}" id="more" type="button">עוד רעיונות</button>
           <input class="note-in" id="note" placeholder="הערה לביט (לא חובה)" value="${esc((r.picks.notes || {})[String(n)] || "")}" style="flex:1;min-width:200px">
-          <span class="hint">אחרי הבחירות, כתבו ל־Claude "בחרתי"</span></div>
+          <span class="hint">${ART ? "כל בחירה נשמרת כאן. כשסיימתם, כתבו ל־Claude \"בחרתי\"" : "אחרי הבחירות, כתבו ל־Claude \"בחרתי\""}</span></div>
       </div>
       <div class="col"><div class="ins">
         <section><h6>פרויקט</h6><div class="big">${esc(r.entry.title)}</div><dl><dt>סגנון</dt><dd>${esc(r.entry.style)}</dd><dt>לקוח</dt><dd>${esc(r.entry.client || "-")}</dd><dt>שלב</dt><dd>${esc(r.entry.stage)}</dd></dl></section>
         ${r.spend.length ? `<section><h6>הוצאות מאושרות</h6>${r.spend.map(b => `<p>${esc(b.id)} · ${esc(b.status)} · ${(+b.spent || 0).toFixed(2)} / ${(+b.total || 0).toFixed(2)} ${esc(b.currency)}</p>`).join("")}</section>` : ""}
       </div></div></div>`;
-    screen.querySelectorAll("[data-n]").forEach(b => b.addEventListener("click", () => location.hash = `#/project/${encodeURIComponent(pid)}/${step}/${b.dataset.n}`));
+    screen.querySelectorAll("[data-n]").forEach(b => b.addEventListener("click", () => go(`#/project/${encodeURIComponent(pid)}/${step}/${b.dataset.n}`)));
     const save = async body => {
-      try { await post(`/api/project/${encodeURIComponent(pid)}/pick`, Object.assign({step, beat: n}, body)); toast("נשמר"); room(pid, step, n); }
+      try { const res = await post(`/api/project/${encodeURIComponent(pid)}/pick`, Object.assign({step, beat: n}, body)); toast(saved(res) || "נשמר"); room(pid, step, n); }
       catch (e) { toast("לא נשמר: " + e.message); }
     };
     screen.querySelectorAll("[data-pick]").forEach(b => b.addEventListener("click", () => save({id: b.dataset.pick, note: $("#note").value})));
     $("#more").addEventListener("click", () => save({more: !pick.more, id: pick.picked || null, note: $("#note").value}));
     $("#note").addEventListener("change", e => save({note: e.target.value, id: pick.picked || null, more: !!pick.more}));
     screen.querySelectorAll("[data-mode]").forEach(b => b.addEventListener("click", async () => {
-      try { await post(`/api/project/${encodeURIComponent(pid)}/motion-mode`, {mode: b.dataset.mode}); toast("נשמר"); room(pid, step, n); }
+      try { const res = await post(`/api/project/${encodeURIComponent(pid)}/motion-mode`, {mode: b.dataset.mode}); toast(saved(res) || "נשמר"); room(pid, step, n); }
       catch (e) { toast("לא נשמר: " + e.message); }
     }));
     document.onkeydown = e => {
@@ -243,15 +329,15 @@
       const i = "123".indexOf(e.key);
       if (i >= 0 && opts[i]) save({id: opts[i].id});
       const idx = beats.findIndex(b => +b.n === n);
-      if (e.key === "ArrowDown" && beats[idx + 1]) location.hash = `#/project/${encodeURIComponent(pid)}/${step}/${beats[idx + 1].n}`;
-      if (e.key === "ArrowUp" && beats[idx - 1]) location.hash = `#/project/${encodeURIComponent(pid)}/${step}/${beats[idx - 1].n}`;
+      if (e.key === "ArrowDown" && beats[idx + 1]) go(`#/project/${encodeURIComponent(pid)}/${step}/${beats[idx + 1].n}`);
+      if (e.key === "ArrowUp" && beats[idx - 1]) go(`#/project/${encodeURIComponent(pid)}/${step}/${beats[idx - 1].n}`);
     };
   }
 
   // ------------------------------------------------------------ router
   async function route() {
     document.onkeydown = null;
-    const p = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+    const p = (ART ? cur : location.hash).replace(/^#\/?/, "").split("/").map(decodeURIComponent);
     if (!data) { try { await load(); } catch (e) { return pad(`<div class="empty">אין חיבור לסטודיו: ${esc(e.message)}</div>`); } }
     if (p[0] === "style") return styleOne(p[1]);
     if (p[0] === "clients") return clients();
@@ -262,7 +348,11 @@
     if (p[0] === "project") return room(p[1], STEP[p[2]] ? p[2] : "plan", p[3]);
     return styles();
   }
-  document.querySelectorAll("#nav .ni").forEach(b => b.addEventListener("click", () => location.hash = "#/" + b.dataset.go));
+  document.querySelectorAll("#nav .ni").forEach(b => b.addEventListener("click", () => go("#/" + b.dataset.go)));
+  document.addEventListener("click", e => {
+    const a = ART && e.target.closest && e.target.closest('a[href^="#/"]');
+    if (a) { e.preventDefault(); go(a.getAttribute("href")); }
+  });
   $("#reload").addEventListener("click", async () => { data = null; await route(); toast("רוענן"); });
   const root = document.documentElement;
   try { const t = localStorage.getItem("style-lab:theme"); if (t) root.dataset.theme = t; } catch (e) {}

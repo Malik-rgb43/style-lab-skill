@@ -91,12 +91,8 @@ def test_update_backs_up_and_keeps_private(paths, capsys):
     for p, b in private_before.items():
         assert (target / p).read_bytes() == b
         assert (bak / p).read_bytes() == b
-    live = (target / "SKILL.md").read_bytes().decode("utf-8").replace("
-", "
-")
-    repo = (REPO_ROOT / "SKILL.md").read_bytes().decode("utf-8").replace("
-", "
-")
+    live = (target / "SKILL.md").read_bytes().decode("utf-8").replace("\r\n", "\n")
+    repo = (REPO_ROOT / "SKILL.md").read_bytes().decode("utf-8").replace("\r\n", "\n")
     assert live.startswith(repo.rstrip("\n"))
     assert live.count(install.PRIVATE_HEADING) == 1
     assert live.endswith(OLD_PRIVATE)
@@ -114,9 +110,7 @@ def test_second_install_no_duplicate_section(paths, eol):
     assert run(target, archive) == 0
     live = (target / "SKILL.md").read_bytes()
     assert live == first
-    text = live.decode("utf-8").replace("
-", "
-")     # the file keeps the repo's own endings
+    text = live.decode("utf-8").replace("\r\n", "\n")     # the file keeps the repo's own endings
     assert text.count(install.PRIVATE_HEADING) == 1
     assert text.endswith(OLD_PRIVATE)
 
@@ -200,9 +194,7 @@ def test_hebrew_target_path(tmp_path):
     archive = tmp_path / "ארכיון"
     make_live(target)
     assert run(target, archive) == 0
-    assert (target / "SKILL.md").read_bytes().decode("utf-8").replace("
-", "
-").endswith(OLD_PRIVATE)
+    assert (target / "SKILL.md").read_bytes().decode("utf-8").replace("\r\n", "\n").endswith(OLD_PRIVATE)
     assert len(archive_dirs(archive)) == 1
     assert (target / ".install.json").is_file()
 

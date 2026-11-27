@@ -166,8 +166,10 @@ yours and are never logged to taste.
    pick is yours.
 
 ### Picks
-The Studio (`studio.py`, `references/studio.md`) is the main way to pick when it runs; start it in the
-background at the first pick step and give the owner its link. "בחרתי" in the Studio or on a page → `picks.py sync <project>` (logs the owner's picks to taste once,
+The Studio (`references/studio.md`) is the main way to pick: at the first pick step publish it as an
+artifact (`studio_artifact.py build`, the Artifact tool) or, without artifacts, start `studio.py` in the
+background, and give the owner its link. "בחרתי" in the artifact → read its `actions` rows into a folder and
+`studio_artifact.py apply <folder>`; then, as for the local Studio or a page → `picks.py sync <project>` (logs the owner's picks to taste once,
 counts idea picks), then act on its "עוד רעיונות" and own-design lists. A pasted copy text →
 `pickpage.py import <project> --text-file <txt>`. A pick in chat → `picks.py pick <project> --step
 plan|frames|motion --beat N --id <id>`. `picks.py validate` refuses a frames pick before the plan

@@ -208,6 +208,26 @@ def style_rename(slug, body):
     return _cli("styles.py", "set", slug, f"name={name}")
 
 
+ROUTES = [
+    (r"/api/project/([^/]+)/pick", lambda m, b: write_pick(m.group(1), b)),
+    (r"/api/project/([^/]+)/motion-mode", lambda m, b: write_motion_mode(m.group(1), b)),
+    (r"/api/lesson/([^/]+)/(approve|reject)", lambda m, b: lesson_action(m.group(1), m.group(2), b)),
+    (r"/api/idea/([^/]+)/remove", lambda m, b: idea_remove(m.group(1))),
+    (r"/api/style/([^/]+)/rename", lambda m, b: style_rename(m.group(1), b)),
+]
+
+
+def dispatch(path, body):
+    """Run one owner action (the local server's POST, or a row the Studio artifact saved). Only ROUTES run."""
+    if not isinstance(body, dict):
+        raise Refused(400, "a JSON object")
+    for pat, fn in ROUTES:
+        m = re.fullmatch(pat, path or "")
+        if m:
+            return fn(m, body)
+    raise Refused(404, "not found")
+
+
 # ---------------------------------------------------------------- files
 
 def _inside(p, root):
@@ -330,19 +350,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}") if n else {}
             if not isinstance(body, dict):
                 raise Refused(400, "a JSON object")
-            path = urllib.parse.unquote(u.path)
-            routes = [
-                (r"/api/project/([^/]+)/pick", lambda m: write_pick(m.group(1), body)),
-                (r"/api/project/([^/]+)/motion-mode", lambda m: write_motion_mode(m.group(1), body)),
-                (r"/api/lesson/([^/]+)/(approve|reject)", lambda m: lesson_action(m.group(1), m.group(2), body)),
-                (r"/api/idea/([^/]+)/remove", lambda m: idea_remove(m.group(1))),
-                (r"/api/style/([^/]+)/rename", lambda m: style_rename(m.group(1), body)),
-            ]
-            for pat, fn in routes:
-                m = re.fullmatch(pat, path)
-                if m:
-                    return self._json(200, fn(m))
-            raise Refused(404, "not found")
+            return self._json(200, dispatch(urllib.parse.unquote(u.path), body))
         except Refused as e:
             self._json(e.code, {"error": str(e)})
         except ValueError as e:
@@ -388,10 +396,11 @@ def main(argv=None):
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--print-url", action="store_true", help="print the URL and keep serving (no browser)")
+    ap.add_argument("--token", help="a fixed token instead of a random one (for a preview pane)")
     a = ap.parse_args(argv)
     store.print_utf8()
     try:
-        srv, url = make_server(a.port)
+        srv, url = make_server(a.port, a.token)
     except OSError as e:
         print(f"error: cannot start the Studio: {e}", file=sys.stderr)
         return 2

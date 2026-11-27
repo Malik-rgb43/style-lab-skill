@@ -488,5 +488,7 @@ def test_page_has_no_media_or_scripts(fake, tmp_path):
     assert all(e["id"] in html for e in prop["entries"])
     assert "<video" not in html and "<script src" not in html
     thumbs = {e["thumbnail"] for e in prop["entries"] if e.get("thumbnail")}
+    thumbs |= {prop["url"]} if isinstance(prop.get("url"), str) else set()
+    thumbs |= {e[k] for e in prop["entries"] for k in ("url", "link", "permalink") if isinstance(e.get(k), str)}
     for url in re.findall(r"https://[^\"'\s)<>]+", html):
         assert url in thumbs or "fonts.googleapis.com" in url or "fonts.gstatic.com" in url

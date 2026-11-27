@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import threading
 import urllib.error
 import urllib.request
@@ -80,6 +81,38 @@ def test_project_room_and_files(srv):
     assert req(f"{srv['base']}/files/project/{srv['pid']}/frames/a.png")[0] == 200
     assert req(f"{srv['base']}/files/project/{srv['pid']}/refs/V01.png")[0] == 403
     assert req(f"{srv['base']}/files/project/{srv['pid']}/../../x")[0] in (403, 404)
+
+
+def test_artifact_build_and_apply(srv, tmp_path):
+    import studio_artifact as sa
+    frames = {"beats": {"1": {"sets": [{"variants": [{"id": "F1a", "still": "frames/a.png"},
+                                                       {"id": "F1b", "still": "refs/V01.png"}]}]}}}
+    store.write_json(srv["dir"] / "frames.json", frames)
+    out = tmp_path / "site"
+    m = sa.build(out)
+    pub = set(m["files"])
+    assert m["capabilities"] == {"db": {}} and Path(m["file_path"]).is_file()
+    assert "data/overview.json" in pub and not any("refs" in p for p in pub)
+    room_file = next(p for p in pub if p.startswith("data/project-"))
+    room = json.loads((out / room_file).read_text(encoding="utf-8"))
+    v = room["frames"]["beats"]["1"]["sets"][0]["variants"]
+    assert (out / (room["media"] + v[0]["still"])).is_file() and v[1]["still"] is None
+    assert "path" not in room["entry"]
+    page = Path(m["file_path"]).read_text(encoding="utf-8")
+    assert "window.STUDIO_ARTIFACT" in page and "<html" not in page and "/static/app.js" not in page
+
+    rows = tmp_path / "rows" / "actions"
+    rows.mkdir(parents=True)
+    ok = {"route": f"/api/project/{srv['pid']}/pick", "body": {"step": "plan", "beat": 2, "id": "B02-p1"},
+          "at": "2099-01-01T00:00:00.000Z"}
+    (rows / "r1.json").write_text(json.dumps(ok), encoding="utf-8")
+    (rows / "r2.json").write_text(json.dumps({"route": "/api/evil", "body": {}, "at": "2099-01-02"}), encoding="utf-8")
+    r = sa.apply(tmp_path / "rows")
+    assert r["applied"] == 1 and r["failed"] == 1
+    assert picks.load(srv["dir"])["plan"]["2"]["picked"] == "B02-p1"
+    r2 = sa.apply(tmp_path / "rows")
+    assert r2["applied"] == 0 and r2["failed"] == 1          # r1 skipped, the bad row still reported
+    assert run_cli("studio_artifact.py", "set-url", "https://example.com/x").returncode == 2
 
 
 def test_motion_mode(srv):

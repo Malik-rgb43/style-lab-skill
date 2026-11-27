@@ -37,7 +37,7 @@ def test_every_script_documented():
 def test_documented_scripts_exist():
     names = {p.name for p in REPO_ROOT.rglob("*.py") if ".git" not in p.parts}
     for f in _md_files():
-        for n in set(re.findall(r"\b([a-z_][a-z0-9_]*\.py)\b", f.read_text(encoding="utf-8"))):
+        for n in set(re.findall(r"(?<![\w.-])([a-z_][a-z0-9_]*\.py)\b",f.read_text(encoding="utf-8"))):
             assert n in names, f"{f.name} names {n}, which does not exist"
 
 

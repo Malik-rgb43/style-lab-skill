@@ -103,7 +103,7 @@ duration from distance and weight, lead + uneven reactions, and tweens that touc
 properties they animate (pitfalls §1).
 
 ## 3D (optional)
-Blender in background mode (`blender -b -P script.py -- ...`) renders hero objects as
+Blender in background mode (`blender -b -P <your-script>.py -- ...`) renders hero objects as
 transparent PNG sequences: small renders (512-768 px, 12-24 frames, low samples + denoiser),
 real materials, studio HDRI, contact shadow. If several jobs share one machine, run one at a
 time (a lock folder created with `mkdir` works on every OS). Use 3D only when the object is
