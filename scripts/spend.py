@@ -22,12 +22,20 @@ Flow:
   record <project> ... logs the paid call, adds the cost; past the total the batch becomes `over`
                        (the line is still logged: the money is gone) and the exit is 1
 
-Exit codes: 0 ok, 1 a check failed or the gate refused, 2 bad input.
+Exit codes: 0 ok, 1 a check failed or the gate refused, 2 bad input (also a bad item: no units,
+units that are not a positive number, ...: such an item is BLOCKED, never free).
+
+What this gate is, and is not: it protects against mistakes and against agents that forget the
+rule. `approve` needs the owner's own words and the total the owner saw; `next` releases only an
+item that still matches what was estimated and approved (model, units, price, prompt); a batch ID
+is never reused. It can NOT fully stop a determined local edit: anyone who can write spend.json
+or queue.json by hand can fake an approval. Treat the files as an audit trail, not as a lock.
 """
 import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -48,6 +56,10 @@ class BadInput(Exception):
     """Exit 2."""
 
 
+class BadItem(Exception):
+    """An item that cannot be priced safely (no/invalid units ...). Blocked, never free (exit 2)."""
+
+
 class MissingPrice(Exception):
     """One or more price keys are not listed."""
 
@@ -59,9 +71,10 @@ class MissingPrice(Exception):
 class NotReleased(Exception):
     """The gate refused to release an item (exit 1)."""
 
-    def __init__(self, item_id, reason):
+    def __init__(self, item_id, reason, bad_item=False):
         self.item_id = item_id
         self.reason = reason
+        self.bad_item = bad_item
         super().__init__(f"{item_id}: {reason}")
 
 
@@ -115,21 +128,52 @@ def _item_key(item) -> str:
     return price_key(item.get("tool"), item.get("model"), item.get("unit"))
 
 
-def item_cost(item, prices) -> float:
-    """units x listed price; raises KeyError(price key) when the price is not listed."""
+def _units(item) -> float:
+    """The item's units as a positive finite number, else BadItem."""
+    u = item.get("units")
+    if isinstance(u, bool) or not isinstance(u, (int, float)) or not math.isfinite(u) or u <= 0:
+        raise BadItem(f"bad_item: {item.get('id')} has units {u!r} (must be a positive number)")
+    return float(u)
+
+
+def _unit_cost(item, prices) -> float:
     key = _item_key(item)
     if key not in prices:
         raise KeyError(key)
-    return round(float(item.get("units") or 0) * float(prices[key]["cost"]), 6)
+    c = prices[key].get("cost")
+    if isinstance(c, bool) or not isinstance(c, (int, float)) or not math.isfinite(c) or c < 0:
+        raise BadItem(f"bad_item: price {key} is not a number >= 0")
+    return float(c)
+
+
+def item_cost(item, prices) -> float:
+    """units x listed price. KeyError(price key) when the price is not listed; BadItem when the
+    units are missing, zero, negative or not a number (never treated as free)."""
+    uc = _unit_cost(item, prices)
+    return round(_units(item) * uc, 6)
+
+
+def _prompt_hash(item) -> str:
+    raw = json.dumps([item.get("prompt"), item.get("negative")], ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _snap(item, prices) -> dict:
+    return {"key": _item_key(item), "model": item.get("model"), "units": _units(item),
+            "unit_cost": _unit_cost(item, prices), "cost": item_cost(item, prices),
+            "prompt_hash": _prompt_hash(item)}
 
 
 def _currency(item, prices) -> str:
     return prices[_item_key(item)].get("currency") or ""
 
 
+_INVISIBLE = {"ㅤ", "ᅟ", "ᅠ", "⠀", "ﾠ"}
+
+
 def _blank(s) -> bool:
     """True for empty text, whitespace, and invisible marks (RTL/LRM, zero-width, NBSP)."""
-    return all(c.isspace() or unicodedata.category(c) == "Cf" for c in (s or ""))
+    return all(c.isspace() or c in _INVISIBLE or unicodedata.category(c) in ("Cf", "M") for c in (s or ""))
 
 
 # ---------------------------------------------------------------- price commands
@@ -221,8 +265,8 @@ def add(d, tool, model, units, unit, kind, what) -> dict:
         units = float(units)
     except (TypeError, ValueError):
         raise BadInput("units must be a number")
-    if units < 0:
-        raise BadInput("units must be 0 or more")
+    if not math.isfinite(units) or units <= 0:
+        raise BadInput("units must be a positive number")
     holder = {}
 
     def fn(q):
@@ -281,9 +325,11 @@ def estimate(d, retry_allowance=1, warnings=None) -> list:
             by_id = _by_id(items)
             sp.setdefault("version", 1)
             batches = sp.setdefault("batches", [])
-            # an older draft is replaced by this estimate; approved/over/closed batches stay
-            batches[:] = [b for b in batches if b.get("status") != "draft"]
-            todo, missing = {}, []
+            # an older draft is superseded by this estimate (kept, with its ID: IDs are never reused)
+            for b in batches:
+                if b.get("status") == "draft":
+                    b["status"] = "superseded"
+            todo, missing, bad = {}, [], []
             for it in items:
                 if it.get("status") not in ("queued", "needs_batch"):
                     continue
@@ -296,24 +342,30 @@ def estimate(d, retry_allowance=1, warnings=None) -> list:
                 except KeyError as e:
                     missing.append(e.args[0])
                     continue
+                except BadItem as e:
+                    bad.append(str(e))
+                    continue
                 if cost <= 0:
-                    continue  # free
+                    continue  # free: price explicitly 0 and units a positive number
                 todo.setdefault(_currency(it, prices), []).append((it, cost))
+            if bad:
+                raise BadItem("; ".join(bad))
             if missing:
                 raise MissingPrice(missing)
-            n = max([int(b["id"][1:]) for b in batches if re.fullmatch(r"S\d+", str(b.get("id")))] + [0])
+            n = max([int(b["id"][1:]) for b in batches if re.fullmatch(r"S\d+", str(b.get("id")))] + [0])  # never reuse
             for cur in sorted(todo):
                 n += 1
                 bid = f"S{n:02d}"
                 base = round(sum(c for _, c in todo[cur]), 6)
                 rt = round(base * retry_allowance, 6)
-                used = {}
+                used, snap = {}, {}
                 for it, _ in todo[cur]:
                     used[_item_key(it)] = prices[_item_key(it)]["cost"]
+                    snap[it["id"]] = _snap(it, prices)
                     it["batch"] = bid
                 batch = {"id": bid, "items": [it["id"] for it, _ in todo[cur]], "base_total": base,
                          "retry_allowance": retry_allowance, "retry_total": rt, "total": round(base + rt, 6),
-                         "currency": cur, "prices_used": used, "status": "draft", "created": _now(),
+                         "currency": cur, "prices_used": used, "snapshot": snap, "status": "draft", "created": _now(),
                          "approved_at": None, "owner_words": None, "spent": 0.0, "retries_used": 0}
                 batches.append(batch)
                 out.append(batch)
@@ -331,14 +383,31 @@ def estimate(d, retry_allowance=1, warnings=None) -> list:
 
 # ---------------------------------------------------------------- approve
 
-def approve(d, batch_ids, owner_words) -> None:
-    """Mark draft batches approved with the owner's own words; their items become `approved`."""
+def _totals(total, n):
+    if total is None or (isinstance(total, str) and not total.strip()):
+        raise BadInput("--total is required: the total the owner saw (one per batch, comma separated)")
+    parts = total if isinstance(total, (list, tuple)) else str(total).split(",")
+    try:
+        vals = [float(x) for x in parts]
+    except (TypeError, ValueError):
+        raise BadInput("--total must be a number (one per batch, comma separated)")
+    if len(vals) == 1 and n > 1:
+        vals = vals * n  # one number can only match when every batch has that total
+    if len(vals) != n:
+        raise BadInput(f"--total needs {n} value(s), one per batch")
+    return vals
+
+
+def approve(d, batch_ids, owner_words, total=None) -> None:
+    """Mark draft batches approved with the owner's own words and the total the owner saw
+    (must equal the batch total to the cent); their items become `approved`."""
     if _blank(owner_words):
         raise BadInput("owner words are required: paste the owner's own message that says yes")
     owner_words = owner_words.strip()
     ids = list(dict.fromkeys(batch_ids))
     if not ids:
         raise BadInput("no batch given")
+    seen_totals = _totals(total, len(ids))
 
     def on_spend(sp):
         batches = {b["id"]: b for b in sp.get("batches", [])}
@@ -347,6 +416,10 @@ def approve(d, batch_ids, owner_words) -> None:
                 raise BadInput(f"no such batch: {i}")
             if batches[i].get("status") != "draft":
                 raise BadInput(f"batch {i} is {batches[i].get('status')}, not a draft: run estimate again")
+        for i, t in zip(ids, seen_totals):
+            if round(t, 2) != round(batches[i]["total"], 2):
+                raise BadInput(f"total {t:.2f} is not the total of batch {i} ({batches[i]['total']:.2f}): "
+                               "show the owner the current estimate")
 
         def on_queue(q):
             for i in ids:
@@ -372,39 +445,64 @@ def _inflight_cost(items, batch, by_id, batches, prices) -> float:
         if it.get("status") == "in_flight" and _batch_for(it, by_id, batches) is batch:
             try:
                 total += item_cost(it, prices)
-            except KeyError:
-                pass
+            except (KeyError, BadItem):
+                total += float(batch.get("snapshot", {}).get(it["id"], {}).get("cost", 0) or 0)
     return total
 
 
+def _snapshot_for(it, by_id, batch):
+    """The estimate-time snapshot that covers this item (its own, or its nearest ancestor's)."""
+    snaps = batch.get("snapshot") or {}
+    seen = set()
+    cur = it
+    while cur is not None and cur["id"] not in seen:
+        seen.add(cur["id"])
+        if cur["id"] in snaps:
+            return cur["id"], snaps[cur["id"]]
+        cur = by_id.get(cur.get("retry_of"))
+    return None, None
+
+
 def _check_release(it, items, by_id, batches, prices):
-    """Return (ok, batch_or_None, how). The only place that decides a release."""
+    """Return (ok, batch_or_None, how, bad_item). The only place that decides a release."""
     try:
         cost = item_cost(it, prices)
     except KeyError as e:
-        return False, None, f"price not listed: {e.args[0]}"
-    if cost <= 0:
-        return True, None, "free"
+        return False, None, f"price not listed: {e.args[0]}", False
+    except BadItem as e:
+        return False, None, str(e), True
     batch = _batch_for(it, by_id, batches)
     if batch is None:
-        return False, None, "not in any batch: estimate and get the owner's yes"
+        if cost <= 0:
+            return True, None, "free", False  # price explicitly 0 and units a positive number
+        return False, None, "not in any batch: estimate and get the owner's yes", False
     if batch.get("status") != "approved" or _blank(batch.get("owner_words")) or not batch.get("approved_at"):
-        return False, batch, f"batch {batch['id']} is {batch.get('status')}, not approved"
+        return False, batch, f"batch {batch['id']} is {batch.get('status')}, not approved", False
+    # what is released must be what the owner approved: compare with the estimate-time snapshot
+    sid, snap = _snapshot_for(it, by_id, batch)
+    if snap is None:
+        return False, batch, f"batch {batch['id']} has no estimate snapshot for this item", False
+    live = _snap(it, prices)
+    for k in ("key", "model", "units", "unit_cost", "cost") + (("prompt_hash",) if sid == it["id"] else ()):
+        if live[k] != snap.get(k):
+            return False, batch, (f"{k} changed since the estimate (was {snap.get(k)!r}, now {live[k]!r}): "
+                                  "new estimate and a new yes"), False
     if _currency(it, prices) != batch.get("currency"):
-        return False, batch, f"currency differs from batch {batch['id']}"
+        return False, batch, f"currency differs from batch {batch['id']}", False
     room = batch["total"] - batch.get("spent", 0.0) - _inflight_cost(items, batch, by_id, batches, prices)
     if cost > room + EPS:
-        return False, batch, f"batch {batch['id']} has {room:.2f} {batch['currency']} left, this needs {cost:.2f}"
+        return False, batch, f"batch {batch['id']} has {room:.2f} {batch['currency']} left, this needs {cost:.2f}", False
+    if it["id"] in batch["items"]:  # an estimated item (a re-estimated retry counts as one too)
+        if it.get("status") != "approved":
+            return False, batch, f"item is {it.get('status')}, not approved", False
+        return True, batch, "approved", False
     if it.get("retry_of"):
         cap = len(batch["items"]) * batch.get("retry_allowance", 0)
         if batch.get("retries_used", 0) >= cap:
-            return False, batch, f"retry allowance of batch {batch['id']} is used ({cap}): new estimate and a new yes"
-        return True, batch, "retry"
-    if it.get("status") != "approved":
-        return False, batch, f"item is {it.get('status')}, not approved"
-    if it["id"] not in batch["items"]:
-        return False, batch, f"item is not in batch {batch['id']}"
-    return True, batch, "approved"
+            return False, batch, (f"retry allowance of batch {batch['id']} is used ({cap}): "
+                                  "new estimate and a new yes"), False
+        return True, batch, "retry", False
+    return False, batch, f"item is not in batch {batch['id']}", False
 
 
 def next_item(d):
@@ -425,11 +523,11 @@ def next_item(d):
             for it in items:
                 if it.get("status") not in ("queued", "approved", "needs_batch"):
                     continue
-                ok, batch, how = _check_release(it, items, by_id, batches, prices)
+                ok, batch, how, bad = _check_release(it, items, by_id, batches, prices)
                 if ok and how == "approved" and it["status"] != "approved":
                     ok, how = False, f"item is {it['status']}, not approved"
                 if not ok:
-                    blocked.append((it, how))
+                    blocked.append((it, how, bad))
                     continue
                 if how == "retry":
                     batch["retries_used"] = batch.get("retries_used", 0) + 1
@@ -439,10 +537,10 @@ def next_item(d):
                 res["item"] = dict(it)
                 break
             if "item" not in res:
-                for it, _ in blocked:
+                for it, _, _ in blocked:
                     it["status"] = "needs_batch"
                 if blocked:
-                    res["refused"] = (blocked[0][0]["id"], blocked[0][1])
+                    res["refused"] = (blocked[0][0]["id"], blocked[0][1], blocked[0][2])
 
         store.update_json(_queue_path(d), _empty_queue(), on_queue)
 
@@ -597,6 +695,8 @@ def _build_parser():
     ap_.add_argument("project")
     ap_.add_argument("--batch", required=True, help="S01 or S01,S02")
     ap_.add_argument("--owner-words", required=True, help="the owner's own message")
+    ap_.add_argument("--total", default=None,
+                     help="the total the owner saw, per batch, comma separated (must equal the estimate)")
     n_ = sub.add_parser("next", help="release the next item")
     n_.add_argument("project")
     rc = sub.add_parser("record", help="log a paid call")
@@ -654,14 +754,14 @@ def _run(a) -> int:
         _print_estimate(d, batches, warnings)
     elif a.cmd == "approve":
         ids = [x.strip() for x in a.batch.split(",") if x.strip()]
-        approve(d, ids, a.owner_words)
+        approve(d, ids, a.owner_words, a.total)
         print("approved: " + ", ".join(ids))
     elif a.cmd == "next":
         try:
             it = next_item(d)
         except NotReleased as e:
-            print(f"needs_batch: {e.item_id}: {e.reason}", file=sys.stderr)
-            return 1
+            print(f"{'blocked' if e.bad_item else 'needs_batch'}: {e.item_id}: {e.reason}", file=sys.stderr)
+            return 2 if e.bad_item else 1
         print(json.dumps(it if it is not None else {"done": True}, ensure_ascii=False))
     elif a.cmd == "record":
         line = record(d, a.item, a.file, a.cost, a.model, _seed(a.seed), a.job_id, a.status)
@@ -690,7 +790,7 @@ def main(argv=None):
     a = _build_parser().parse_args(argv)
     try:
         return store.exit_on_lock_timeout(_run, a)
-    except BadInput as e:
+    except (BadInput, BadItem) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 

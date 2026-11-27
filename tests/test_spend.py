@@ -34,8 +34,12 @@ def _items(p):
     return {i["id"]: i for i in store.read_json(p / "gen" / "queue.json", {})["items"]}
 
 
-def _approve(p, bid="S01", words="yes, approved"):
-    return run_cli("spend.py", "approve", p, "--batch", bid, "--owner-words", words)
+def _approve(p, bid="S01", words="yes, approved", total=None):
+    """Approve with the total the owner saw (read from spend.json unless given)."""
+    if total is None:
+        bs = {b["id"]: b for b in store.read_json(p / "spend.json", {"batches": []})["batches"]}
+        total = ",".join(f"{bs[i]['total']:.2f}" for i in bid.split(",") if i in bs) or "0"
+    return run_cli("spend.py", "approve", p, "--batch", bid, "--owner-words", words, "--total", total)
 
 
 def test_estimate_needs_prices(home, tmp_path):
@@ -236,3 +240,63 @@ def test_add_and_stale_price_warning(home, tmp_path):
     assert r.returncode == 0 and "אזהרה" in r.stdout
     assert store.read_json(p / "spend.json", {})["batches"][0]["total"] == 0.6
     assert run_cli("spend.py", "status", p, "--json").returncode == 0
+
+
+# ---------------------------------------------------------------- review round 1 (fail closed)
+
+def test_bad_units_blocked_never_free(home, tmp_path):
+    _price()
+    for bad in (None, -1, 0, "x", float("nan")):
+        p = _project(tmp_path / str(bad), n=1, units=bad)
+        r = run_cli("spend.py", "estimate", p)
+        assert r.returncode == 2 and "Traceback" not in r.stderr, (bad, r.stderr)
+        r = run_cli("spend.py", "next", p)
+        assert r.returncode == 2 and "Traceback" not in r.stderr, (bad, r.stderr)
+        assert _items(p)["G001"]["status"] != "in_flight"
+
+
+def test_wrong_total_refused(home, tmp_path):
+    p = _project(tmp_path)
+    _price()
+    run_cli("spend.py", "estimate", p)
+    r = _approve(p, total="14.00")
+    assert r.returncode == 2 and "15.00" in r.stderr
+    assert store.read_json(p / "spend.json", {})["batches"][0]["status"] == "draft"
+    r = run_cli("spend.py", "approve", p, "--batch", "S01", "--owner-words", "yes")
+    assert r.returncode == 2 and "--total" in r.stderr
+
+
+def test_changed_after_approval_not_released(home, tmp_path):
+    for field, value in (("model", "other-model"), ("units", 3), ("prompt", "something else")):
+        p = _project(tmp_path / field, n=1)
+        _price()
+        _price(model="other-model")
+        run_cli("spend.py", "estimate", p)
+        assert _approve(p).returncode == 0
+        q = store.read_json(p / "gen" / "queue.json", {})
+        q["items"][0][field] = value
+        store.write_json(p / "gen" / "queue.json", q)
+        r = run_cli("spend.py", "next", p)
+        assert r.returncode == 1 and "G001" in r.stderr, (field, r.stderr)
+    # a price raised after the approval is refused too
+    p = _project(tmp_path / "price", n=1)
+    _price(2.5)
+    run_cli("spend.py", "estimate", p)
+    _approve(p)
+    _price(9.0)
+    assert run_cli("spend.py", "next", p).returncode == 1
+
+
+def test_batch_ids_never_reused(home, tmp_path):
+    p = _project(tmp_path, n=1)
+    _price()
+    run_cli("spend.py", "estimate", p)
+    first = [b["id"] for b in store.read_json(p / "spend.json", {})["batches"]]
+    run_cli("spend.py", "estimate", p)  # a new estimate for the same draft work
+    ids = [b["id"] for b in store.read_json(p / "spend.json", {})["batches"]]
+    assert len(ids) == len(set(ids))
+    assert ids == ["S01", "S02"]
+    # the old draft is superseded: approving it is refused, the new one stays a draft
+    r = _approve(p, bid=first[0], total="5.00")
+    assert r.returncode == 2 and "superseded" in r.stderr
+    assert [b["status"] for b in store.read_json(p / "spend.json", {})["batches"]] == ["superseded", "draft"]
