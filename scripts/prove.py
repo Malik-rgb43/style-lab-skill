@@ -9,7 +9,8 @@ Commands:
         pick hold-out video ids (never ones the fingerprint trained on) and record them
     prove.py holdout <pack> --predicted <dir>
         <dir>/<id>.events.json per hold-out video (written by Claude from the transcript and the laws),
-        scored against <pack>/analysis/<id>/events.json
+        scored against <pack>/analysis/<id>/events.json, or, without it, the events measured in
+        analysis/<id>/ (fingerprint.events, word triggers left out)
     prove.py recreation <pack> --moment <id>:<t0>-<t1> --build <video or motion.json> [--owner-ok]
         compare the build's moves in the window with the reference's. The script never sets owner_ok
         by itself: --owner-ok is passed only after the owner said yes.
@@ -342,6 +343,17 @@ def _events(data):
     return data if isinstance(data, list) else []
 
 
+def measured_events(adir):
+    """The actual events of one analysis folder from its measurements (fingerprint.events, word triggers
+    left out: the prediction is made from the transcript, so words would be a free match). None without
+    measure.json."""
+    import fingerprint
+    if not (Path(adir) / "measure.json").exists():
+        return None
+    a = fingerprint.load_analysis(adir)
+    return [{"t": e["t"], "type": e["type"]} for e in fingerprint.events(a, words=False)]
+
+
 def _fp(pack):
     p = Path(pack) / "fingerprint.json"
     if not p.exists():
@@ -482,9 +494,13 @@ def cmd_holdout(a):
         af = Path(a.pack) / "analysis" / vid / "events.json"
         if not pf.exists():
             raise Bad(f"missing predicted events: {pf}")
-        if not af.exists():
-            raise Bad(f"missing actual events: {af}")
-        scores[vid] = score_placement(_events(_read(pf, "predicted events")), _events(_read(af, "actual events")))
+        if af.exists():
+            actual = _events(_read(af, "actual events"))
+        else:
+            actual = measured_events(Path(a.pack) / "analysis" / vid)
+            if actual is None:
+                raise Bad(f"missing actual events: no {af.name} and no measure.json in analysis/{vid}")
+        scores[vid] = score_placement(_events(_read(pf, "predicted events")), actual)
     pooled = pool_scores(list(scores.values()))
     extra, not_run = _creator_scores(a.pack, ids, pdir)
     thr, src = _timing_threshold(a.pack)

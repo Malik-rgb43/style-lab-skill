@@ -457,3 +457,21 @@ def test_creator_scores_malformed_and_skipped_ids(tmp_path):
     assert "creator_scores:a:no_creator_json" in not_run and "creator_scores:d:no_prediction" in not_run
     (pred / "c.structure.json").write_text("{broken", encoding="utf-8")
     assert "creator_scores:c:bad_input" in prove._creator_scores(pack, ["c"], pred)[1]
+
+
+def test_holdout_actual_events_from_measurements(tmp_path):
+    """Without analysis/<id>/events.json the actual events come from measure.json (cuts here)."""
+    pack = make_pack(tmp_path)
+    (pack / "analysis" / "c" / "events.json").unlink()
+    wj(pack / "analysis" / "c" / "measure.json", {"schema": "measure/1", "video": {"sha256": "0" * 64,
+       "duration_s": 10.0}, "cuts": [{"t": 1.0}, {"t": 3.0}], "shots": [], "not_run": []})
+    ev = prove.measured_events(pack / "analysis" / "c")
+    assert [e["type"] for e in ev].count("cut") == 2
+    assert prove.measured_events(pack / "analysis" / "zz") is None
+    run_cli("prove.py", "holdout-pick", pack, "--ids", "c")
+    pred = tmp_path / "pred"
+    wj(pred / "c.events.json", [{"t": 1.0, "type": "cut"}, {"t": 3.0, "type": "cut"}])
+    r = run_cli("prove.py", "holdout", pack, "--predicted", pred)
+    assert r.returncode in (0, 1) and "Traceback" not in r.stderr, r.stderr
+    h = json.loads((pack / "proof.json").read_text(encoding="utf-8"))["holdout"]
+    assert h["scores"]["per_video"]["c"]["tp"] == 2
